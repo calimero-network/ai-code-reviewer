@@ -1,0 +1,167 @@
+name: Documentation Bot
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths:
+      - 'src/**'
+      - 'config.example.yaml'
+      - 'pyproject.toml'
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  doc-check:
+    name: Check Documentation Sync
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        run: |
+          pip install -e ".[dev]"
+      
+      - name: Get changed files
+        id: changed-files
+        uses: tj-actions/changed-files@v44
+        with:
+          files: |
+            src/**
+            config.example.yaml
+            pyproject.toml
+      
+      - name: Analyze documentation needs
+        id: doc-analysis
+        if: steps.changed-files.outputs.any_changed == 'true'
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Create analysis prompt from changed files
+          cat > /tmp/analysis_prompt.md << 'PROMPT_EOF'
+          # Documentation Analysis Request
+          
+          ## Changed Files
+          ${{ steps.changed-files.outputs.all_changed_files }}
+          
+          ## Instructions
+          Based on the changed files, analyze if documentation updates are needed.
+          
+          Reference these documentation files:
+          - README.md
+          - DESIGN.md
+          - .ai/rules/*.md
+          - .ai/context.md
+          - config.example.yaml
+          
+          Follow the rules in .ai/doc-bot.md for analysis and output format.
+          PROMPT_EOF
+          
+          # Run the doc-check command (falls back to manual analysis if no API)
+          if [ -n "$CURSOR_API_KEY" ]; then
+            python -c "
+          import asyncio
+          import json
+          from pathlib import Path
+
+          # Read changed files
+          changed = '''${{ steps.changed-files.outputs.all_changed_files }}'''.split()
+          
+          # Analyze each changed file for documentation impact
+          suggestions = []
+          
+          for filepath in changed:
+              path = Path(filepath)
+              
+              # Check if it's a new module
+              if path.suffix == '.py' and path.parent.name in ['agents', 'orchestrator', 'github', 'models']:
+                  suggestions.append({
+                      'file': f'.cursor/rules/{path.parent.name}.md',
+                      'reason': f'New file {filepath} may need documentation in module rules',
+                      'priority': 'normal'
+                  })
+              
+              # Check if it changes config
+              if 'config' in filepath:
+                  suggestions.append({
+                      'file': 'config.example.yaml',
+                      'reason': 'Configuration changes may need example updates',
+                      'priority': 'normal'
+                  })
+                  suggestions.append({
+                      'file': 'README.md',
+                      'reason': 'Configuration changes may affect README docs',
+                      'priority': 'normal'
+                  })
+          
+          # Output suggestions
+          print('SUGGESTIONS<<EOF')
+          if suggestions:
+              print('## 📚 Documentation Check\\n')
+              print('The following documentation files may need updates based on code changes:\\n')
+              for s in suggestions:
+                  print(f\"- **{s['file']}**: {s['reason']} [{s['priority']}]\")
+              print('\\n*Please review these suggestions and update documentation if needed.*')
+          else:
+              print('✅ No documentation updates detected as needed.')
+          print('EOF')
+          "
+          else
+            echo "SUGGESTIONS<<EOF"
+            echo "⚠️ Documentation bot analysis skipped (no API key configured)."
+            echo ""
+            echo "Changed files to manually check for doc updates:"
+            echo "${{ steps.changed-files.outputs.all_changed_files }}" | tr ' ' '\n' | sed 's/^/- /'
+            echo "EOF"
+          fi >> $GITHUB_OUTPUT
+      
+      - name: Post comment on PR
+        if: steps.doc-analysis.outputs.SUGGESTIONS != ''
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const suggestions = `${{ steps.doc-analysis.outputs.SUGGESTIONS }}`;
+            
+            // Find existing bot comment
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            
+            const botComment = comments.find(c => 
+              c.user.type === 'Bot' && 
+              c.body.includes('📚 Documentation')
+            );
+            
+            const body = suggestions + '\n\n---\n<sub>🤖 Generated by Documentation Bot | [Configure](.ai/doc-bot.md)</sub>';
+            
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
