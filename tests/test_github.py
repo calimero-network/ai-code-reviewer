@@ -210,7 +210,7 @@ class TestReviewFormatter:
         )
         assert formatter.get_review_action(critical_review) == "REQUEST_CHANGES"
 
-        # Clean review should approve
+        # Clean review should approve (with allow_approve=True, the default)
         clean_review = ConsolidatedReview(
             id="review-2",
             created_at=datetime.now(),
@@ -223,3 +223,10 @@ class TestReviewFormatter:
             total_review_time_ms=2000,
         )
         assert formatter.get_review_action(clean_review) == "APPROVE"
+        assert formatter.get_review_action(clean_review, allow_approve=True) == "APPROVE"
+
+        # Clean review with allow_approve=False should COMMENT (used in GitHub Actions)
+        assert formatter.get_review_action(clean_review, allow_approve=False) == "COMMENT"
+
+        # Critical review always returns REQUEST_CHANGES regardless of allow_approve
+        assert formatter.get_review_action(critical_review, allow_approve=False) == "REQUEST_CHANGES"

@@ -154,20 +154,21 @@ class GitHubFormatter:
             f"Review ID: `{review.id}`</sub>"
         )
 
-    def get_review_action(self, review: ConsolidatedReview) -> str:
+    def get_review_action(self, review: ConsolidatedReview, allow_approve: bool = True) -> str:
         """Determine the GitHub review action based on findings.
 
         Args:
             review: Consolidated review
+            allow_approve: Whether to allow APPROVE action (False in GitHub Actions)
 
         Returns:
-            GitHub review action: "REQUEST_CHANGES" or "COMMENT"
-            Note: Never returns "APPROVE" as GitHub Actions tokens cannot approve PRs
+            GitHub review action: "APPROVE", "REQUEST_CHANGES", or "COMMENT"
         """
         if review.has_critical_issues:
             return "REQUEST_CHANGES"
+        elif not review.findings and allow_approve:
+            return "APPROVE"
         else:
-            # Always use COMMENT - APPROVE is not allowed for GitHub Actions tokens
             return "COMMENT"
 
 

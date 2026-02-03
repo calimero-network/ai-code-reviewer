@@ -3,6 +3,7 @@
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -49,6 +50,9 @@ def cli(verbose: bool) -> None:
 @click.option(
     "--agents", type=int, default=1, help="Number of agents (1-3): 1=comprehensive, 2+=specialized"
 )
+@click.option(
+    "--no-approve", is_flag=True, help="Don't use APPROVE action (auto-enabled in GitHub Actions)"
+)
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
 def review_pr(
     repo: str,
@@ -56,6 +60,7 @@ def review_pr(
     output: str,
     dry_run: bool,
     agents: int,
+    no_approve: bool,
     config_path: str | None,
 ) -> None:
     """Review a GitHub pull request using Cursor AI agent(s).
@@ -71,6 +76,7 @@ def review_pr(
             output=output,
             dry_run=dry_run,
             num_agents=agents,
+            no_approve=no_approve,
             config_path=Path(config_path) if config_path else None,
         )
     )
@@ -82,9 +88,16 @@ async def review_pr_async(
     output: str = "github",
     dry_run: bool = False,
     num_agents: int = 1,
+    no_approve: bool = False,
     config_path: Path | None = None,
 ) -> None:
     """Async implementation of PR review using Cursor Background Agent(s)."""
+    # Auto-detect GitHub Actions environment - never allow APPROVE there
+    is_github_actions = os.getenv("GITHUB_ACTIONS") == "true"
+    allow_approve = not no_approve and not is_github_actions
+
+    if is_github_actions and not no_approve:
+        console.print("[dim]ℹ️  Running in GitHub Actions - APPROVE disabled automatically[/dim]")
     config = load_config(config_path)
     errors = validate_config(config)
     if errors:
@@ -169,9 +182,9 @@ async def review_pr_async(
             pr = gh.get_pull_request(repo, pr_number)
             formatter = GitHubFormatter()
             body = formatter.format_review(review)
-            action = formatter.get_review_action(review)
+            action = formatter.get_review_action(review, allow_approve=allow_approve)
             gh.post_review(pr, review, body, action)
-            console.print("📝 Posted review to GitHub")
+            console.print(f"📝 Posted review to GitHub ({action})")
 
             # Post inline comments for each finding
             if review.findings:
