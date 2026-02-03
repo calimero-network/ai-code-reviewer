@@ -1,7 +1,7 @@
-# Dogfood: AI Code Reviewer reviews itself!
-# This workflow runs our own tool on PRs to this repository
+# Dogfood: MeroReviewer reviews itself!
+# This workflow runs our own AI code review tool on PRs to this repository
 
-name: AI Code Review (Dogfood)
+name: MeroReviewer
 
 on:
   pull_request:
@@ -71,6 +71,7 @@ jobs:
             ${{ github.repository }} \
             ${{ steps.pr.outputs.number }} \
             --agents ${{ steps.pr.outputs.agents }} \
+            --reviewer-name "MeroReviewer" \
             --output github
 
       - name: Summary

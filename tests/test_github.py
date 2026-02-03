@@ -228,5 +228,9 @@ class TestReviewFormatter:
         # Clean review with allow_approve=False should COMMENT (used in GitHub Actions)
         assert formatter.get_review_action(clean_review, allow_approve=False) == "COMMENT"
 
-        # Critical review always returns REQUEST_CHANGES regardless of allow_approve
-        assert formatter.get_review_action(critical_review, allow_approve=False) == "REQUEST_CHANGES"
+        # Critical review with allow_approve=True returns REQUEST_CHANGES
+        assert formatter.get_review_action(critical_review, allow_approve=True) == "REQUEST_CHANGES"
+
+        # Critical review with allow_approve=False returns COMMENT (GitHub Actions can't block merges)
+        # This is intentional - REQUEST_CHANGES blocks merging and Actions can't approve to unblock
+        assert formatter.get_review_action(critical_review, allow_approve=False) == "COMMENT"

@@ -1,5 +1,6 @@
 """GitHub API client for PR operations."""
 
+import contextlib
 import logging
 import re
 from dataclasses import dataclass, field
@@ -450,11 +451,22 @@ class GitHubClient:
         """
         resolved_count = 0
 
+        # Get all existing replies to avoid duplicates
+        existing_replies = self._get_resolved_comment_ids(pr)
+
         for fixed in delta.fixed_findings:
+            # Skip if we've already marked this as resolved
+            if fixed.id in existing_replies:
+                logger.debug(f"Comment {fixed.id} already has resolved reply, skipping")
+                continue
+
             try:
                 # Find the comment and reply to it
                 comment = pr.get_review_comment(fixed.id)
-                comment.create_reaction("hooray")  # 🎉 reaction
+
+                # Add reaction (may already exist, that's ok)
+                with contextlib.suppress(Exception):
+                    comment.create_reaction("hooray")  # 🎉 reaction
 
                 # Post a reply indicating it's fixed
                 pr.create_review_comment_reply(
@@ -467,3 +479,21 @@ class GitHubClient:
                 logger.warning(f"Could not resolve comment {fixed.id}: {e}")
 
         return resolved_count
+
+    def _get_resolved_comment_ids(self, pr: PullRequest) -> set[int]:
+        """Get IDs of comments that already have a 'Resolved' reply.
+
+        Args:
+            pr: Pull request object
+
+        Returns:
+            Set of comment IDs that have been marked resolved
+        """
+        resolved_ids: set[int] = set()
+
+        for comment in pr.get_review_comments():
+            # Check if this is a "Resolved" reply with a parent
+            if "✅ **Resolved**" in comment.body and comment.in_reply_to_id:
+                resolved_ids.add(comment.in_reply_to_id)
+
+        return resolved_ids
