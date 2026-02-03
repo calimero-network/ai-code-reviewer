@@ -52,11 +52,6 @@ class ReviewDelta:
         """Check if all previously found issues are now resolved."""
         return len(self.open_findings) == 0 and len(self.new_findings) == 0
 
-    @property
-    def has_changes(self) -> bool:
-        """Check if there are any changes from the previous review."""
-        return len(self.new_findings) > 0 or len(self.fixed_findings) > 0
-
 
 class GitHubClient:
     """Client for GitHub API operations."""
