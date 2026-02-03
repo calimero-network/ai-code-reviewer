@@ -8,6 +8,8 @@ on:
       - 'config.example.yaml'
       - 'pyproject.toml'
 
+# Note: pull-requests: write is needed to post review comments.
+# Content from PR (file paths only) is sanitized before use.
 permissions:
   contents: read
   pull-requests: write
@@ -18,6 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     
+    # Don't run on forks to avoid security issues with write permissions
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    
     steps:
       - name: Checkout code
         # Pinned to v4.1.7 - https://github.com/actions/checkout/releases/tag/v4.1.7
@@ -27,30 +32,50 @@ jobs:
           fetch-depth: 50
       
       - name: Fetch base branch for comparison
+        env:
+          # Pass through env var to avoid shell interpolation issues
+          BASE_REF: ${{ github.base_ref }}
         run: |
-          git fetch origin ${{ github.base_ref }} --depth=50
+          git fetch origin "$BASE_REF" --depth=50
       
       - name: Get changed files
         id: changed-files
+        env:
+          BASE_REF: ${{ github.base_ref }}
         run: |
+          set -o pipefail
+          
           # Use native git to get changed files (avoids third-party action supply chain risk)
           # Get the merge base to handle rebases correctly
-          MERGE_BASE=$(git merge-base HEAD origin/${{ github.base_ref }} 2>/dev/null || echo "origin/${{ github.base_ref }}")
+          if ! MERGE_BASE=$(git merge-base HEAD "origin/$BASE_REF" 2>&1); then
+            echo "::warning::git merge-base failed, using fallback: $MERGE_BASE"
+            # Fallback: resolve branch to commit SHA explicitly
+            if ! MERGE_BASE=$(git rev-parse "origin/$BASE_REF" 2>&1); then
+              echo "::error::Failed to resolve base ref: $MERGE_BASE"
+              exit 1
+            fi
+          fi
+          
+          echo "Using merge base: $MERGE_BASE"
           
           # Get changed files matching our patterns
-          CHANGED=$(git diff --name-only "$MERGE_BASE"...HEAD -- \
+          if ! CHANGED=$(git diff --name-only "$MERGE_BASE"...HEAD -- \
             'src/**' \
             'config.example.yaml' \
-            'pyproject.toml' \
-            2>/dev/null || echo "")
+            'pyproject.toml' 2>&1); then
+            echo "::warning::git diff failed: $CHANGED"
+            CHANGED=""
+          fi
           
           # Check if any files changed
           if [ -n "$CHANGED" ]; then
             echo "any_changed=true" >> "$GITHUB_OUTPUT"
             # Store as newline-separated for safer parsing
-            echo "CHANGED_FILES<<EOF" >> "$GITHUB_OUTPUT"
-            echo "$CHANGED" >> "$GITHUB_OUTPUT"
-            echo "EOF" >> "$GITHUB_OUTPUT"
+            {
+              echo "CHANGED_FILES<<EOF"
+              echo "$CHANGED"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
           else
             echo "any_changed=false" >> "$GITHUB_OUTPUT"
             echo "CHANGED_FILES=" >> "$GITHUB_OUTPUT"
