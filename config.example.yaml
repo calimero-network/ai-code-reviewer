@@ -11,7 +11,7 @@ version: 1
 
 cursor:
   api_key: ${CURSOR_API_KEY}
-  # base_url: https://api.cursor.com/v1  # Default, can be overridden
+  # base_url: https://api.cursor.com/v0  # Default (Background Agent API)
   timeout_seconds: 120
 
 # ============================================================================

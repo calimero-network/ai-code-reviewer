@@ -26,7 +26,7 @@ class CursorApiConfig:
     """Cursor API configuration."""
 
     api_key: str
-    base_url: str = "https://api.cursor.com/v1"
+    base_url: str = "https://api.cursor.com/v0"
     timeout_seconds: int = 120
 
 
@@ -152,7 +152,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
     cursor_raw = raw.get("cursor", {})
     cursor = CursorApiConfig(
         api_key=cursor_raw.get("api_key") or os.environ.get("CURSOR_API_KEY", ""),
-        base_url=cursor_raw.get("base_url", "https://api.cursor.com/v1"),
+        base_url=cursor_raw.get("base_url", "https://api.cursor.com/v0"),
         timeout_seconds=cursor_raw.get("timeout_seconds", 120),
     )
 
