@@ -53,24 +53,37 @@ jobs:
           
           # Use native git to get changed files (avoids third-party action supply chain risk)
           # Get the merge base to handle rebases correctly
+          USE_TWO_DOT=false
           if ! MERGE_BASE=$(git merge-base HEAD "origin/$BASE_REF" 2>&1); then
-            echo "::warning::git merge-base failed, using fallback: $MERGE_BASE"
+            echo "::warning::git merge-base failed: $MERGE_BASE"
             # Fallback: resolve branch to commit SHA explicitly
             if ! MERGE_BASE=$(git rev-parse "origin/$BASE_REF" 2>&1); then
               echo "::error::Failed to resolve base ref: $MERGE_BASE"
               exit 1
             fi
+            # When using rev-parse fallback, use two-dot diff (branch tip, not merge-base)
+            USE_TWO_DOT=true
+            echo "::notice::Using two-dot diff with branch tip fallback"
           fi
           
-          echo "Using merge base: $MERGE_BASE"
+          echo "Using base commit: $MERGE_BASE (two-dot: $USE_TWO_DOT)"
           
           # Get changed files matching our patterns
-          if ! CHANGED=$(git diff --name-only "$MERGE_BASE"...HEAD -- \
+          # Use two-dot (..) for branch tip comparison, three-dot (...) for merge-base
+          if [ "$USE_TWO_DOT" = "true" ]; then
+            DIFF_SPEC="$MERGE_BASE..HEAD"
+          else
+            DIFF_SPEC="$MERGE_BASE...HEAD"
+          fi
+          
+          if ! CHANGED=$(git diff --name-only "$DIFF_SPEC" -- \
             'src/**' \
             'config.example.yaml' \
             'pyproject.toml' 2>&1); then
-            echo "::warning::git diff failed: $CHANGED"
-            CHANGED=""
+            echo "::error::git diff failed: $CHANGED"
+            echo "diff_failed=true" >> "$GITHUB_OUTPUT"
+            # Don't silently continue - surface the error
+            exit 1
           fi
           
           # Check if any files changed
