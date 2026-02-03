@@ -1,0 +1,167 @@
+# AI Code Reviewer Configuration
+# Copy this file to config.yaml and set your API keys
+
+version: 1
+
+# ============================================================================
+# CURSOR API - Single gateway for all LLM models
+# ============================================================================
+# All agents (Claude, GPT-4, etc.) are accessed through Cursor's unified API
+# This means you only need ONE API key to access multiple models!
+
+cursor:
+  api_key: ${CURSOR_API_KEY}
+  # base_url: https://api.cursor.com/v1  # Default, can be overridden
+  timeout_seconds: 120
+
+# ============================================================================
+# GITHUB INTEGRATION
+# ============================================================================
+github:
+  # Option 1: Personal Access Token (simpler, good for testing)
+  token: ${GITHUB_TOKEN}
+  
+  # Option 2: GitHub App (recommended for production/organization use)
+  # app_id: ${GITHUB_APP_ID}
+  # private_key_path: ./github-app.pem
+  # webhook_secret: ${GITHUB_WEBHOOK_SECRET}
+
+# ============================================================================
+# AGENT CONFIGURATION
+# ============================================================================
+# Each agent uses Cursor API but with different models and focus areas.
+# This enables diverse perspectives on the same code.
+
+agents:
+  # Security-focused agent using Claude
+  - name: security-reviewer
+    model: claude-3-opus-20240229
+    focus_areas:
+      - security
+      - authentication
+      - data_validation
+    description: "Identifies security vulnerabilities and auth issues"
+    max_tokens: 4096
+    temperature: 0.3
+    
+  # Performance-focused agent using GPT-4
+  - name: performance-reviewer
+    model: gpt-4-turbo-preview
+    focus_areas:
+      - performance
+      - complexity
+      - resource_management
+    description: "Finds performance bottlenecks and inefficiencies"
+    max_tokens: 4096
+    temperature: 0.3
+    
+  # Architecture/patterns agent using Claude with codebase context
+  - name: patterns-reviewer
+    model: claude-3-opus-20240229
+    focus_areas:
+      - consistency
+      - patterns
+      - architecture
+      - breaking_changes
+    description: "Ensures code follows existing patterns"
+    include_codebase_context: true  # Cursor's unique feature
+    max_tokens: 4096
+    temperature: 0.3
+
+# ============================================================================
+# ORCHESTRATOR SETTINGS
+# ============================================================================
+orchestrator:
+  # Maximum time to wait for all agents (seconds)
+  timeout_seconds: 120
+  
+  # Minimum agents that must succeed for a valid review
+  # If fewer succeed, the review is considered incomplete
+  min_agents_required: 2
+  
+  # Maximum concurrent agent executions
+  max_parallel_agents: 5
+  
+  # Retry failed agents
+  retry_on_failure: true
+  max_retries: 2
+
+# ============================================================================
+# AGGREGATOR SETTINGS
+# ============================================================================
+aggregator:
+  # Similarity threshold for clustering findings (0.0 - 1.0)
+  # Higher = stricter matching, fewer merged findings
+  # Lower = more aggressive merging
+  similarity_threshold: 0.85
+  
+  # Minimum consensus required to report a finding as "critical"
+  # 0.5 = at least half of agents must agree
+  # 1.0 = all agents must agree
+  min_consensus_for_critical: 0.5
+  
+  # Use embeddings for semantic similarity
+  use_embeddings: true
+  embedding_model: all-MiniLM-L6-v2
+
+# ============================================================================
+# OUTPUT SETTINGS
+# ============================================================================
+output:
+  # Include breakdown of which agent found what
+  include_agent_breakdown: true
+  
+  # Show confidence scores in output
+  include_confidence_scores: true
+  
+  # Limit findings per file to avoid overwhelming PRs
+  max_findings_per_file: 10
+  
+  # Maximum total findings to report
+  max_total_findings: 50
+
+# ============================================================================
+# REVIEW POLICY
+# ============================================================================
+review_policy:
+  # Automatically approve PRs with no findings
+  auto_approve_if_no_findings: false
+  
+  # Request changes if critical issues found
+  block_on_critical: true
+  
+  # Categories that always require human review
+  require_human_review_for:
+    - security
+  
+  # File patterns to ignore (supports glob)
+  ignore_patterns:
+    - "**/*.lock"
+    - "**/*.generated.*"
+    - "**/vendor/**"
+    - "**/node_modules/**"
+    - "**/__pycache__/**"
+
+# ============================================================================
+# SERVER SETTINGS (for webhook mode)
+# ============================================================================
+server:
+  host: "0.0.0.0"
+  port: 8080
+  
+  # Health check endpoint
+  health_check_path: /health
+  
+  # Prometheus metrics
+  metrics_path: /metrics
+  metrics_enabled: true
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+  
+  # Log to file (optional)
+  # file: /var/log/ai-code-reviewer.log

@@ -1,0 +1,116 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-code-reviewer"
+version = "0.1.0"
+description = "Multi-agent code review system that orchestrates multiple LLMs"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "Calimero Network", email = "dev@calimero.network" }
+]
+keywords = ["code-review", "llm", "ai", "github", "multi-agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+]
+
+dependencies = [
+    # Cursor API is our unified gateway - no direct anthropic/openai needed
+    "PyGithub>=2.1.0",
+    "fastapi>=0.109.0",
+    "uvicorn>=0.27.0",
+    "click>=8.1.0",
+    "pydantic>=2.6.0",
+    "pydantic-settings>=2.1.0",
+    "httpx>=0.26.0",      # HTTP client for Cursor API
+    "pyyaml>=6.0.0",
+    "rich>=13.7.0",        # Beautiful terminal output
+    "tenacity>=8.2.0",     # Retry logic
+    "sentence-transformers>=2.3.0",  # For finding similarity clustering
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "pytest-cov>=4.1.0",
+    "ruff>=0.2.0",
+    "mypy>=1.8.0",
+    "pre-commit>=3.6.0",
+    "types-PyYAML>=6.0.0",
+]
+
+[project.scripts]
+ai-reviewer = "ai_reviewer.cli:cli"
+
+[project.urls]
+Homepage = "https://github.com/calimero-network/ai-code-reviewer"
+Documentation = "https://github.com/calimero-network/ai-code-reviewer#readme"
+Repository = "https://github.com/calimero-network/ai-code-reviewer"
+Issues = "https://github.com/calimero-network/ai-code-reviewer/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_reviewer"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # Pyflakes
+    "I",      # isort
+    "B",      # flake8-bugbear
+    "C4",     # flake8-comprehensions
+    "UP",     # pyupgrade
+    "ARG",    # flake8-unused-arguments
+    "SIM",    # flake8-simplify
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # do not perform function calls in argument defaults
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["ai_reviewer"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_return_any = true
+warn_unused_ignores = true
+disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = [
+    "sentence_transformers.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --cov=ai_reviewer --cov-report=term-missing"
+
+[tool.coverage.run]
+source = ["src/ai_reviewer"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+]
