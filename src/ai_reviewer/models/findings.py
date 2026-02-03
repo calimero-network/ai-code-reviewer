@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Optional
 
 
 class Severity(Enum):
@@ -32,12 +31,12 @@ class ReviewFinding:
 
     file_path: str
     line_start: int
-    line_end: Optional[int]
+    line_end: int | None
     severity: Severity
     category: Category
     title: str
     description: str
-    suggested_fix: Optional[str]
+    suggested_fix: str | None
     confidence: float  # 0.0 - 1.0
 
     def __post_init__(self) -> None:
@@ -47,7 +46,9 @@ class ReviewFinding:
         if self.line_start < 1:
             raise ValueError(f"line_start must be >= 1, got {self.line_start}")
         if self.line_end is not None and self.line_end < self.line_start:
-            raise ValueError(f"line_end ({self.line_end}) must be >= line_start ({self.line_start})")
+            raise ValueError(
+                f"line_end ({self.line_end}) must be >= line_start ({self.line_start})"
+            )
 
 
 @dataclass
@@ -57,12 +58,12 @@ class ConsolidatedFinding:
     id: str
     file_path: str
     line_start: int
-    line_end: Optional[int]
+    line_end: int | None
     severity: Severity
     category: Category
     title: str
     description: str
-    suggested_fix: Optional[str]
+    suggested_fix: str | None
 
     # Consensus metadata
     consensus_score: float  # 0.0 - 1.0 (% of agents that found this)

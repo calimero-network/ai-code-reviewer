@@ -6,10 +6,8 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from difflib import SequenceMatcher
-from typing import Optional
 
 from ai_reviewer.models.findings import (
-    Category,
     ConsolidatedFinding,
     ReviewFinding,
     Severity,
@@ -75,9 +73,7 @@ class ReviewAggregator:
         clusters = self._cluster_findings(tagged_findings)
 
         # Merge each cluster into a consolidated finding
-        consolidated_findings = [
-            self._merge_cluster(cluster, len(reviews)) for cluster in clusters
-        ]
+        consolidated_findings = [self._merge_cluster(cluster, len(reviews)) for cluster in clusters]
 
         # Sort by priority (severity × consensus × confidence)
         consolidated_findings.sort(key=lambda f: f.priority_score, reverse=True)
@@ -192,20 +188,31 @@ class ReviewAggregator:
         base_finding = max(findings, key=lambda f: f.confidence)
 
         # Merge descriptions if different
-        unique_descriptions = list(set(f.description for f in findings))
+        unique_descriptions = list({f.description for f in findings})
         if len(unique_descriptions) > 1:
-            description = base_finding.description + "\n\n**Also noted:**\n" + "\n".join(
-                f"- {d}" for d in unique_descriptions if d != base_finding.description
+            description = (
+                base_finding.description
+                + "\n\n**Also noted:**\n"
+                + "\n".join(f"- {d}" for d in unique_descriptions if d != base_finding.description)
             )
         else:
             description = base_finding.description
 
         # Merge suggested fixes
         suggested_fix = base_finding.suggested_fix
-        other_fixes = [f.suggested_fix for f in findings if f.suggested_fix and f.suggested_fix != suggested_fix]
+        other_fixes = [
+            f.suggested_fix
+            for f in findings
+            if f.suggested_fix and f.suggested_fix != suggested_fix
+        ]
         if other_fixes:
-            suggested_fix = (suggested_fix or "") + "\n\n**Alternative suggestions:**\n" + "\n".join(
-                f"- {fix}" for fix in other_fixes[:2]  # Limit to 2 alternatives
+            suggested_fix = (
+                (suggested_fix or "")
+                + "\n\n**Alternative suggestions:**\n"
+                + "\n".join(
+                    f"- {fix}"
+                    for fix in other_fixes[:2]  # Limit to 2 alternatives
+                )
             )
 
         # Use most severe rating
@@ -233,9 +240,7 @@ class ReviewAggregator:
             original_findings=findings,
         )
 
-    def _generate_summary(
-        self, findings: list[ConsolidatedFinding], agent_count: int
-    ) -> str:
+    def _generate_summary(self, findings: list[ConsolidatedFinding], agent_count: int) -> str:
         """Generate a summary of the review."""
         if not findings:
             return f"✅ No issues found by {agent_count} agents."

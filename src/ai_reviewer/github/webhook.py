@@ -4,8 +4,8 @@ import asyncio
 import hashlib
 import hmac
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Callable, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 
@@ -20,11 +20,11 @@ class PREvent:
     pr_number: int
     action: str
     sender: str = ""
-    installation_id: Optional[int] = None
+    installation_id: int | None = None
 
 
 # Review trigger - will be set by the application
-_review_handler: Optional[Callable] = None
+_review_handler: Callable | None = None
 
 
 def set_review_handler(handler: Callable) -> None:
@@ -59,7 +59,7 @@ async def review_pr(repo: str, pr_number: int) -> None:
     logger.info(f"Would review {repo} PR #{pr_number}")
 
 
-def create_webhook_app(webhook_secret: Optional[str] = None) -> FastAPI:
+def create_webhook_app(webhook_secret: str | None = None) -> FastAPI:
     """Create the FastAPI webhook application.
 
     Args:
@@ -144,10 +144,13 @@ def verify_signature(payload: bytes, signature: str, secret: str) -> bool:
     if not signature.startswith("sha256="):
         return False
 
-    expected = "sha256=" + hmac.new(
-        secret.encode(),
-        payload,
-        hashlib.sha256,
-    ).hexdigest()
+    expected = (
+        "sha256="
+        + hmac.new(
+            secret.encode(),
+            payload,
+            hashlib.sha256,
+        ).hexdigest()
+    )
 
     return hmac.compare_digest(expected, signature)

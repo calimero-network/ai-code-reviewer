@@ -40,27 +40,38 @@ class GitHubFormatter:
         ]
 
         if not review.findings:
-            lines.extend([
-                "### ✅ No Issues Found",
-                "",
-                "All agents reviewed the code and found no issues. LGTM! 🎉",
-                "",
-            ])
+            lines.extend(
+                [
+                    "### ✅ No Issues Found",
+                    "",
+                    "All agents reviewed the code and found no issues. LGTM! 🎉",
+                    "",
+                ]
+            )
         else:
             # Group by severity
             by_severity = self._group_by_severity(review)
 
-            for severity in [Severity.CRITICAL, Severity.WARNING, Severity.SUGGESTION, Severity.NITPICK]:
+            for severity in [
+                Severity.CRITICAL,
+                Severity.WARNING,
+                Severity.SUGGESTION,
+                Severity.NITPICK,
+            ]:
                 findings = by_severity.get(severity, [])
                 if findings:
-                    lines.extend(self._format_severity_section(severity, findings, review.agent_count))
+                    lines.extend(
+                        self._format_severity_section(severity, findings, review.agent_count)
+                    )
                     lines.append("")
 
-        lines.extend([
-            "---",
-            "",
-            self._format_footer(review),
-        ])
+        lines.extend(
+            [
+                "---",
+                "",
+                self._format_footer(review),
+            ]
+        )
 
         return "\n".join(lines)
 
@@ -103,24 +114,28 @@ class GitHubFormatter:
             if consensus_count == agent_count:
                 consensus_str += " ✓"
 
-            lines.extend([
-                f"#### {i}. {finding.title}",
-                f"**File:** `{finding.file_path}` (line {finding.line_start}"
-                + (f"-{finding.line_end}" if finding.line_end else "")
-                + f") | **Consensus:** {consensus_str}",
-                "",
-                finding.description,
-                "",
-            ])
+            lines.extend(
+                [
+                    f"#### {i}. {finding.title}",
+                    f"**File:** `{finding.file_path}` (line {finding.line_start}"
+                    + (f"-{finding.line_end}" if finding.line_end else "")
+                    + f") | **Consensus:** {consensus_str}",
+                    "",
+                    finding.description,
+                    "",
+                ]
+            )
 
             if finding.suggested_fix:
-                lines.extend([
-                    "**Suggested fix:**",
-                    "```",
-                    finding.suggested_fix,
-                    "```",
-                    "",
-                ])
+                lines.extend(
+                    [
+                        "**Suggested fix:**",
+                        "```",
+                        finding.suggested_fix,
+                        "```",
+                        "",
+                    ]
+                )
 
             # Show which agents found this (for transparency)
             agents_str = ", ".join(finding.agreeing_agents[:3])

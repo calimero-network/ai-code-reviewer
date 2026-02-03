@@ -2,7 +2,6 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Any
 
 from github import Github
 from github.GithubException import GithubException
@@ -165,7 +164,7 @@ class GitHubClient:
     def post_review(
         self,
         pr: PullRequest,
-        review: ConsolidatedReview,
+        _review: ConsolidatedReview,
         body: str,
         event: str = "COMMENT",
     ) -> None:
@@ -173,7 +172,7 @@ class GitHubClient:
 
         Args:
             pr: Pull request to review
-            review: Consolidated review data
+            _review: Consolidated review data (unused, kept for API compatibility)
             body: Review body text
             event: Review event type (APPROVE, REQUEST_CHANGES, COMMENT)
         """
@@ -198,9 +197,7 @@ class GitHubClient:
         """
         # Add a note that this is posted as a comment due to pending review
         comment_body = (
-            "⚠️ *Posted as comment because you have a pending review on this PR.*\n\n"
-            "---\n\n"
-            f"{body}"
+            f"⚠️ *Posted as comment because you have a pending review on this PR.*\n\n---\n\n{body}"
         )
         pr.create_issue_comment(comment_body)
         logger.info(f"Posted review as issue comment on PR #{pr.number}")
@@ -248,6 +245,8 @@ class GitHubClient:
                 logger.debug(f"Posted inline comment on {finding.file_path}:{finding.line_start}")
             except Exception as e:
                 # Inline comments can fail if the line isn't in the diff
-                logger.warning(f"Could not post inline comment on {finding.file_path}:{finding.line_start}: {e}")
+                logger.warning(
+                    f"Could not post inline comment on {finding.file_path}:{finding.line_start}: {e}"
+                )
 
         return posted_count
