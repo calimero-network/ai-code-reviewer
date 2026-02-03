@@ -288,12 +288,24 @@ class GitHubFormatter:
         lines.extend(["", "</details>"])
         return lines
 
-    def _format_new_findings_section(self, findings: list, agent_count: int) -> list[str]:
-        """Format section for NEW findings."""
+    def _format_findings_section(
+        self, findings: list, agent_count: int, title: str, description: str
+    ) -> list[str]:
+        """Format a section for findings with the given title and description.
+
+        Args:
+            findings: List of findings to format
+            agent_count: Number of agents in the review
+            title: Section header title (e.g., "### 🆕 New Issues")
+            description: Section description text
+
+        Returns:
+            List of formatted markdown lines
+        """
         lines = [
-            "### 🆕 New Issues",
+            title,
             "",
-            "*These issues were found in the latest changes:*",
+            description,
             "",
         ]
 
@@ -311,30 +323,24 @@ class GitHubFormatter:
                 lines.extend(self._format_severity_section(severity, sev_findings, agent_count))
 
         return lines
+
+    def _format_new_findings_section(self, findings: list, agent_count: int) -> list[str]:
+        """Format section for NEW findings."""
+        return self._format_findings_section(
+            findings,
+            agent_count,
+            "### 🆕 New Issues",
+            "*These issues were found in the latest changes:*",
+        )
 
     def _format_open_findings_section(self, findings: list, agent_count: int) -> list[str]:
         """Format section for OPEN (still unresolved) findings."""
-        lines = [
+        return self._format_findings_section(
+            findings,
+            agent_count,
             "### ⏳ Open Issues",
-            "",
             "*These issues from previous reviews are still present:*",
-            "",
-        ]
-
-        # Group by severity
-        by_severity = self._group_findings_by_severity(findings)
-
-        for severity in [
-            Severity.CRITICAL,
-            Severity.WARNING,
-            Severity.SUGGESTION,
-            Severity.NITPICK,
-        ]:
-            sev_findings = by_severity.get(severity, [])
-            if sev_findings:
-                lines.extend(self._format_severity_section(severity, sev_findings, agent_count))
-
-        return lines
+        )
 
     def _group_findings_by_severity(self, findings: list) -> dict:
         """Group findings by severity."""
