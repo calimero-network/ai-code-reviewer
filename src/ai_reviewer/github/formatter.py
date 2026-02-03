@@ -95,12 +95,7 @@ class GitHubFormatter:
 
     def _group_by_severity(self, review: ConsolidatedReview) -> dict:
         """Group findings by severity."""
-        groups: dict = {}
-        for finding in review.findings:
-            if finding.severity not in groups:
-                groups[finding.severity] = []
-            groups[finding.severity].append(finding)
-        return groups
+        return self._group_findings_by_severity(review.findings)
 
     def _format_severity_section(
         self, severity: Severity, findings: list, agent_count: int
