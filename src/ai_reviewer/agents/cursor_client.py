@@ -256,14 +256,15 @@ class CursorClient:
         return ""
 
     # Legacy method for compatibility with existing agent code
+    # Parameters kept for API compatibility even if unused in implementation
     async def complete(
         self,
-        _model: str,
+        model: str,
         system_prompt: str,
         user_prompt: str,
-        _max_tokens: int = 4096,
-        _temperature: float = 0.3,
-        _response_format: str | None = None,
+        max_tokens: int = 4096,
+        temperature: float = 0.3,
+        response_format: str | None = None,
     ) -> str:
         """Legacy completion method - runs a quick agent for the prompt.
 

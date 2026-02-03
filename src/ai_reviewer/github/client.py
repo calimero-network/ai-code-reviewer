@@ -164,7 +164,7 @@ class GitHubClient:
     def post_review(
         self,
         pr: PullRequest,
-        _review: ConsolidatedReview,
+        review: ConsolidatedReview,  # noqa: ARG002
         body: str,
         event: str = "COMMENT",
     ) -> None:
@@ -172,7 +172,7 @@ class GitHubClient:
 
         Args:
             pr: Pull request to review
-            _review: Consolidated review data (unused, kept for API compatibility)
+            review: Consolidated review data (kept for API compatibility)
             body: Review body text
             event: Review event type (APPROVE, REQUEST_CHANGES, COMMENT)
         """
