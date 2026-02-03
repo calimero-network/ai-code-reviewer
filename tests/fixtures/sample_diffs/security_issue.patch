@@ -1,0 +1,16 @@
+diff --git a/auth/login.py b/auth/login.py
+index 1234567..abcdefg 100644
+--- a/auth/login.py
++++ b/auth/login.py
+@@ -10,6 +10,12 @@ def authenticate(username: str, password: str) -> bool:
+     hashed = hash_password(password)
+     return db.verify_user(username, hashed)
++
++def get_user(username: str) -> dict:
++    """Fetch user by username - VULNERABLE TO SQL INJECTION."""
++    query = f"SELECT * FROM users WHERE username = '{username}'"
++    return db.execute(query)
++
++def delete_user(user_id):
++    """Delete user - NO INPUT VALIDATION."""
++    os.system(f"delete_user.sh {user_id}")
