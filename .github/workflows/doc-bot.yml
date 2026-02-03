@@ -152,8 +152,7 @@ with open(output_file, 'a') as f:
         for s in unique_suggestions:
             f.write(f"- **{s['file']}**: {s['reason']} [{s['priority']}]\n")
         f.write('\n*Please review these suggestions and update documentation if needed.*\n')
-    else:
-        f.write('✅ No documentation updates detected as needed.\n')
+    # When no suggestions, write empty string so the condition at line 183 skips posting
     f.write('EOF\n')
 PYTHON_EOF
           else
@@ -190,8 +189,8 @@ PYTHON_EOF
           script: |
             const suggestions = process.env.SUGGESTIONS;
             
-            // Find existing bot comment
-            const { data: comments } = await github.rest.issues.listComments({
+            // Find existing bot comment (use paginate to handle PRs with many comments)
+            const comments = await github.paginate(github.rest.issues.listComments, {
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: context.issue.number,
