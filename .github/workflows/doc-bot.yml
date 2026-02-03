@@ -16,15 +16,19 @@ jobs:
   doc-check:
     name: Check Documentation Sync
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        # Pinned to v4.1.7 - https://github.com/actions/checkout/releases/tag/v4.1.7
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
         with:
-          fetch-depth: 0
+          # Only need current commit and base for comparison
+          fetch-depth: 2
       
       - name: Setup Python
-        uses: actions/setup-python@v5
+        # Pinned to v5.1.0 - https://github.com/actions/setup-python/releases/tag/v5.1.0
+        uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f
         with:
           python-version: '3.11'
           cache: 'pip'
@@ -35,7 +39,8 @@ jobs:
       
       - name: Get changed files
         id: changed-files
-        uses: tj-actions/changed-files@v44
+        # Pinned to v44.5.2 - https://github.com/tj-actions/changed-files/releases/tag/v44.5.2
+        uses: tj-actions/changed-files@d6babd6899969df1a11d14c368283ea4436bca78
         with:
           files: |
             src/**
@@ -48,91 +53,102 @@ jobs:
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pass changed files via environment variable to prevent command injection
+          CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         run: |
-          # Create analysis prompt from changed files
-          cat > /tmp/analysis_prompt.md << 'PROMPT_EOF'
-          # Documentation Analysis Request
+          # Write changed files to a file for safe processing
+          echo "$CHANGED_FILES" > /tmp/changed_files.txt
           
-          ## Changed Files
-          ${{ steps.changed-files.outputs.all_changed_files }}
-          
-          ## Instructions
-          Based on the changed files, analyze if documentation updates are needed.
-          
-          Reference these documentation files:
-          - README.md
-          - DESIGN.md
-          - .ai/rules/*.md
-          - .ai/context.md
-          - config.example.yaml
-          
-          Follow the rules in .ai/doc-bot.md for analysis and output format.
-          PROMPT_EOF
-          
-          # Run the doc-check command (falls back to manual analysis if no API)
+          # Run the doc-check analysis
           if [ -n "$CURSOR_API_KEY" ]; then
-            python -c "
-          import asyncio
-          import json
-          from pathlib import Path
+            python << 'PYTHON_EOF'
+import os
+import json
+from pathlib import Path
 
-          # Read changed files
-          changed = '''${{ steps.changed-files.outputs.all_changed_files }}'''.split()
-          
-          # Analyze each changed file for documentation impact
-          suggestions = []
-          
-          for filepath in changed:
-              path = Path(filepath)
-              
-              # Check if it's a new module
-              if path.suffix == '.py' and path.parent.name in ['agents', 'orchestrator', 'github', 'models']:
-                  suggestions.append({
-                      'file': f'.cursor/rules/{path.parent.name}.md',
-                      'reason': f'New file {filepath} may need documentation in module rules',
-                      'priority': 'normal'
-                  })
-              
-              # Check if it changes config
-              if 'config' in filepath:
-                  suggestions.append({
-                      'file': 'config.example.yaml',
-                      'reason': 'Configuration changes may need example updates',
-                      'priority': 'normal'
-                  })
-                  suggestions.append({
-                      'file': 'README.md',
-                      'reason': 'Configuration changes may affect README docs',
-                      'priority': 'normal'
-                  })
-          
-          # Output suggestions
-          print('SUGGESTIONS<<EOF')
-          if suggestions:
-              print('## 📚 Documentation Check\\n')
-              print('The following documentation files may need updates based on code changes:\\n')
-              for s in suggestions:
-                  print(f\"- **{s['file']}**: {s['reason']} [{s['priority']}]\")
-              print('\\n*Please review these suggestions and update documentation if needed.*')
-          else:
-              print('✅ No documentation updates detected as needed.')
-          print('EOF')
-          "
+# Read changed files safely from environment
+changed_files_str = os.environ.get('CHANGED_FILES', '')
+changed = changed_files_str.split() if changed_files_str else []
+
+# Analyze each changed file for documentation impact
+suggestions = []
+
+for filepath in changed:
+    path = Path(filepath)
+    
+    # Check if it's a Python file in a documented module
+    if path.suffix == '.py' and path.parent.name in ['agents', 'orchestrator', 'github', 'models']:
+        suggestions.append({
+            'file': f'.ai/rules/{path.parent.name}.md',
+            'reason': f'File `{filepath}` changed - may need documentation update',
+            'priority': 'normal'
+        })
+    
+    # Check if it changes config
+    if 'config' in filepath.lower():
+        suggestions.append({
+            'file': 'config.example.yaml',
+            'reason': 'Configuration changes may need example updates',
+            'priority': 'normal'
+        })
+        suggestions.append({
+            'file': 'README.md',
+            'reason': 'Configuration changes may affect README docs',
+            'priority': 'normal'
+        })
+    
+    # Check if it's CLI changes
+    if 'cli' in filepath.lower():
+        suggestions.append({
+            'file': 'README.md',
+            'reason': 'CLI changes may need README command documentation update',
+            'priority': 'normal'
+        })
+
+# Deduplicate suggestions by file
+seen_files = set()
+unique_suggestions = []
+for s in suggestions:
+    if s['file'] not in seen_files:
+        seen_files.add(s['file'])
+        unique_suggestions.append(s)
+
+# Output suggestions using GitHub Actions output format
+output_file = os.environ.get('GITHUB_OUTPUT', '/dev/stdout')
+with open(output_file, 'a') as f:
+    f.write('SUGGESTIONS<<EOF\n')
+    if unique_suggestions:
+        f.write('## 📚 Documentation Check\n\n')
+        f.write('The following documentation files may need updates based on code changes:\n\n')
+        for s in unique_suggestions:
+            f.write(f"- **{s['file']}**: {s['reason']} [{s['priority']}]\n")
+        f.write('\n*Please review these suggestions and update documentation if needed.*\n')
+    else:
+        f.write('✅ No documentation updates detected as needed.\n')
+    f.write('EOF\n')
+PYTHON_EOF
           else
-            echo "SUGGESTIONS<<EOF"
-            echo "⚠️ Documentation bot analysis skipped (no API key configured)."
-            echo ""
-            echo "Changed files to manually check for doc updates:"
-            echo "${{ steps.changed-files.outputs.all_changed_files }}" | tr ' ' '\n' | sed 's/^/- /'
-            echo "EOF"
-          fi >> $GITHUB_OUTPUT
+            {
+              echo "SUGGESTIONS<<EOF"
+              echo "⚠️ Documentation bot analysis skipped (no API key configured)."
+              echo ""
+              echo "Changed files to manually check for doc updates:"
+              # Read from file to avoid interpolation issues
+              cat /tmp/changed_files.txt | tr ' ' '\n' | sed 's/^/- /'
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
       
       - name: Post comment on PR
         if: steps.doc-analysis.outputs.SUGGESTIONS != ''
-        uses: actions/github-script@v7
+        # Pinned to v7.0.1 - https://github.com/actions/github-script/releases/tag/v7.0.1
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        env:
+          # Pass suggestions via environment to avoid interpolation issues
+          SUGGESTIONS: ${{ steps.doc-analysis.outputs.SUGGESTIONS }}
         with:
           script: |
-            const suggestions = `${{ steps.doc-analysis.outputs.SUGGESTIONS }}`;
+            const suggestions = process.env.SUGGESTIONS;
             
             // Find existing bot comment
             const { data: comments } = await github.rest.issues.listComments({
