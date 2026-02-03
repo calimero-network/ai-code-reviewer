@@ -161,13 +161,13 @@ class GitHubFormatter:
             review: Consolidated review
 
         Returns:
-            GitHub review action: "APPROVE", "REQUEST_CHANGES", or "COMMENT"
+            GitHub review action: "REQUEST_CHANGES" or "COMMENT"
+            Note: Never returns "APPROVE" as GitHub Actions tokens cannot approve PRs
         """
         if review.has_critical_issues:
             return "REQUEST_CHANGES"
-        elif not review.findings:
-            return "APPROVE"
         else:
+            # Always use COMMENT - APPROVE is not allowed for GitHub Actions tokens
             return "COMMENT"
 
 
