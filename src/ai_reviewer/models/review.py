@@ -50,6 +50,9 @@ class ConsolidatedReview:
     # Optional: original reviews for transparency
     agent_reviews: list[AgentReview] = field(default_factory=list)
 
+    # Track failed agents
+    failed_agents: list[str] = field(default_factory=list)
+
     @property
     def findings_by_severity(self) -> dict[Severity, int]:
         """Count findings by severity level."""
@@ -75,3 +78,8 @@ class ConsolidatedReview:
     def has_blocking_issues(self) -> bool:
         """Check if review has issues that should block merge."""
         return self.has_critical_issues
+
+    @property
+    def all_agents_failed(self) -> bool:
+        """Check if all agents failed to produce a review."""
+        return len(self.failed_agents) == self.agent_count and self.agent_count > 0

@@ -124,8 +124,24 @@ async def review_pr_async(
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
 
+    # Check if all agents failed
+    if review.all_agents_failed:
+        console.print(f"[red]❌ All {review.agent_count} agents failed![/red]")
+        console.print(f"   Time: {review.total_review_time_ms / 1000:.1f}s")
+        console.print("\n[yellow]Not posting to GitHub - all agents failed.[/yellow]")
+        console.print("\n[bold]Possible causes:[/bold]")
+        console.print("  • Invalid or expired Cursor API key")
+        console.print("  • Rate limit exceeded")
+        console.print("  • Network connectivity issues")
+        console.print("\nCheck your CURSOR_API_KEY and try again.")
+        sys.exit(1)
+
     console.print(f"✅ Review complete: {review.summary}")
     console.print(f"   Time: {review.total_review_time_ms / 1000:.1f}s | Findings: {len(review.findings)}")
+
+    # Warn about partial failures
+    if review.failed_agents:
+        console.print(f"[yellow]⚠️  {len(review.failed_agents)}/{review.agent_count} agents failed: {', '.join(review.failed_agents)}[/yellow]")
 
     # Output
     if output == "json":
@@ -146,7 +162,7 @@ async def review_pr_async(
             action = formatter.get_review_action(review)
             gh.post_review(pr, review, body, action)
             console.print(f"📝 Posted review to GitHub")
-            
+
             # Post inline comments for each finding
             if review.findings:
                 console.print(f"💬 Posting inline comments for {min(len(review.findings), 10)} findings...")

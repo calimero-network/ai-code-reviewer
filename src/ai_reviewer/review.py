@@ -190,16 +190,20 @@ def aggregate_findings(
     pr_number: int,
 ) -> ConsolidatedReview:
     """Aggregate findings from multiple agents."""
-    
+
     consolidated = []
-    agent_count = len([f for f in all_findings if f[1]])  # Agents with findings
     summaries = []
-    
+    failed_agents = []
+
     # Track which findings are similar (for consensus scoring)
     finding_clusters: dict[str, list[tuple[str, dict]]] = {}
-    
+
     for agent_name, findings, summary in all_findings:
         summaries.append(f"**{agent_name}**: {summary}")
+
+        # Track failed agents (summary contains error message)
+        if "Agent failed:" in summary or "401 Unauthorized" in summary:
+            failed_agents.append(agent_name)
         
         for raw in findings:
             # Create a key for clustering similar findings
@@ -261,6 +265,7 @@ def aggregate_findings(
         agent_count=len(all_findings),
         review_quality_score=0.85 if consolidated else 0.95,
         total_review_time_ms=0,
+        failed_agents=failed_agents,
     )
 
 
