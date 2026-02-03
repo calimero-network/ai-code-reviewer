@@ -1,7 +1,14 @@
 """GitHub comment formatter for review output."""
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from ai_reviewer.models.findings import Severity
 from ai_reviewer.models.review import ConsolidatedReview
+
+if TYPE_CHECKING:
+    from ai_reviewer.github.client import ReviewDelta
 
 
 class GitHubFormatter:
@@ -21,6 +28,14 @@ class GitHubFormatter:
         Severity.NITPICK: "Nitpick",
     }
 
+    def __init__(self, reviewer_name: str = "AI Code Reviewer") -> None:
+        """Initialize the formatter.
+
+        Args:
+            reviewer_name: Custom name to display in review header
+        """
+        self.reviewer_name = reviewer_name
+
     def format_review(self, review: ConsolidatedReview) -> str:
         """Format a consolidated review as a GitHub comment.
 
@@ -31,7 +46,7 @@ class GitHubFormatter:
             Markdown formatted comment
         """
         lines = [
-            "## 🤖 AI Code Review",
+            f"## 🤖 {self.reviewer_name}",
             "",
             self._format_header(review),
             "",
@@ -40,27 +55,38 @@ class GitHubFormatter:
         ]
 
         if not review.findings:
-            lines.extend([
-                "### ✅ No Issues Found",
-                "",
-                "All agents reviewed the code and found no issues. LGTM! 🎉",
-                "",
-            ])
+            lines.extend(
+                [
+                    "### ✅ No Issues Found",
+                    "",
+                    "All agents reviewed the code and found no issues. LGTM! 🎉",
+                    "",
+                ]
+            )
         else:
             # Group by severity
             by_severity = self._group_by_severity(review)
 
-            for severity in [Severity.CRITICAL, Severity.WARNING, Severity.SUGGESTION, Severity.NITPICK]:
+            for severity in [
+                Severity.CRITICAL,
+                Severity.WARNING,
+                Severity.SUGGESTION,
+                Severity.NITPICK,
+            ]:
                 findings = by_severity.get(severity, [])
                 if findings:
-                    lines.extend(self._format_severity_section(severity, findings, review.agent_count))
+                    lines.extend(
+                        self._format_severity_section(severity, findings, review.agent_count)
+                    )
                     lines.append("")
 
-        lines.extend([
-            "---",
-            "",
-            self._format_footer(review),
-        ])
+        lines.extend(
+            [
+                "---",
+                "",
+                self._format_footer(review),
+            ]
+        )
 
         return "\n".join(lines)
 
@@ -77,12 +103,7 @@ class GitHubFormatter:
 
     def _group_by_severity(self, review: ConsolidatedReview) -> dict:
         """Group findings by severity."""
-        groups: dict = {}
-        for finding in review.findings:
-            if finding.severity not in groups:
-                groups[finding.severity] = []
-            groups[finding.severity].append(finding)
-        return groups
+        return self._group_findings_by_severity(review.findings)
 
     def _format_severity_section(
         self, severity: Severity, findings: list, agent_count: int
@@ -103,24 +124,28 @@ class GitHubFormatter:
             if consensus_count == agent_count:
                 consensus_str += " ✓"
 
-            lines.extend([
-                f"#### {i}. {finding.title}",
-                f"**File:** `{finding.file_path}` (line {finding.line_start}"
-                + (f"-{finding.line_end}" if finding.line_end else "")
-                + f") | **Consensus:** {consensus_str}",
-                "",
-                finding.description,
-                "",
-            ])
+            lines.extend(
+                [
+                    f"#### {i}. {finding.title}",
+                    f"**File:** `{finding.file_path}` (line {finding.line_start}"
+                    + (f"-{finding.line_end}" if finding.line_end else "")
+                    + f") | **Consensus:** {consensus_str}",
+                    "",
+                    finding.description,
+                    "",
+                ]
+            )
 
             if finding.suggested_fix:
-                lines.extend([
-                    "**Suggested fix:**",
-                    "```",
-                    finding.suggested_fix,
-                    "```",
-                    "",
-                ])
+                lines.extend(
+                    [
+                        "**Suggested fix:**",
+                        "```",
+                        finding.suggested_fix,
+                        "```",
+                        "",
+                    ]
+                )
 
             # Show which agents found this (for transparency)
             agents_str = ", ".join(finding.agreeing_agents[:3])
@@ -134,23 +159,240 @@ class GitHubFormatter:
     def _format_footer(self, review: ConsolidatedReview) -> str:
         """Format the review footer."""
         return (
-            "<sub>🤖 Generated by "
-            "[AI Code Reviewer](https://github.com/calimero-network/ai-code-reviewer) | "
+            f"<sub>🤖 Generated by "
+            f"[{self.reviewer_name}](https://github.com/calimero-network/ai-code-reviewer) | "
             f"Review ID: `{review.id}`</sub>"
         )
 
-    def get_review_action(self, review: ConsolidatedReview) -> str:
+    def format_review_with_delta(
+        self,
+        review: ConsolidatedReview,
+        delta: ReviewDelta,
+    ) -> str:
+        """Format a review showing changes from previous run.
+
+        Args:
+            review: Current consolidated review
+            delta: Changes from previous review
+
+        Returns:
+            Markdown formatted comment with status indicators
+        """
+        lines = [
+            f"## 🤖 {self.reviewer_name}",
+            "",
+            self._format_header(review),
+            "",
+        ]
+
+        # Add status summary banner
+        lines.extend(self._format_status_banner(delta))
+        lines.extend(["", "---", ""])
+
+        # Show FIXED issues first (good news!)
+        if delta.fixed_findings:
+            lines.extend(self._format_fixed_section(delta.fixed_findings))
+            lines.append("")
+
+        # Show NEW issues (need attention)
+        if delta.new_findings:
+            lines.extend(self._format_new_findings_section(delta.new_findings, review.agent_count))
+            lines.append("")
+
+        # Show OPEN issues (still pending)
+        if delta.open_findings:
+            lines.extend(
+                self._format_open_findings_section(delta.open_findings, review.agent_count)
+            )
+            lines.append("")
+
+        # If nothing to show
+        if not delta.new_findings and not delta.open_findings and not delta.fixed_findings:
+            lines.extend(
+                [
+                    "### ✅ No Issues Found",
+                    "",
+                    "All agents reviewed the code and found no issues. LGTM! 🎉",
+                    "",
+                ]
+            )
+
+        lines.extend(
+            [
+                "---",
+                "",
+                self._format_footer(review),
+            ]
+        )
+
+        return "\n".join(lines)
+
+    def _format_status_banner(self, delta: ReviewDelta) -> list[str]:
+        """Format the status summary banner."""
+        if delta.all_issues_resolved:
+            return [
+                "### ✅ Ready to Merge",
+                "",
+                "All previously identified issues have been addressed!",
+            ]
+
+        new_count = len(delta.new_findings)
+        fixed_count = len(delta.fixed_findings)
+        open_count = len(delta.open_findings)
+
+        # Status icons
+        parts = []
+        if fixed_count > 0:
+            parts.append(f"✅ **{fixed_count} Fixed**")
+        if new_count > 0:
+            parts.append(f"🆕 **{new_count} New**")
+        if open_count > 0:
+            parts.append(f"⏳ **{open_count} Open**")
+
+        status_line = " | ".join(parts)
+
+        # Determine overall status
+        has_critical = any(
+            f.severity.value == "critical" for f in delta.new_findings + delta.open_findings
+        )
+
+        if has_critical:
+            status_icon = "🔴"
+            status_text = "Critical issues require attention"
+        elif new_count > 0 or open_count > 0:
+            status_icon = "🟡"
+            status_text = "Issues pending resolution"
+        else:
+            status_icon = "✅"
+            status_text = "Ready to merge"
+
+        return [
+            f"### {status_icon} {status_text}",
+            "",
+            status_line,
+        ]
+
+    def _format_fixed_section(self, fixed_findings: list) -> list[str]:
+        """Format the section showing fixed issues."""
+        lines = [
+            "### ✅ Fixed Issues",
+            "",
+            "<details>",
+            "<summary>The following issues from previous reviews have been addressed:</summary>",
+            "",
+        ]
+
+        for i, finding in enumerate(fixed_findings, 1):
+            lines.append(f"{i}. ~~{finding.title}~~ (`{finding.file_path}:{finding.line}`)")
+
+        lines.extend(["", "</details>"])
+        return lines
+
+    def _format_new_findings_section(self, findings: list, agent_count: int) -> list[str]:
+        """Format section for NEW findings."""
+        lines = [
+            "### 🆕 New Issues",
+            "",
+            "*These issues were found in the latest changes:*",
+            "",
+        ]
+
+        # Group by severity
+        by_severity = self._group_findings_by_severity(findings)
+
+        for severity in [
+            Severity.CRITICAL,
+            Severity.WARNING,
+            Severity.SUGGESTION,
+            Severity.NITPICK,
+        ]:
+            sev_findings = by_severity.get(severity, [])
+            if sev_findings:
+                lines.extend(self._format_severity_section(severity, sev_findings, agent_count))
+
+        return lines
+
+    def _format_open_findings_section(self, findings: list, agent_count: int) -> list[str]:
+        """Format section for OPEN (still unresolved) findings."""
+        lines = [
+            "### ⏳ Open Issues",
+            "",
+            "*These issues from previous reviews are still present:*",
+            "",
+        ]
+
+        # Group by severity
+        by_severity = self._group_findings_by_severity(findings)
+
+        for severity in [
+            Severity.CRITICAL,
+            Severity.WARNING,
+            Severity.SUGGESTION,
+            Severity.NITPICK,
+        ]:
+            sev_findings = by_severity.get(severity, [])
+            if sev_findings:
+                lines.extend(self._format_severity_section(severity, sev_findings, agent_count))
+
+        return lines
+
+    def _group_findings_by_severity(self, findings: list) -> dict:
+        """Group findings by severity."""
+        groups: dict = {}
+        for finding in findings:
+            if finding.severity not in groups:
+                groups[finding.severity] = []
+            groups[finding.severity].append(finding)
+        return groups
+
+    def get_review_action_with_delta(
+        self,
+        review: ConsolidatedReview,
+        delta: ReviewDelta,
+        allow_approve: bool = True,
+    ) -> str:
+        """Determine GitHub review action considering the delta.
+
+        Args:
+            review: Consolidated review
+            delta: Review delta
+            allow_approve: Whether to allow APPROVE action (also controls REQUEST_CHANGES)
+
+        Returns:
+            GitHub review action
+        """
+        # If all issues are resolved, approve (if allowed)
+        if delta.all_issues_resolved and allow_approve:
+            return "APPROVE"
+
+        # If there are critical issues (new or open), request changes
+        # But only if allow_approve is True (i.e., not in GitHub Actions)
+        # GitHub Actions can't approve, and REQUEST_CHANGES blocks merging
+        has_critical = any(
+            f.severity.value == "critical" for f in delta.new_findings + delta.open_findings
+        )
+        if has_critical and allow_approve:
+            return "REQUEST_CHANGES"
+
+        # In GitHub Actions or no critical issues, just comment
+        return "COMMENT"
+
+    def get_review_action(self, review: ConsolidatedReview, allow_approve: bool = True) -> str:
         """Determine the GitHub review action based on findings.
 
         Args:
             review: Consolidated review
+            allow_approve: Whether to allow APPROVE/REQUEST_CHANGES actions
+                          (False in GitHub Actions to avoid blocking merges)
 
         Returns:
             GitHub review action: "APPROVE", "REQUEST_CHANGES", or "COMMENT"
         """
-        if review.has_critical_issues:
+        # REQUEST_CHANGES blocks merging - only use when allow_approve is True
+        # (i.e., running locally with proper permissions)
+        if review.has_critical_issues and allow_approve:
             return "REQUEST_CHANGES"
-        elif not review.findings:
+        elif not review.findings and allow_approve:
             return "APPROVE"
         else:
             return "COMMENT"

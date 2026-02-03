@@ -5,8 +5,9 @@ import base64
 import json
 import logging
 import re
-from dataclasses import dataclass, field
-from typing import Any, Optional
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -35,7 +36,7 @@ class AgentResult:
     status: str
     content: str = ""
     branch_name: str = ""
-    pr_url: Optional[str] = None
+    pr_url: str | None = None
 
 
 class CursorClient:
@@ -51,7 +52,7 @@ class CursorClient:
         # Cursor uses Basic auth with key:
         auth_string = f"{config.api_key}:"
         encoded = base64.b64encode(auth_string.encode()).decode()
-        
+
         self._client = httpx.AsyncClient(
             base_url=config.base_url,
             headers={
@@ -78,7 +79,7 @@ class CursorClient:
         repo_url: str,
         ref: str,
         prompt: str,
-        branch_name: Optional[str] = None,
+        branch_name: str | None = None,
         auto_create_pr: bool = False,
     ) -> dict[str, Any]:
         """Create a Cursor background agent.
@@ -95,6 +96,7 @@ class CursorClient:
         """
         if branch_name is None:
             import time
+
             branch_name = f"ai-code-reviewer/review-{int(time.time())}"
 
         body = {
@@ -113,7 +115,7 @@ class CursorClient:
 
         data = response.json()
         agent = data.get("agent", data)
-        
+
         if not agent.get("id"):
             raise RuntimeError("Cursor API did not return an agent id")
 
@@ -151,7 +153,7 @@ class CursorClient:
     async def wait_for_agent(
         self,
         agent_id: str,
-        on_status: Optional[callable] = None,
+        on_status: Callable[..., Any] | None = None,
     ) -> dict[str, Any]:
         """Wait for an agent to complete.
 
@@ -186,7 +188,7 @@ class CursorClient:
         repo_url: str,
         ref: str,
         prompt: str,
-        on_status: Optional[callable] = None,
+        on_status: Callable[..., Any] | None = None,
     ) -> AgentResult:
         """Run a complete review agent flow.
 
@@ -238,11 +240,11 @@ class CursorClient:
         for m in reversed(messages):
             role = m.get("role") or m.get("author")
             content = m.get("content", "") or m.get("text", "")
-            
+
             # If it's explicitly an assistant message, use it
             if role == "assistant":
                 return content
-            
+
             # If no role but content contains JSON-like response, use it
             if not role and content and '{"findings"' in content:
                 return content
@@ -251,10 +253,11 @@ class CursorClient:
         if messages:
             last = messages[-1]
             return last.get("content", "") or last.get("text", "")
-        
+
         return ""
 
     # Legacy method for compatibility with existing agent code
+    # Parameters kept for API compatibility even if unused in implementation
     async def complete(
         self,
         model: str,
@@ -262,10 +265,10 @@ class CursorClient:
         user_prompt: str,
         max_tokens: int = 4096,
         temperature: float = 0.3,
-        response_format: Optional[str] = None,
+        response_format: str | None = None,
     ) -> str:
         """Legacy completion method - runs a quick agent for the prompt.
-        
+
         Note: This uses the Background Agent API, so it may take longer
         than a direct chat completion API would.
         """
@@ -285,17 +288,17 @@ Respond with the requested format."""
 
     async def _run_prompt_only_agent(self, prompt: str) -> str:
         """Run an agent with just a prompt (no repo context).
-        
+
         This is a workaround since Cursor's API is designed for repo analysis.
         We create a minimal agent and extract its response.
         """
         # The Cursor API requires a repository, so we need to use a different approach
         # For now, we'll simulate the response structure
-        
+
         # Actually, we need to think about this differently.
         # The Cursor Background Agent API is for repo-level tasks.
         # For simple chat completions, we might need to use direct API calls to Anthropic/OpenAI
-        
+
         raise NotImplementedError(
             "Cursor Background Agent API requires a repository context. "
             "For direct chat completions, configure Anthropic or OpenAI API keys directly."
@@ -311,19 +314,19 @@ Respond with the requested format."""
     ) -> dict[str, Any]:
         """Legacy JSON completion method."""
         content = await self.complete(
-            model=model,
+            _model=model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            response_format="json",
+            _max_tokens=max_tokens,
+            _temperature=temperature,
+            _response_format="json",
         )
         return self._parse_json_response(content)
 
     def _parse_json_response(self, content: str) -> dict[str, Any]:
         """Parse JSON from response, handling markdown code blocks."""
         content = content.strip()
-        
+
         # Handle markdown code blocks
         if "```json" in content:
             match = re.search(r"```json\s*([\s\S]*?)```", content)
@@ -335,7 +338,7 @@ Respond with the requested format."""
                 content = match.group(1).strip()
 
         # Try to find JSON object
-        json_match = re.search(r'\{[\s\S]*\}', content)
+        json_match = re.search(r"\{[\s\S]*\}", content)
         if json_match:
             content = json_match.group(0)
 

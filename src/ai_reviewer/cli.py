@@ -3,9 +3,9 @@
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
-from typing import Optional
 
 import click
 import uvicorn
@@ -16,8 +16,8 @@ from rich.table import Table
 from ai_reviewer import __version__
 from ai_reviewer.agents.cursor_client import CursorConfig
 from ai_reviewer.config import load_config, validate_config
-from ai_reviewer.github.formatter import GitHubFormatter, format_review_as_json
 from ai_reviewer.github.client import GitHubClient
+from ai_reviewer.github.formatter import GitHubFormatter, format_review_as_json
 from ai_reviewer.github.webhook import create_webhook_app, set_review_handler
 from ai_reviewer.review import review_pr_with_cursor_agent
 
@@ -47,7 +47,15 @@ def cli(verbose: bool) -> None:
 @click.argument("pr_number", type=int)
 @click.option("--output", type=click.Choice(["github", "json", "markdown"]), default="github")
 @click.option("--dry-run", is_flag=True, help="Don't post to GitHub")
-@click.option("--agents", type=int, default=1, help="Number of agents (1-3): 1=comprehensive, 2+=specialized")
+@click.option(
+    "--agents", type=int, default=1, help="Number of agents (1-3): 1=comprehensive, 2+=specialized"
+)
+@click.option(
+    "--no-approve", is_flag=True, help="Don't use APPROVE action (auto-enabled in GitHub Actions)"
+)
+@click.option(
+    "--reviewer-name", default="AI Code Reviewer", help="Custom name to display in review header"
+)
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
 def review_pr(
     repo: str,
@@ -55,22 +63,28 @@ def review_pr(
     output: str,
     dry_run: bool,
     agents: int,
-    config_path: Optional[str],
+    no_approve: bool,
+    reviewer_name: str,
+    config_path: str | None,
 ) -> None:
     """Review a GitHub pull request using Cursor AI agent(s).
-    
+
     With --agents=1 (default): Single comprehensive review
     With --agents=2: Security + Performance agents
     With --agents=3: Security + Performance + Quality agents
     """
-    asyncio.run(review_pr_async(
-        repo=repo,
-        pr_number=pr_number,
-        output=output,
-        dry_run=dry_run,
-        num_agents=agents,
-        config_path=Path(config_path) if config_path else None,
-    ))
+    asyncio.run(
+        review_pr_async(
+            repo=repo,
+            pr_number=pr_number,
+            output=output,
+            dry_run=dry_run,
+            num_agents=agents,
+            no_approve=no_approve,
+            reviewer_name=reviewer_name,
+            config_path=Path(config_path) if config_path else None,
+        )
+    )
 
 
 async def review_pr_async(
@@ -79,9 +93,17 @@ async def review_pr_async(
     output: str = "github",
     dry_run: bool = False,
     num_agents: int = 1,
-    config_path: Optional[Path] = None,
+    no_approve: bool = False,
+    reviewer_name: str = "AI Code Reviewer",
+    config_path: Path | None = None,
 ) -> None:
     """Async implementation of PR review using Cursor Background Agent(s)."""
+    # Auto-detect GitHub Actions environment - never allow APPROVE there
+    is_github_actions = os.getenv("GITHUB_ACTIONS") == "true"
+    allow_approve = not no_approve and not is_github_actions
+
+    if is_github_actions and not no_approve:
+        console.print("[dim]ℹ️  Running in GitHub Actions - APPROVE disabled automatically[/dim]")
     config = load_config(config_path)
     errors = validate_config(config)
     if errors:
@@ -90,15 +112,18 @@ async def review_pr_async(
         sys.exit(1)
 
     console.print(f"🔍 Reviewing PR #{pr_number} in [bold]{repo}[/bold]...")
-    
+
     if num_agents == 1:
         console.print("[yellow]Using 1 comprehensive agent (2-5 min)[/yellow]")
     else:
         agent_types = ["security", "performance", "quality"][:num_agents]
-        console.print(f"[yellow]Using {num_agents} specialized agents: {', '.join(agent_types)} (3-8 min)[/yellow]")
+        console.print(
+            f"[yellow]Using {num_agents} specialized agents: {', '.join(agent_types)} (3-8 min)[/yellow]"
+        )
 
     # Status callback
     last_status = [None]
+
     def on_status(status: str) -> None:
         if status != last_status[0]:
             console.print(f"  → Agent status: [cyan]{status}[/cyan]")
@@ -137,37 +162,97 @@ async def review_pr_async(
         sys.exit(1)
 
     console.print(f"✅ Review complete: {review.summary}")
-    console.print(f"   Time: {review.total_review_time_ms / 1000:.1f}s | Findings: {len(review.findings)}")
+    console.print(
+        f"   Time: {review.total_review_time_ms / 1000:.1f}s | Findings: {len(review.findings)}"
+    )
 
     # Warn about partial failures
     if review.failed_agents:
-        console.print(f"[yellow]⚠️  {len(review.failed_agents)}/{review.agent_count} agents failed: {', '.join(review.failed_agents)}[/yellow]")
+        console.print(
+            f"[yellow]⚠️  {len(review.failed_agents)}/{review.agent_count} agents failed: {', '.join(review.failed_agents)}[/yellow]"
+        )
 
     # Output
     if output == "json":
         print(json.dumps(format_review_as_json(review), indent=2))
     elif output == "markdown":
-        formatter = GitHubFormatter()
+        formatter = GitHubFormatter(reviewer_name)
         print(formatter.format_review(review))
     else:  # github
+        gh = GitHubClient(config.github.token)
+        pr = gh.get_pull_request(repo, pr_number)
+        formatter = GitHubFormatter(reviewer_name)
+
+        # Compute delta from previous reviews
+        console.print("🔄 Checking for previous review comments...")
+        delta = gh.compute_review_delta(pr, review.findings)
+
+        # Show delta summary
+        if delta.previous_comments:
+            console.print(
+                f"   Found {len(delta.previous_comments)} previous comments: "
+                f"[green]{len(delta.fixed_findings)} fixed[/green], "
+                f"[yellow]{len(delta.open_findings)} open[/yellow], "
+                f"[cyan]{len(delta.new_findings)} new[/cyan]"
+            )
+        else:
+            console.print("   No previous review comments found (first run)")
+
         if dry_run:
             console.print("\n[yellow]Dry run - not posting to GitHub[/yellow]")
-            formatter = GitHubFormatter()
-            print(formatter.format_review(review))
+            if delta.previous_comments:
+                print(formatter.format_review_with_delta(review, delta))
+            else:
+                print(formatter.format_review(review))
         else:
-            gh = GitHubClient(config.github.token)
-            pr = gh.get_pull_request(repo, pr_number)
-            formatter = GitHubFormatter()
-            body = formatter.format_review(review)
-            action = formatter.get_review_action(review)
-            gh.post_review(pr, review, body, action)
-            console.print(f"📝 Posted review to GitHub")
+            # Format review with delta info if we have previous comments
+            if delta.previous_comments:
+                body = formatter.format_review_with_delta(review, delta)
+                action = formatter.get_review_action_with_delta(review, delta, allow_approve)
+            else:
+                body = formatter.format_review(review)
+                action = formatter.get_review_action(review, allow_approve=allow_approve)
 
-            # Post inline comments for each finding
-            if review.findings:
-                console.print(f"💬 Posting inline comments for {min(len(review.findings), 10)} findings...")
-                posted = gh.post_inline_comments(pr, review)
-                console.print(f"✅ Posted {posted} inline comments")
+            gh.post_review(pr, review, body, action)
+            console.print(f"📝 Posted review to GitHub ({action})")
+
+            # Resolve fixed comments
+            if delta.fixed_findings:
+                console.print(f"✅ Marking {len(delta.fixed_findings)} fixed issues as resolved...")
+                resolved = gh.resolve_fixed_comments(pr, delta)
+                console.print(f"   Resolved {resolved} comments")
+
+            # Post inline comments only for NEW findings
+            new_findings_to_post = (
+                delta.new_findings if delta.previous_comments else review.findings
+            )
+            if new_findings_to_post:
+                # Create a temporary review with only new findings for inline comments
+                from ai_reviewer.models.review import ConsolidatedReview as CR
+
+                new_only_review = CR(
+                    id=review.id,
+                    created_at=review.created_at,
+                    repo=review.repo,
+                    pr_number=review.pr_number,
+                    findings=new_findings_to_post,
+                    summary=review.summary,
+                    agent_count=review.agent_count,
+                    review_quality_score=review.review_quality_score,
+                    total_review_time_ms=review.total_review_time_ms,
+                )
+                console.print(
+                    f"💬 Posting inline comments for {min(len(new_findings_to_post), 10)} new findings..."
+                )
+                posted = gh.post_inline_comments(pr, new_only_review)
+                console.print(f"   Posted {posted} inline comments")
+
+            # Final status
+            if delta.all_issues_resolved:
+                console.print("\n[green]🎉 All issues resolved! Ready to merge.[/green]")
+            elif delta.previous_comments:
+                open_count = len(delta.open_findings) + len(delta.new_findings)
+                console.print(f"\n[yellow]⚠️  {open_count} issues remaining[/yellow]")
 
 
 @cli.group("config")
@@ -178,7 +263,7 @@ def config_group() -> None:
 
 @config_group.command("validate")
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
-def config_validate(config_path: Optional[str]) -> None:
+def config_validate(config_path: str | None) -> None:
     """Validate configuration file."""
     try:
         config = load_config(Path(config_path) if config_path else None)
@@ -198,7 +283,7 @@ def config_validate(config_path: Optional[str]) -> None:
 
 @config_group.command("show")
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
-def config_show(config_path: Optional[str]) -> None:
+def config_show(config_path: str | None) -> None:
     """Show current configuration."""
     config = load_config(Path(config_path) if config_path else None)
 
@@ -224,7 +309,7 @@ def config_show(config_path: Optional[str]) -> None:
 @click.option("--port", default=8080, help="Port to listen on")
 @click.option("--host", default="0.0.0.0", help="Host to bind to")
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
-def serve(port: int, host: str, config_path: Optional[str]) -> None:
+def serve(port: int, host: str, config_path: str | None) -> None:
     """Start the webhook server."""
     config = load_config(Path(config_path) if config_path else None)
     errors = validate_config(config)

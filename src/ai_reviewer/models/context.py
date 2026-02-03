@@ -1,7 +1,6 @@
 """Review context models."""
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass
@@ -20,7 +19,7 @@ class ReviewContext:
     deletions: int
     labels: list[str] = field(default_factory=list)
     repo_languages: list[str] = field(default_factory=list)
-    custom_instructions: Optional[str] = None
+    custom_instructions: str | None = None
 
     def to_prompt_context(self) -> str:
         """Format context for inclusion in agent prompts."""
@@ -30,9 +29,9 @@ class ReviewContext:
 - Author: {self.author}
 - Branch: {self.head_branch} → {self.base_branch}
 - Changes: +{self.additions} / -{self.deletions} in {self.changed_files_count} files
-- Languages: {', '.join(self.repo_languages) if self.repo_languages else 'Unknown'}
-- Labels: {', '.join(self.labels) if self.labels else 'None'}
+- Languages: {", ".join(self.repo_languages) if self.repo_languages else "Unknown"}
+- Labels: {", ".join(self.labels) if self.labels else "None"}
 
 ## PR Description
-{self.pr_description or 'No description provided.'}
+{self.pr_description or "No description provided."}
 """

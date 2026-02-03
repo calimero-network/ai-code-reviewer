@@ -2,9 +2,8 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Optional
 
-from ai_reviewer.models.findings import ConsolidatedFinding, ReviewFinding, Severity, Category
+from ai_reviewer.models.findings import Category, ConsolidatedFinding, ReviewFinding, Severity
 
 
 @dataclass
@@ -56,7 +55,7 @@ class ConsolidatedReview:
     @property
     def findings_by_severity(self) -> dict[Severity, int]:
         """Count findings by severity level."""
-        counts: dict[Severity, int] = {s: 0 for s in Severity}
+        counts: dict[Severity, int] = dict.fromkeys(Severity, 0)
         for finding in self.findings:
             counts[finding.severity] += 1
         return counts
@@ -64,7 +63,7 @@ class ConsolidatedReview:
     @property
     def findings_by_category(self) -> dict[Category, int]:
         """Count findings by category."""
-        counts: dict[Category, int] = {c: 0 for c in Category}
+        counts: dict[Category, int] = dict.fromkeys(Category, 0)
         for finding in self.findings:
             counts[finding.category] += 1
         return counts

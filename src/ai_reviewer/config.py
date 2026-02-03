@@ -3,7 +3,7 @@
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import yaml
 
@@ -17,7 +17,7 @@ class AgentConfig:
     focus_areas: list[str]
     max_tokens: int = 4096
     temperature: float = 0.3
-    custom_prompt_append: Optional[str] = None
+    custom_prompt_append: str | None = None
     include_codebase_context: bool = False
 
 
@@ -35,9 +35,9 @@ class GitHubConfig:
     """GitHub integration configuration."""
 
     token: str
-    webhook_secret: Optional[str] = None
-    app_id: Optional[str] = None
-    private_key_path: Optional[str] = None
+    webhook_secret: str | None = None
+    app_id: str | None = None
+    private_key_path: str | None = None
 
 
 @dataclass
@@ -104,7 +104,7 @@ class Config:
     server: ServerSettings = field(default_factory=ServerSettings)
 
 
-def load_config(config_path: Optional[Path] = None) -> Config:
+def load_config(config_path: Path | None = None) -> Config:
     """Load configuration from file and environment.
 
     Args:
@@ -168,15 +168,17 @@ def _parse_config(raw: dict[str, Any]) -> Config:
     # Agents config
     agents = []
     for agent_raw in raw.get("agents", []):
-        agents.append(AgentConfig(
-            name=agent_raw["name"],
-            model=agent_raw["model"],
-            focus_areas=agent_raw.get("focus_areas", []),
-            max_tokens=agent_raw.get("max_tokens", 4096),
-            temperature=agent_raw.get("temperature", 0.3),
-            custom_prompt_append=agent_raw.get("custom_prompt_append"),
-            include_codebase_context=agent_raw.get("include_codebase_context", False),
-        ))
+        agents.append(
+            AgentConfig(
+                name=agent_raw["name"],
+                model=agent_raw["model"],
+                focus_areas=agent_raw.get("focus_areas", []),
+                max_tokens=agent_raw.get("max_tokens", 4096),
+                temperature=agent_raw.get("temperature", 0.3),
+                custom_prompt_append=agent_raw.get("custom_prompt_append"),
+                include_codebase_context=agent_raw.get("include_codebase_context", False),
+            )
+        )
 
     # Default agents if none configured
     if not agents:

@@ -1,9 +1,7 @@
 """Base class for review agents."""
 
-import json
 import logging
 import time
-from abc import ABC, abstractmethod
 from typing import Any
 
 from ai_reviewer.agents.cursor_client import CursorClient
@@ -14,7 +12,7 @@ from ai_reviewer.models.review import AgentReview
 logger = logging.getLogger(__name__)
 
 
-class ReviewAgent(ABC):
+class ReviewAgent:
     """Base class for all review agents."""
 
     # Subclasses should override these
@@ -116,7 +114,7 @@ Rules:
 - Be specific about file paths and line numbers
 - Confidence should reflect how certain you are (0.0 to 1.0)
 - Do not make up issues - if the code is fine, return empty findings
-- Focus on your specialty areas: {', '.join(self.focus_areas)}
+- Focus on your specialty areas: {", ".join(self.focus_areas)}
 """
 
     def _build_review_prompt(
@@ -146,7 +144,7 @@ Rules:
 ```
 {files_str}
 
-Please review the code changes above and identify any issues within your focus areas: {', '.join(self.focus_areas)}.
+Please review the code changes above and identify any issues within your focus areas: {", ".join(self.focus_areas)}.
 """
 
     def _parse_findings(self, response: dict[str, Any]) -> list[ReviewFinding]:

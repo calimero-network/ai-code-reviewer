@@ -90,12 +90,10 @@ class AgentOrchestrator:
         successful_reviews: list[AgentReview] = []
         failed_agents: list[str] = []
 
-        for agent, result in zip(self.agents, results):
+        for agent, result in zip(self.agents, results, strict=False):
             if isinstance(result, AgentReview):
                 successful_reviews.append(result)
-                logger.info(
-                    f"Agent {agent.agent_id} completed: {len(result.findings)} findings"
-                )
+                logger.info(f"Agent {agent.agent_id} completed: {len(result.findings)} findings")
             elif isinstance(result, asyncio.TimeoutError):
                 failed_agents.append(f"{agent.agent_id} (timeout)")
                 logger.warning(f"Agent {agent.agent_id} timed out")
@@ -115,8 +113,7 @@ class AgentOrchestrator:
             )
 
         logger.info(
-            f"Review complete: {len(successful_reviews)} successful, "
-            f"{len(failed_agents)} failed"
+            f"Review complete: {len(successful_reviews)} successful, {len(failed_agents)} failed"
         )
 
         return successful_reviews
@@ -182,7 +179,7 @@ class AgentOrchestrator:
 
             # Process results
             still_failing = []
-            for agent, result in zip(remaining_agents, results):
+            for agent, result in zip(remaining_agents, results, strict=False):
                 if isinstance(result, AgentReview):
                     all_reviews.append(result)
                 else:
@@ -192,8 +189,6 @@ class AgentOrchestrator:
             attempts += 1
 
         if len(all_reviews) < self.config.min_agents_required:
-            raise InsufficientAgentsError(
-                f"Only {len(all_reviews)} agents succeeded after retries"
-            )
+            raise InsufficientAgentsError(f"Only {len(all_reviews)} agents succeeded after retries")
 
         return all_reviews

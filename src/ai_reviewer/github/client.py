@@ -1,15 +1,18 @@
 """GitHub API client for PR operations."""
 
+import contextlib
 import logging
-from dataclasses import dataclass
-from typing import Any
+import re
+from dataclasses import dataclass, field
 
 from github import Github
 from github.GithubException import GithubException
 from github.PullRequest import PullRequest
+from github.PullRequestComment import PullRequestComment
 from github.Repository import Repository
 
 from ai_reviewer.models.context import ReviewContext
+from ai_reviewer.models.findings import ConsolidatedFinding
 from ai_reviewer.models.review import ConsolidatedReview
 
 logger = logging.getLogger(__name__)
@@ -21,6 +24,34 @@ class GitHubConfig:
 
     token: str
     base_url: str | None = None  # For GitHub Enterprise
+
+
+@dataclass
+class PreviousComment:
+    """Represents a previous review comment from the AI reviewer."""
+
+    id: int
+    file_path: str
+    line: int
+    title: str
+    severity: str  # Extracted from emoji
+    body: str
+    is_resolved: bool = False
+
+
+@dataclass
+class ReviewDelta:
+    """Tracks changes between review runs."""
+
+    new_findings: list[ConsolidatedFinding] = field(default_factory=list)
+    fixed_findings: list[PreviousComment] = field(default_factory=list)
+    open_findings: list[ConsolidatedFinding] = field(default_factory=list)
+    previous_comments: list[PreviousComment] = field(default_factory=list)
+
+    @property
+    def all_issues_resolved(self) -> bool:
+        """Check if all previously found issues are now resolved."""
+        return len(self.open_findings) == 0 and len(self.new_findings) == 0
 
 
 class GitHubClient:
@@ -165,7 +196,7 @@ class GitHubClient:
     def post_review(
         self,
         pr: PullRequest,
-        review: ConsolidatedReview,
+        review: ConsolidatedReview,  # noqa: ARG002
         body: str,
         event: str = "COMMENT",
     ) -> None:
@@ -173,7 +204,7 @@ class GitHubClient:
 
         Args:
             pr: Pull request to review
-            review: Consolidated review data
+            review: Consolidated review data (kept for API compatibility)
             body: Review body text
             event: Review event type (APPROVE, REQUEST_CHANGES, COMMENT)
         """
@@ -198,9 +229,7 @@ class GitHubClient:
         """
         # Add a note that this is posted as a comment due to pending review
         comment_body = (
-            "⚠️ *Posted as comment because you have a pending review on this PR.*\n\n"
-            "---\n\n"
-            f"{body}"
+            f"⚠️ *Posted as comment because you have a pending review on this PR.*\n\n---\n\n{body}"
         )
         pr.create_issue_comment(comment_body)
         logger.info(f"Posted review as issue comment on PR #{pr.number}")
@@ -248,6 +277,223 @@ class GitHubClient:
                 logger.debug(f"Posted inline comment on {finding.file_path}:{finding.line_start}")
             except Exception as e:
                 # Inline comments can fail if the line isn't in the diff
-                logger.warning(f"Could not post inline comment on {finding.file_path}:{finding.line_start}: {e}")
+                logger.warning(
+                    f"Could not post inline comment on {finding.file_path}:{finding.line_start}: {e}"
+                )
 
         return posted_count
+
+    # Known AI reviewer bot usernames
+    AI_REVIEWER_USERS = {
+        "github-actions[bot]",
+        "cursor[bot]",
+    }
+
+    def get_previous_review_comments(self, pr: PullRequest) -> list[PreviousComment]:
+        """Get all previous review comments from AI reviewers.
+
+        Args:
+            pr: Pull request object
+
+        Returns:
+            List of previous comments from AI reviewers
+        """
+        comments: list[PreviousComment] = []
+
+        # Include current user and known bot users
+        try:
+            current_user = self._gh.get_user().login
+            allowed_users = self.AI_REVIEWER_USERS | {current_user}
+        except Exception:
+            allowed_users = self.AI_REVIEWER_USERS
+
+        # Get review comments (inline comments on code)
+        for comment in pr.get_review_comments():
+            user_login = comment.user.login
+
+            # Check if from known AI reviewer OR has AI reviewer format
+            is_ai_reviewer = user_login in allowed_users
+            has_ai_format = self._is_ai_reviewer_comment(comment.body)
+
+            if not (is_ai_reviewer or has_ai_format):
+                continue
+
+            # Parse the comment to extract title and severity
+            parsed = self._parse_review_comment(comment)
+            if parsed:
+                comments.append(parsed)
+
+        logger.info(f"Found {len(comments)} previous AI review comments")
+        return comments
+
+    def _is_ai_reviewer_comment(self, body: str) -> bool:
+        """Check if a comment looks like it came from an AI reviewer.
+
+        Args:
+            body: Comment body
+
+        Returns:
+            True if it matches AI reviewer format
+        """
+        # Check for severity emojis that we use
+        ai_markers = ["🔴", "🟡", "💡", "📝", "**Suggested fix:**", "AI Code Reviewer"]
+        return any(marker in body for marker in ai_markers)
+
+    def _parse_review_comment(self, comment: PullRequestComment) -> PreviousComment | None:
+        """Parse a review comment to extract structured data.
+
+        Args:
+            comment: GitHub review comment
+
+        Returns:
+            Parsed comment or None if not parseable
+        """
+        body = comment.body
+
+        # Extract severity from emoji
+        severity_map = {
+            "🔴": "critical",
+            "🟡": "warning",
+            "💡": "suggestion",
+            "📝": "nitpick",
+        }
+
+        severity = "unknown"
+        for emoji, sev in severity_map.items():
+            if emoji in body:
+                severity = sev
+                break
+
+        # Extract title from **Title** pattern
+        title_match = re.search(r"\*\*([^*]+)\*\*", body)
+        title = title_match.group(1) if title_match else "Unknown Issue"
+
+        return PreviousComment(
+            id=comment.id,
+            file_path=comment.path,
+            line=comment.line or comment.original_line or 0,
+            title=title,
+            severity=severity,
+            body=body,
+            is_resolved=False,  # GitHub API doesn't expose this directly
+        )
+
+    def compute_review_delta(
+        self,
+        pr: PullRequest,
+        current_findings: list[ConsolidatedFinding],
+    ) -> ReviewDelta:
+        """Compare current findings with previous comments to compute delta.
+
+        Args:
+            pr: Pull request object
+            current_findings: Current review findings
+
+        Returns:
+            ReviewDelta showing new, fixed, and open issues
+        """
+        previous_comments = self.get_previous_review_comments(pr)
+        delta = ReviewDelta(previous_comments=previous_comments)
+
+        # Create a lookup for previous comments by (file, line, title_normalized)
+        previous_lookup: dict[tuple[str, int, str], PreviousComment] = {}
+        for comment in previous_comments:
+            key = (comment.file_path, comment.line, self._normalize_title(comment.title))
+            previous_lookup[key] = comment
+
+        # Track which previous comments are still open
+        matched_previous: set[int] = set()
+
+        for finding in current_findings:
+            key = (finding.file_path, finding.line_start, self._normalize_title(finding.title))
+
+            if key in previous_lookup:
+                # This finding was already reported - it's still OPEN
+                delta.open_findings.append(finding)
+                matched_previous.add(previous_lookup[key].id)
+            else:
+                # This is a NEW finding
+                delta.new_findings.append(finding)
+
+        # Any previous comments not matched are FIXED
+        for comment in previous_comments:
+            if comment.id not in matched_previous:
+                delta.fixed_findings.append(comment)
+
+        logger.info(
+            f"Review delta: {len(delta.new_findings)} new, "
+            f"{len(delta.fixed_findings)} fixed, "
+            f"{len(delta.open_findings)} open"
+        )
+
+        return delta
+
+    def _normalize_title(self, title: str) -> str:
+        """Normalize a title for comparison.
+
+        Args:
+            title: Original title
+
+        Returns:
+            Normalized title (lowercase, stripped)
+        """
+        return title.lower().strip()
+
+    def resolve_fixed_comments(self, pr: PullRequest, delta: ReviewDelta) -> int:
+        """Mark fixed issues as resolved by replying to them.
+
+        Args:
+            pr: Pull request object
+            delta: Review delta with fixed findings
+
+        Returns:
+            Number of comments marked as resolved
+        """
+        resolved_count = 0
+
+        # Get all existing replies to avoid duplicates
+        existing_replies = self._get_resolved_comment_ids(pr)
+
+        for fixed in delta.fixed_findings:
+            # Skip if we've already marked this as resolved
+            if fixed.id in existing_replies:
+                logger.debug(f"Comment {fixed.id} already has resolved reply, skipping")
+                continue
+
+            try:
+                # Find the comment and reply to it
+                comment = pr.get_review_comment(fixed.id)
+
+                # Add reaction (may already exist, that's ok)
+                with contextlib.suppress(Exception):
+                    comment.create_reaction("hooray")  # 🎉 reaction
+
+                # Post a reply indicating it's fixed
+                pr.create_review_comment_reply(
+                    comment_id=fixed.id,
+                    body="✅ **Resolved** - This issue has been addressed in the latest changes.",
+                )
+                resolved_count += 1
+                logger.debug(f"Marked comment {fixed.id} as resolved")
+            except Exception as e:
+                logger.warning(f"Could not resolve comment {fixed.id}: {e}")
+
+        return resolved_count
+
+    def _get_resolved_comment_ids(self, pr: PullRequest) -> set[int]:
+        """Get IDs of comments that already have a 'Resolved' reply.
+
+        Args:
+            pr: Pull request object
+
+        Returns:
+            Set of comment IDs that have been marked resolved
+        """
+        resolved_ids: set[int] = set()
+
+        for comment in pr.get_review_comments():
+            # Check if this is a "Resolved" reply with a parent
+            if "✅ **Resolved**" in comment.body and comment.in_reply_to_id:
+                resolved_ids.add(comment.in_reply_to_id)
+
+        return resolved_ids
