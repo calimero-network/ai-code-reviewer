@@ -16,8 +16,8 @@ from rich.table import Table
 from ai_reviewer import __version__
 from ai_reviewer.agents.cursor_client import CursorConfig
 from ai_reviewer.config import load_config, validate_config
-from ai_reviewer.github.client import GitHubClient
 from ai_reviewer.github.formatter import GitHubFormatter, format_review_as_json
+from ai_reviewer.github.client import GitHubClient
 from ai_reviewer.github.webhook import create_webhook_app, set_review_handler
 from ai_reviewer.review import review_pr_with_cursor_agent
 
@@ -47,12 +47,8 @@ def cli(verbose: bool) -> None:
 @click.argument("pr_number", type=int)
 @click.option("--output", type=click.Choice(["github", "json", "markdown"]), default="github")
 @click.option("--dry-run", is_flag=True, help="Don't post to GitHub")
-@click.option(
-    "--agents", type=int, default=1, help="Number of agents (1-3): 1=comprehensive, 2+=specialized"
-)
-@click.option(
-    "--no-approve", is_flag=True, help="Don't use APPROVE action (auto-enabled in GitHub Actions)"
-)
+@click.option("--agents", type=int, default=1, help="Number of agents (1-3): 1=comprehensive, 2+=specialized")
+@click.option("--no-approve", is_flag=True, help="Don't use APPROVE action (auto-enabled in GitHub Actions)")
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
 def review_pr(
     repo: str,
@@ -69,17 +65,15 @@ def review_pr(
     With --agents=2: Security + Performance agents
     With --agents=3: Security + Performance + Quality agents
     """
-    asyncio.run(
-        review_pr_async(
-            repo=repo,
-            pr_number=pr_number,
-            output=output,
-            dry_run=dry_run,
-            num_agents=agents,
-            no_approve=no_approve,
-            config_path=Path(config_path) if config_path else None,
-        )
-    )
+    asyncio.run(review_pr_async(
+        repo=repo,
+        pr_number=pr_number,
+        output=output,
+        dry_run=dry_run,
+        num_agents=agents,
+        no_approve=no_approve,
+        config_path=Path(config_path) if config_path else None,
+    ))
 
 
 async def review_pr_async(
@@ -95,7 +89,7 @@ async def review_pr_async(
     # Auto-detect GitHub Actions environment - never allow APPROVE there
     is_github_actions = os.getenv("GITHUB_ACTIONS") == "true"
     allow_approve = not no_approve and not is_github_actions
-
+    
     if is_github_actions and not no_approve:
         console.print("[dim]ℹ️  Running in GitHub Actions - APPROVE disabled automatically[/dim]")
     config = load_config(config_path)
@@ -106,18 +100,15 @@ async def review_pr_async(
         sys.exit(1)
 
     console.print(f"🔍 Reviewing PR #{pr_number} in [bold]{repo}[/bold]...")
-
+    
     if num_agents == 1:
         console.print("[yellow]Using 1 comprehensive agent (2-5 min)[/yellow]")
     else:
         agent_types = ["security", "performance", "quality"][:num_agents]
-        console.print(
-            f"[yellow]Using {num_agents} specialized agents: {', '.join(agent_types)} (3-8 min)[/yellow]"
-        )
+        console.print(f"[yellow]Using {num_agents} specialized agents: {', '.join(agent_types)} (3-8 min)[/yellow]")
 
     # Status callback
     last_status = [None]
-
     def on_status(status: str) -> None:
         if status != last_status[0]:
             console.print(f"  → Agent status: [cyan]{status}[/cyan]")
@@ -156,15 +147,11 @@ async def review_pr_async(
         sys.exit(1)
 
     console.print(f"✅ Review complete: {review.summary}")
-    console.print(
-        f"   Time: {review.total_review_time_ms / 1000:.1f}s | Findings: {len(review.findings)}"
-    )
+    console.print(f"   Time: {review.total_review_time_ms / 1000:.1f}s | Findings: {len(review.findings)}")
 
     # Warn about partial failures
     if review.failed_agents:
-        console.print(
-            f"[yellow]⚠️  {len(review.failed_agents)}/{review.agent_count} agents failed: {', '.join(review.failed_agents)}[/yellow]"
-        )
+        console.print(f"[yellow]⚠️  {len(review.failed_agents)}/{review.agent_count} agents failed: {', '.join(review.failed_agents)}[/yellow]")
 
     # Output
     if output == "json":
@@ -217,13 +204,10 @@ async def review_pr_async(
                 console.print(f"   Resolved {resolved} comments")
 
             # Post inline comments only for NEW findings
-            new_findings_to_post = (
-                delta.new_findings if delta.previous_comments else review.findings
-            )
+            new_findings_to_post = delta.new_findings if delta.previous_comments else review.findings
             if new_findings_to_post:
                 # Create a temporary review with only new findings for inline comments
                 from ai_reviewer.models.review import ConsolidatedReview as CR
-
                 new_only_review = CR(
                     id=review.id,
                     created_at=review.created_at,
@@ -235,9 +219,7 @@ async def review_pr_async(
                     review_quality_score=review.review_quality_score,
                     total_review_time_ms=review.total_review_time_ms,
                 )
-                console.print(
-                    f"💬 Posting inline comments for {min(len(new_findings_to_post), 10)} new findings..."
-                )
+                console.print(f"💬 Posting inline comments for {min(len(new_findings_to_post), 10)} new findings...")
                 posted = gh.post_inline_comments(pr, new_only_review)
                 console.print(f"   Posted {posted} inline comments")
 

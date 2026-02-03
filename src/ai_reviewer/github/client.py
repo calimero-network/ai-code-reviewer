@@ -287,21 +287,39 @@ class GitHubClient:
 
         return posted_count
 
+    # Known AI reviewer bot usernames
+    AI_REVIEWER_USERS = {
+        "github-actions[bot]",
+        "cursor[bot]",
+    }
+
     def get_previous_review_comments(self, pr: PullRequest) -> list[PreviousComment]:
-        """Get all previous review comments from this AI reviewer.
+        """Get all previous review comments from AI reviewers.
 
         Args:
             pr: Pull request object
 
         Returns:
-            List of previous comments from this reviewer
+            List of previous comments from AI reviewers
         """
         comments: list[PreviousComment] = []
-        current_user = self._gh.get_user().login
+
+        # Include current user and known bot users
+        try:
+            current_user = self._gh.get_user().login
+            allowed_users = self.AI_REVIEWER_USERS | {current_user}
+        except Exception:
+            allowed_users = self.AI_REVIEWER_USERS
 
         # Get review comments (inline comments on code)
         for comment in pr.get_review_comments():
-            if comment.user.login != current_user:
+            user_login = comment.user.login
+
+            # Check if from known AI reviewer OR has AI reviewer format
+            is_ai_reviewer = user_login in allowed_users
+            has_ai_format = self._is_ai_reviewer_comment(comment.body)
+
+            if not (is_ai_reviewer or has_ai_format):
                 continue
 
             # Parse the comment to extract title and severity
@@ -309,8 +327,21 @@ class GitHubClient:
             if parsed:
                 comments.append(parsed)
 
-        logger.info(f"Found {len(comments)} previous review comments from {current_user}")
+        logger.info(f"Found {len(comments)} previous AI review comments")
         return comments
+
+    def _is_ai_reviewer_comment(self, body: str) -> bool:
+        """Check if a comment looks like it came from an AI reviewer.
+
+        Args:
+            body: Comment body
+
+        Returns:
+            True if it matches AI reviewer format
+        """
+        # Check for severity emojis that we use
+        ai_markers = ["🔴", "🟡", "💡", "📝", "**Suggested fix:**", "AI Code Reviewer"]
+        return any(marker in body for marker in ai_markers)
 
     def _parse_review_comment(self, comment: PullRequestComment) -> PreviousComment | None:
         """Parse a review comment to extract structured data.

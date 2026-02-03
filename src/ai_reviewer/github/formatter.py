@@ -47,38 +47,27 @@ class GitHubFormatter:
         ]
 
         if not review.findings:
-            lines.extend(
-                [
-                    "### ✅ No Issues Found",
-                    "",
-                    "All agents reviewed the code and found no issues. LGTM! 🎉",
-                    "",
-                ]
-            )
+            lines.extend([
+                "### ✅ No Issues Found",
+                "",
+                "All agents reviewed the code and found no issues. LGTM! 🎉",
+                "",
+            ])
         else:
             # Group by severity
             by_severity = self._group_by_severity(review)
 
-            for severity in [
-                Severity.CRITICAL,
-                Severity.WARNING,
-                Severity.SUGGESTION,
-                Severity.NITPICK,
-            ]:
+            for severity in [Severity.CRITICAL, Severity.WARNING, Severity.SUGGESTION, Severity.NITPICK]:
                 findings = by_severity.get(severity, [])
                 if findings:
-                    lines.extend(
-                        self._format_severity_section(severity, findings, review.agent_count)
-                    )
+                    lines.extend(self._format_severity_section(severity, findings, review.agent_count))
                     lines.append("")
 
-        lines.extend(
-            [
-                "---",
-                "",
-                self._format_footer(review),
-            ]
-        )
+        lines.extend([
+            "---",
+            "",
+            self._format_footer(review),
+        ])
 
         return "\n".join(lines)
 
@@ -121,28 +110,24 @@ class GitHubFormatter:
             if consensus_count == agent_count:
                 consensus_str += " ✓"
 
-            lines.extend(
-                [
-                    f"#### {i}. {finding.title}",
-                    f"**File:** `{finding.file_path}` (line {finding.line_start}"
-                    + (f"-{finding.line_end}" if finding.line_end else "")
-                    + f") | **Consensus:** {consensus_str}",
-                    "",
-                    finding.description,
-                    "",
-                ]
-            )
+            lines.extend([
+                f"#### {i}. {finding.title}",
+                f"**File:** `{finding.file_path}` (line {finding.line_start}"
+                + (f"-{finding.line_end}" if finding.line_end else "")
+                + f") | **Consensus:** {consensus_str}",
+                "",
+                finding.description,
+                "",
+            ])
 
             if finding.suggested_fix:
-                lines.extend(
-                    [
-                        "**Suggested fix:**",
-                        "```",
-                        finding.suggested_fix,
-                        "```",
-                        "",
-                    ]
-                )
+                lines.extend([
+                    "**Suggested fix:**",
+                    "```",
+                    finding.suggested_fix,
+                    "```",
+                    "",
+                ])
 
             # Show which agents found this (for transparency)
             agents_str = ", ".join(finding.agreeing_agents[:3])
@@ -198,29 +183,23 @@ class GitHubFormatter:
 
         # Show OPEN issues (still pending)
         if delta.open_findings:
-            lines.extend(
-                self._format_open_findings_section(delta.open_findings, review.agent_count)
-            )
+            lines.extend(self._format_open_findings_section(delta.open_findings, review.agent_count))
             lines.append("")
 
         # If nothing to show
         if not delta.new_findings and not delta.open_findings and not delta.fixed_findings:
-            lines.extend(
-                [
-                    "### ✅ No Issues Found",
-                    "",
-                    "All agents reviewed the code and found no issues. LGTM! 🎉",
-                    "",
-                ]
-            )
-
-        lines.extend(
-            [
-                "---",
+            lines.extend([
+                "### ✅ No Issues Found",
                 "",
-                self._format_footer(review),
-            ]
-        )
+                "All agents reviewed the code and found no issues. LGTM! 🎉",
+                "",
+            ])
+
+        lines.extend([
+            "---",
+            "",
+            self._format_footer(review),
+        ])
 
         return "\n".join(lines)
 
@@ -250,7 +229,8 @@ class GitHubFormatter:
 
         # Determine overall status
         has_critical = any(
-            f.severity.value == "critical" for f in delta.new_findings + delta.open_findings
+            f.severity.value == "critical"
+            for f in delta.new_findings + delta.open_findings
         )
 
         if has_critical:
@@ -297,12 +277,7 @@ class GitHubFormatter:
         # Group by severity
         by_severity = self._group_findings_by_severity(findings)
 
-        for severity in [
-            Severity.CRITICAL,
-            Severity.WARNING,
-            Severity.SUGGESTION,
-            Severity.NITPICK,
-        ]:
+        for severity in [Severity.CRITICAL, Severity.WARNING, Severity.SUGGESTION, Severity.NITPICK]:
             sev_findings = by_severity.get(severity, [])
             if sev_findings:
                 lines.extend(self._format_severity_section(severity, sev_findings, agent_count))
@@ -321,12 +296,7 @@ class GitHubFormatter:
         # Group by severity
         by_severity = self._group_findings_by_severity(findings)
 
-        for severity in [
-            Severity.CRITICAL,
-            Severity.WARNING,
-            Severity.SUGGESTION,
-            Severity.NITPICK,
-        ]:
+        for severity in [Severity.CRITICAL, Severity.WARNING, Severity.SUGGESTION, Severity.NITPICK]:
             sev_findings = by_severity.get(severity, [])
             if sev_findings:
                 lines.extend(self._format_severity_section(severity, sev_findings, agent_count))
@@ -364,7 +334,8 @@ class GitHubFormatter:
 
         # If there are critical issues (new or open), request changes
         has_critical = any(
-            f.severity.value == "critical" for f in delta.new_findings + delta.open_findings
+            f.severity.value == "critical"
+            for f in delta.new_findings + delta.open_findings
         )
         if has_critical:
             return "REQUEST_CHANGES"
