@@ -52,11 +52,32 @@ This module fetches data and posts results. Review logic is in orchestrator.
 ## Webhook Handling
 
 ```python
+import hashlib
+import hmac
+
+def verify_webhook_signature(payload: bytes, signature: str, secret: str) -> bool:
+    """Verify GitHub webhook signature using timing-safe comparison.
+    
+    IMPORTANT: Must use hmac.compare_digest() to prevent timing attacks.
+    """
+    if not signature or not signature.startswith("sha256="):
+        return False
+    
+    expected = "sha256=" + hmac.new(
+        secret.encode(),
+        payload,
+        hashlib.sha256
+    ).hexdigest()
+    
+    # Timing-safe comparison prevents timing attacks
+    return hmac.compare_digest(expected, signature)
+
 @app.post("/webhook")
 async def github_webhook(request: Request):
-    # 1. Validate signature
+    # 1. Validate signature (timing-safe)
     signature = request.headers.get("X-Hub-Signature-256")
-    if not verify_signature(await request.body(), signature, WEBHOOK_SECRET):
+    body = await request.body()
+    if not verify_webhook_signature(body, signature, WEBHOOK_SECRET):
         raise HTTPException(401, "Invalid signature")
     
     # 2. Parse event

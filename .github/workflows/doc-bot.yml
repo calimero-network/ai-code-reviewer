@@ -23,18 +23,42 @@ jobs:
         # Pinned to v4.1.7 - https://github.com/actions/checkout/releases/tag/v4.1.7
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
         with:
-          # Only need current commit and base for comparison
-          fetch-depth: 2
+          # Fetch enough history for merge scenarios and rebases
+          fetch-depth: 50
+      
+      - name: Fetch base branch for comparison
+        run: |
+          git fetch origin ${{ github.base_ref }} --depth=50
       
       - name: Get changed files
         id: changed-files
-        # Pinned to v44.5.2 - https://github.com/tj-actions/changed-files/releases/tag/v44.5.2
-        uses: tj-actions/changed-files@d6babd6899969df1a11d14c368283ea4436bca78
-        with:
-          files: |
-            src/**
-            config.example.yaml
-            pyproject.toml
+        run: |
+          # Use native git to get changed files (avoids third-party action supply chain risk)
+          # Get the merge base to handle rebases correctly
+          MERGE_BASE=$(git merge-base HEAD origin/${{ github.base_ref }} 2>/dev/null || echo "origin/${{ github.base_ref }}")
+          
+          # Get changed files matching our patterns
+          CHANGED=$(git diff --name-only "$MERGE_BASE"...HEAD -- \
+            'src/**' \
+            'config.example.yaml' \
+            'pyproject.toml' \
+            2>/dev/null || echo "")
+          
+          # Check if any files changed
+          if [ -n "$CHANGED" ]; then
+            echo "any_changed=true" >> "$GITHUB_OUTPUT"
+            # Store as newline-separated for safer parsing
+            echo "CHANGED_FILES<<EOF" >> "$GITHUB_OUTPUT"
+            echo "$CHANGED" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          else
+            echo "any_changed=false" >> "$GITHUB_OUTPUT"
+            echo "CHANGED_FILES=" >> "$GITHUB_OUTPUT"
+          fi
+          
+          # Log for debugging
+          echo "Changed files:"
+          echo "$CHANGED"
       
       # Only install dependencies if files actually changed
       - name: Setup Python
@@ -43,12 +67,12 @@ jobs:
         uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f
         with:
           python-version: '3.11'
-          cache: 'pip'
       
-      - name: Install dependencies
+      - name: Install minimal dependencies
         if: steps.changed-files.outputs.any_changed == 'true'
         run: |
-          pip install -e ".[dev]"
+          # Only install what's needed for doc analysis (not full dev dependencies)
+          pip install pyyaml
       
       - name: Analyze documentation needs
         id: doc-analysis
@@ -57,13 +81,8 @@ jobs:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Pass changed files via environment variable to prevent command injection
-          CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
+          CHANGED_FILES: ${{ steps.changed-files.outputs.CHANGED_FILES }}
         run: |
-          # Create secure temporary file with restricted permissions
-          TMPFILE=$(mktemp)
-          chmod 600 "$TMPFILE"
-          echo "$CHANGED_FILES" > "$TMPFILE"
-          
           # Run the doc-check analysis
           if [ -n "$CURSOR_API_KEY" ]; then
             python << 'PYTHON_EOF'
@@ -71,9 +90,9 @@ import os
 import sys
 from pathlib import Path
 
-# Read changed files safely from environment
+# Read changed files safely from environment (newline-separated)
 changed_files_str = os.environ.get('CHANGED_FILES', '')
-changed = changed_files_str.split() if changed_files_str else []
+changed = [f.strip() for f in changed_files_str.strip().split('\n') if f.strip()]
 
 # Analyze each changed file for documentation impact
 suggestions = []
@@ -148,8 +167,8 @@ PYTHON_EOF
               echo ""
               echo "**Changed files to manually check for doc updates:**"
               echo ""
-              # Read from temp file to avoid interpolation issues
-              cat "$TMPFILE" | tr ' ' '\n' | while read -r file; do
+              # Use proper quoting to handle filenames safely
+              echo "$CHANGED_FILES" | while IFS= read -r file; do
                 if [ -n "$file" ]; then
                   echo "- \`$file\`"
                 fi
@@ -159,9 +178,6 @@ PYTHON_EOF
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
           fi
-          
-          # Clean up temp file
-          rm -f "$TMPFILE"
       
       - name: Post comment on PR
         if: steps.doc-analysis.outputs.SUGGESTIONS != ''
