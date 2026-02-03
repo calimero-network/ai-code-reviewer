@@ -145,13 +145,13 @@ async def review_pr_async(
             body = formatter.format_review(review)
             action = formatter.get_review_action(review)
             gh.post_review(pr, review, body, action)
-            console.print(f"📝 Posted review summary to GitHub ({action})")
+            console.print(f"📝 Posted review to GitHub")
             
             # Post inline comments for each finding
             if review.findings:
-                console.print(f"💬 Posting {len(review.findings)} inline comments...")
-                gh.post_inline_comments(pr, review)
-                console.print("✅ Inline comments posted")
+                console.print(f"💬 Posting inline comments for {min(len(review.findings), 10)} findings...")
+                posted = gh.post_inline_comments(pr, review)
+                console.print(f"✅ Posted {posted} inline comments")
 
 
 @cli.group("config")

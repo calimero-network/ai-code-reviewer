@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from github import Github
+from github.GithubException import GithubException
 from github.PullRequest import PullRequest
 from github.Repository import Repository
 
@@ -136,6 +137,31 @@ class GitHubClient:
             repo_languages=languages,
         )
 
+    def _dismiss_pending_reviews(self, pr: PullRequest) -> bool:
+        """Dismiss any pending reviews from the current user.
+
+        Args:
+            pr: Pull request object
+
+        Returns:
+            True if a pending review was dismissed
+        """
+        try:
+            current_user = self._gh.get_user().login
+            reviews = pr.get_reviews()
+
+            for review in reviews:
+                # Find pending reviews from the current user
+                if review.user.login == current_user and review.state == "PENDING":
+                    logger.info(f"Dismissing pending review {review.id} from {current_user}")
+                    # Submit the pending review as a comment to clear it
+                    review.dismiss("Superseded by new AI review")
+                    return True
+        except Exception as e:
+            logger.warning(f"Could not dismiss pending reviews: {e}")
+
+        return False
+
     def post_review(
         self,
         pr: PullRequest,
@@ -152,32 +178,61 @@ class GitHubClient:
             event: Review event type (APPROVE, REQUEST_CHANGES, COMMENT)
         """
         logger.info(f"Posting review to PR #{pr.number}: {event}")
-        pr.create_review(body=body, event=event)
+
+        try:
+            pr.create_review(body=body, event=event)
+        except GithubException as e:
+            if e.status == 422 and "pending review" in str(e.data).lower():
+                logger.warning("User has a pending review, falling back to issue comment")
+                # Fall back to posting as a regular comment
+                self._post_as_comment(pr, body)
+            else:
+                raise
+
+    def _post_as_comment(self, pr: PullRequest, body: str) -> None:
+        """Post review as a regular issue comment (fallback).
+
+        Args:
+            pr: Pull request object
+            body: Comment body
+        """
+        # Add a note that this is posted as a comment due to pending review
+        comment_body = (
+            "⚠️ *Posted as comment because you have a pending review on this PR.*\n\n"
+            "---\n\n"
+            f"{body}"
+        )
+        pr.create_issue_comment(comment_body)
+        logger.info(f"Posted review as issue comment on PR #{pr.number}")
 
     def post_inline_comments(
         self,
         pr: PullRequest,
         review: ConsolidatedReview,
-    ) -> None:
+    ) -> int:
         """Post inline comments for each finding.
 
         Args:
             pr: Pull request
             review: Consolidated review with findings
+
+        Returns:
+            Number of successfully posted comments
         """
         # Get the head commit SHA
         commit_sha = pr.head.sha
-        
+        posted_count = 0
+
         for finding in review.findings[:10]:  # Limit inline comments
             try:
                 # Build comment body with emoji for severity
                 severity_emoji = {
                     "critical": "🔴",
-                    "warning": "🟡", 
+                    "warning": "🟡",
                     "suggestion": "💡",
                     "nitpick": "📝",
                 }.get(finding.severity.value, "ℹ️")
-                
+
                 comment_body = f"{severity_emoji} **{finding.title}**\n\n{finding.description}"
                 if finding.suggested_fix:
                     comment_body += f"\n\n**Suggested fix:**\n```\n{finding.suggested_fix}\n```"
@@ -190,7 +245,10 @@ class GitHubClient:
                     line=finding.line_start,
                     side="RIGHT",  # Comment on the new version
                 )
+                posted_count += 1
                 logger.debug(f"Posted inline comment on {finding.file_path}:{finding.line_start}")
             except Exception as e:
                 # Inline comments can fail if the line isn't in the diff
                 logger.warning(f"Could not post inline comment on {finding.file_path}:{finding.line_start}: {e}")
+
+        return posted_count
