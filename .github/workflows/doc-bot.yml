@@ -26,17 +26,6 @@ jobs:
           # Only need current commit and base for comparison
           fetch-depth: 2
       
-      - name: Setup Python
-        # Pinned to v5.1.0 - https://github.com/actions/setup-python/releases/tag/v5.1.0
-        uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-      
-      - name: Install dependencies
-        run: |
-          pip install -e ".[dev]"
-      
       - name: Get changed files
         id: changed-files
         # Pinned to v44.5.2 - https://github.com/tj-actions/changed-files/releases/tag/v44.5.2
@@ -47,6 +36,20 @@ jobs:
             config.example.yaml
             pyproject.toml
       
+      # Only install dependencies if files actually changed
+      - name: Setup Python
+        if: steps.changed-files.outputs.any_changed == 'true'
+        # Pinned to v5.1.0 - https://github.com/actions/setup-python/releases/tag/v5.1.0
+        uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: Install dependencies
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: |
+          pip install -e ".[dev]"
+      
       - name: Analyze documentation needs
         id: doc-analysis
         if: steps.changed-files.outputs.any_changed == 'true'
@@ -56,14 +59,16 @@ jobs:
           # Pass changed files via environment variable to prevent command injection
           CHANGED_FILES: ${{ steps.changed-files.outputs.all_changed_files }}
         run: |
-          # Write changed files to a file for safe processing
-          echo "$CHANGED_FILES" > /tmp/changed_files.txt
+          # Create secure temporary file with restricted permissions
+          TMPFILE=$(mktemp)
+          chmod 600 "$TMPFILE"
+          echo "$CHANGED_FILES" > "$TMPFILE"
           
           # Run the doc-check analysis
           if [ -n "$CURSOR_API_KEY" ]; then
             python << 'PYTHON_EOF'
 import os
-import json
+import sys
 from pathlib import Path
 
 # Read changed files safely from environment
@@ -74,6 +79,11 @@ changed = changed_files_str.split() if changed_files_str else []
 suggestions = []
 
 for filepath in changed:
+    # Sanitize filepath - only allow expected characters
+    if not all(c.isalnum() or c in '._-/' for c in filepath):
+        print(f"Warning: Skipping file with unexpected characters: {filepath}", file=sys.stderr)
+        continue
+    
     path = Path(filepath)
     
     # Check if it's a Python file in a documented module
@@ -128,16 +138,30 @@ with open(output_file, 'a') as f:
     f.write('EOF\n')
 PYTHON_EOF
           else
+            # Fallback when no API key - provide manual checklist
+            echo "::notice::Documentation bot running in manual mode (no CURSOR_API_KEY configured)"
             {
               echo "SUGGESTIONS<<EOF"
-              echo "⚠️ Documentation bot analysis skipped (no API key configured)."
+              echo "## 📚 Documentation Check (Manual Mode)"
               echo ""
-              echo "Changed files to manually check for doc updates:"
-              # Read from file to avoid interpolation issues
-              cat /tmp/changed_files.txt | tr ' ' '\n' | sed 's/^/- /'
+              echo "⚠️ Automated analysis skipped (no API key configured)."
+              echo ""
+              echo "**Changed files to manually check for doc updates:**"
+              echo ""
+              # Read from temp file to avoid interpolation issues
+              cat "$TMPFILE" | tr ' ' '\n' | while read -r file; do
+                if [ -n "$file" ]; then
+                  echo "- \`$file\`"
+                fi
+              done
+              echo ""
+              echo "*Please manually verify if documentation updates are needed.*"
               echo "EOF"
             } >> "$GITHUB_OUTPUT"
           fi
+          
+          # Clean up temp file
+          rm -f "$TMPFILE"
       
       - name: Post comment on PR
         if: steps.doc-analysis.outputs.SUGGESTIONS != ''
