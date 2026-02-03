@@ -219,8 +219,8 @@ class GitHubClient:
         Returns:
             Number of successfully posted comments
         """
-        # Get the head commit SHA
-        commit_sha = pr.head.sha
+        # Get the head commit for inline comments
+        head_commit = pr.get_commits().reversed[0]
         posted_count = 0
 
         for finding in review.findings[:10]:  # Limit inline comments
@@ -240,10 +240,9 @@ class GitHubClient:
                 # Use create_review_comment for inline comments on the diff
                 pr.create_review_comment(
                     body=comment_body,
-                    commit_id=commit_sha,
+                    commit=head_commit,
                     path=finding.file_path,
                     line=finding.line_start,
-                    side="RIGHT",  # Comment on the new version
                 )
                 posted_count += 1
                 logger.debug(f"Posted inline comment on {finding.file_path}:{finding.line_start}")
