@@ -1,5 +1,6 @@
-"""Main review flow using Cursor Background Agent API."""
+"""Main review flow using Cursor Background Agent API with multi-agent support."""
 
+import asyncio
 import json
 import logging
 import re
@@ -12,21 +13,71 @@ from ai_reviewer.agents.cursor_client import CursorClient, CursorConfig
 from ai_reviewer.github.client import GitHubClient
 from ai_reviewer.models.context import ReviewContext
 from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
-from ai_reviewer.models.review import ConsolidatedReview
+from ai_reviewer.models.review import AgentReview, ConsolidatedReview
 
 logger = logging.getLogger(__name__)
 
 
-def get_review_prompt(context: ReviewContext, diff: str, file_contents: dict[str, str]) -> str:
-    """Build the review prompt for the Cursor agent."""
+# Different agent configurations for multi-perspective review
+AGENT_CONFIGS = [
+    {
+        "name": "security-agent",
+        "focus": "security",
+        "prompt_addition": """
+**YOUR FOCUS: SECURITY**
+You are a security expert. Focus ONLY on:
+- Injection vulnerabilities (SQL, command, XSS)
+- Authentication/authorization flaws
+- Cryptographic issues
+- Data exposure and validation
+- Trust boundary violations
+
+Ignore performance, style, and other non-security issues.
+""",
+    },
+    {
+        "name": "performance-agent",
+        "focus": "performance",
+        "prompt_addition": """
+**YOUR FOCUS: PERFORMANCE & CORRECTNESS**
+You are a performance engineer. Focus ONLY on:
+- Algorithm complexity (O(n²) where O(n) possible)
+- Memory leaks and resource management
+- N+1 queries, unnecessary allocations
+- Race conditions and concurrency bugs
+- Logic errors and edge cases
+
+Ignore security and style issues unless they cause bugs.
+""",
+    },
+    {
+        "name": "quality-agent",
+        "focus": "quality",
+        "prompt_addition": """
+**YOUR FOCUS: CODE QUALITY & PATTERNS**
+You are a code quality reviewer. Focus ONLY on:
+- API design and consistency
+- Error handling patterns
+- Code organization and maintainability
+- Missing tests for critical paths
+- Documentation accuracy
+
+Ignore security vulnerabilities and performance unless severe.
+""",
+    },
+]
+
+
+def get_base_prompt(context: ReviewContext, diff: str, file_contents: dict[str, str]) -> str:
+    """Build the base review prompt."""
     
     files_context = ""
     if file_contents:
         files_context = "\n\n## Full File Contents (for context)\n"
-        for path, content in list(file_contents.items())[:5]:  # Limit files
+        for path, content in list(file_contents.items())[:5]:
             files_context += f"\n### {path}\n```\n{content[:5000]}\n```\n"
 
-    return f"""You are performing a **comprehensive code review** of a pull request.
+    return f"""You are performing a **code review** of a pull request.
 
 ## Pull Request Information
 - **Repository**: {context.repo_name}
@@ -44,45 +95,18 @@ def get_review_prompt(context: ReviewContext, diff: str, file_contents: dict[str
 {diff[:50000]}
 ```
 {files_context}
+"""
 
----
 
-## Review Instructions
-
-Analyze the code changes from **multiple perspectives**:
-
-### 1. Security
-- Injection vulnerabilities (SQL, command, XSS)
-- Authentication/authorization issues
-- Data exposure or validation problems
-- Cryptographic misuse
-
-### 2. Performance
-- Algorithm complexity issues
-- Memory leaks or resource management
-- N+1 queries or unnecessary work
-- Missing timeouts or limits
-
-### 3. Logic & Correctness
-- Off-by-one errors, wrong conditions
-- Edge cases not handled
-- Error handling issues
-- State management problems
-
-### 4. Code Quality
-- Consistency with codebase patterns
-- API design issues
-- Missing documentation
-- Code duplication
-
----
-
+def get_output_format() -> str:
+    """Get the JSON output format instructions."""
+    return """
 ## Output Format
 
 You MUST respond with a single valid JSON object (no markdown fences around it):
 
-{{"findings": [
-  {{
+{"findings": [
+  {
     "file_path": "path/to/file.rs",
     "line_start": 42,
     "line_end": 45,
@@ -92,19 +116,17 @@ You MUST respond with a single valid JSON object (no markdown fences around it):
     "description": "Detailed description of the issue and why it matters",
     "suggested_fix": "How to fix it (optional)",
     "confidence": 0.95
-  }}
+  }
 ],
 "summary": "Brief overall summary of the review"
-}}
+}
 
 **Rules**:
 - Only report issues you can clearly identify in the diff
 - Be specific about file paths and line numbers
 - Use "critical" only for security bugs or data corruption risks
-- Use "warning" for bugs and important issues
-- Use "suggestion" for improvements
-- Use "nitpick" for style/minor issues
-- If the code looks good, return empty findings array
+- If the code looks good for your focus area, return empty findings array
+- Maximum 5 findings per agent
 
 Analyze the PR and output your JSON review.
 """
@@ -115,7 +137,6 @@ def parse_review_response(content: str) -> tuple[list[dict], str]:
     content = content.strip()
     
     # Try to extract JSON from response
-    # Handle markdown code blocks
     if "```json" in content:
         match = re.search(r"```json\s*([\s\S]*?)```", content)
         if match:
@@ -140,16 +161,60 @@ def parse_review_response(content: str) -> tuple[list[dict], str]:
         return [], "Failed to parse review response"
 
 
-def findings_to_consolidated(
-    raw_findings: list[dict],
-    summary: str,
+async def run_single_agent(
+    client: CursorClient,
+    repo_url: str,
+    ref: str,
+    prompt: str,
+    agent_name: str,
+    on_status: Optional[callable] = None,
+) -> tuple[str, list[dict], str]:
+    """Run a single agent and return its findings."""
+    try:
+        result = await client.run_review_agent(
+            repo_url=repo_url,
+            ref=ref,
+            prompt=prompt,
+            on_status=on_status,
+        )
+        findings, summary = parse_review_response(result.content)
+        return agent_name, findings, summary
+    except Exception as e:
+        logger.error(f"Agent {agent_name} failed: {e}")
+        return agent_name, [], f"Agent failed: {e}"
+
+
+def aggregate_findings(
+    all_findings: list[tuple[str, list[dict], str]],
     repo: str,
     pr_number: int,
 ) -> ConsolidatedReview:
-    """Convert raw findings to a ConsolidatedReview."""
+    """Aggregate findings from multiple agents."""
     
     consolidated = []
-    for i, raw in enumerate(raw_findings):
+    agent_count = len([f for f in all_findings if f[1]])  # Agents with findings
+    summaries = []
+    
+    # Track which findings are similar (for consensus scoring)
+    finding_clusters: dict[str, list[tuple[str, dict]]] = {}
+    
+    for agent_name, findings, summary in all_findings:
+        summaries.append(f"**{agent_name}**: {summary}")
+        
+        for raw in findings:
+            # Create a key for clustering similar findings
+            key = f"{raw.get('file_path', '')}:{raw.get('line_start', 0)}:{raw.get('category', '')}"
+            
+            if key not in finding_clusters:
+                finding_clusters[key] = []
+            finding_clusters[key].append((agent_name, raw))
+    
+    # Process clusters
+    for key, cluster in finding_clusters.items():
+        # Use the first finding as base, but track all agreeing agents
+        agent_name, raw = cluster[0]
+        agreeing_agents = [a for a, _ in cluster]
+        
         try:
             severity = Severity(raw.get("severity", "suggestion").lower())
         except ValueError:
@@ -160,8 +225,12 @@ def findings_to_consolidated(
         except ValueError:
             category = Category.LOGIC
 
+        # Consensus score based on how many agents found this
+        total_agents = len(all_findings)
+        consensus_score = len(cluster) / total_agents if total_agents > 0 else 1.0
+
         finding = ConsolidatedFinding(
-            id=f"finding-{i+1}",
+            id=f"finding-{len(consolidated)+1}",
             file_path=raw.get("file_path", "unknown"),
             line_start=int(raw.get("line_start", 1)),
             line_end=raw.get("line_end"),
@@ -170,8 +239,8 @@ def findings_to_consolidated(
             title=raw.get("title", "Issue found"),
             description=raw.get("description", ""),
             suggested_fix=raw.get("suggested_fix"),
-            consensus_score=1.0,  # Single agent
-            agreeing_agents=["cursor-agent"],
+            consensus_score=consensus_score,
+            agreeing_agents=agreeing_agents,
             confidence=float(raw.get("confidence", 0.8)),
         )
         consolidated.append(finding)
@@ -179,16 +248,19 @@ def findings_to_consolidated(
     # Sort by priority
     consolidated.sort(key=lambda f: f.priority_score, reverse=True)
     
+    # Build combined summary
+    combined_summary = "\n".join(summaries) if summaries else "Review completed"
+    
     return ConsolidatedReview(
         id=f"review-{uuid4().hex[:8]}",
         created_at=datetime.now(),
         repo=repo,
         pr_number=pr_number,
         findings=consolidated,
-        summary=summary,
-        agent_count=1,
+        summary=combined_summary,
+        agent_count=len(all_findings),
         review_quality_score=0.85 if consolidated else 0.95,
-        total_review_time_ms=0,  # Will be updated by caller
+        total_review_time_ms=0,
     )
 
 
@@ -198,11 +270,9 @@ async def review_pr_with_cursor_agent(
     cursor_config: CursorConfig,
     github_token: str,
     on_status: Optional[callable] = None,
+    num_agents: int = 1,
 ) -> ConsolidatedReview:
-    """Review a PR using Cursor Background Agent.
-    
-    This creates a Cursor agent that analyzes the PR and returns findings.
-    The agent runs async and may take several minutes.
+    """Review a PR using Cursor Background Agent(s).
     
     Args:
         repo: Repository in "owner/name" format
@@ -210,6 +280,7 @@ async def review_pr_with_cursor_agent(
         cursor_config: Cursor API configuration
         github_token: GitHub token for PR access
         on_status: Optional callback for status updates
+        num_agents: Number of agents to run (1-3)
         
     Returns:
         ConsolidatedReview with findings
@@ -229,30 +300,65 @@ async def review_pr_with_cursor_agent(
     logger.info(f"Reviewing PR #{pr_number}: {context.pr_title}")
     logger.info(f"Files changed: {context.changed_files_count} (+{context.additions}/-{context.deletions})")
     
-    # Build prompt
-    prompt = get_review_prompt(context, diff, files)
+    # Build base prompt
+    base_prompt = get_base_prompt(context, diff, files)
+    output_format = get_output_format()
+    repo_url = f"https://github.com/{repo}"
     
-    # Create and run Cursor agent
-    async with CursorClient(cursor_config) as client:
-        repo_url = f"https://github.com/{repo}"
+    # Select agents to run
+    agents_to_run = AGENT_CONFIGS[:min(num_agents, len(AGENT_CONFIGS))]
+    
+    if num_agents == 1:
+        # Single comprehensive agent
+        prompt = base_prompt + """
+**Analyze from ALL perspectives**: security, performance, logic, and code quality.
+""" + output_format
         
-        if on_status:
-            on_status("CREATING")
+        async with CursorClient(cursor_config) as client:
+            if on_status:
+                on_status("CREATING")
+            
+            result = await client.run_review_agent(
+                repo_url=repo_url,
+                ref=pr.base.ref,
+                prompt=prompt,
+                on_status=on_status,
+            )
         
-        result = await client.run_review_agent(
-            repo_url=repo_url,
-            ref=pr.base.ref,  # Analyze against base branch
-            prompt=prompt,
-            on_status=on_status,
-        )
+        raw_findings, summary = parse_review_response(result.content)
+        all_findings = [("cursor-agent", raw_findings, summary)]
+    else:
+        # Multi-agent review
+        logger.info(f"Running {len(agents_to_run)} specialized agents in parallel...")
+        
+        async with CursorClient(cursor_config) as client:
+            tasks = []
+            for agent_config in agents_to_run:
+                prompt = base_prompt + agent_config["prompt_addition"] + output_format
+                
+                def make_status_callback(name: str):
+                    def callback(status: str):
+                        if on_status:
+                            on_status(f"{name}: {status}")
+                    return callback
+                
+                task = run_single_agent(
+                    client=client,
+                    repo_url=repo_url,
+                    ref=pr.base.ref,
+                    prompt=prompt,
+                    agent_name=agent_config["name"],
+                    on_status=make_status_callback(agent_config["name"]),
+                )
+                tasks.append(task)
+            
+            # Run all agents in parallel
+            all_findings = await asyncio.gather(*tasks)
     
-    # Parse response
-    raw_findings, summary = parse_review_response(result.content)
-    
-    # Build consolidated review
-    review = findings_to_consolidated(raw_findings, summary, repo, pr_number)
+    # Aggregate findings
+    review = aggregate_findings(list(all_findings), repo, pr_number)
     review.total_review_time_ms = int((time.time() - start_time) * 1000)
     
-    logger.info(f"Review complete: {len(review.findings)} findings in {review.total_review_time_ms}ms")
+    logger.info(f"Review complete: {len(review.findings)} findings from {review.agent_count} agent(s) in {review.total_review_time_ms}ms")
     
     return review

@@ -165,17 +165,32 @@ class GitHubClient:
             pr: Pull request
             review: Consolidated review with findings
         """
+        # Get the head commit SHA
+        commit_sha = pr.head.sha
+        
         for finding in review.findings[:10]:  # Limit inline comments
             try:
-                comment_body = f"**{finding.title}** ({finding.severity.value})\n\n{finding.description}"
+                # Build comment body with emoji for severity
+                severity_emoji = {
+                    "critical": "🔴",
+                    "warning": "🟡", 
+                    "suggestion": "💡",
+                    "nitpick": "📝",
+                }.get(finding.severity.value, "ℹ️")
+                
+                comment_body = f"{severity_emoji} **{finding.title}**\n\n{finding.description}"
                 if finding.suggested_fix:
                     comment_body += f"\n\n**Suggested fix:**\n```\n{finding.suggested_fix}\n```"
 
+                # Use create_review_comment for inline comments on the diff
                 pr.create_review_comment(
                     body=comment_body,
-                    commit=pr.get_commits().reversed[0],
+                    commit_id=commit_sha,
                     path=finding.file_path,
                     line=finding.line_start,
+                    side="RIGHT",  # Comment on the new version
                 )
+                logger.debug(f"Posted inline comment on {finding.file_path}:{finding.line_start}")
             except Exception as e:
-                logger.warning(f"Could not post inline comment: {e}")
+                # Inline comments can fail if the line isn't in the diff
+                logger.warning(f"Could not post inline comment on {finding.file_path}:{finding.line_start}: {e}")

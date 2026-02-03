@@ -47,20 +47,28 @@ def cli(verbose: bool) -> None:
 @click.argument("pr_number", type=int)
 @click.option("--output", type=click.Choice(["github", "json", "markdown"]), default="github")
 @click.option("--dry-run", is_flag=True, help="Don't post to GitHub")
+@click.option("--agents", type=int, default=1, help="Number of agents (1-3): 1=comprehensive, 2+=specialized")
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
 def review_pr(
     repo: str,
     pr_number: int,
     output: str,
     dry_run: bool,
+    agents: int,
     config_path: Optional[str],
 ) -> None:
-    """Review a GitHub pull request using Cursor AI agent."""
+    """Review a GitHub pull request using Cursor AI agent(s).
+    
+    With --agents=1 (default): Single comprehensive review
+    With --agents=2: Security + Performance agents
+    With --agents=3: Security + Performance + Quality agents
+    """
     asyncio.run(review_pr_async(
         repo=repo,
         pr_number=pr_number,
         output=output,
         dry_run=dry_run,
+        num_agents=agents,
         config_path=Path(config_path) if config_path else None,
     ))
 
@@ -70,9 +78,10 @@ async def review_pr_async(
     pr_number: int,
     output: str = "github",
     dry_run: bool = False,
+    num_agents: int = 1,
     config_path: Optional[Path] = None,
 ) -> None:
-    """Async implementation of PR review using Cursor Background Agent."""
+    """Async implementation of PR review using Cursor Background Agent(s)."""
     config = load_config(config_path)
     errors = validate_config(config)
     if errors:
@@ -81,7 +90,12 @@ async def review_pr_async(
         sys.exit(1)
 
     console.print(f"🔍 Reviewing PR #{pr_number} in [bold]{repo}[/bold]...")
-    console.print("[yellow]Note: Using Cursor Background Agent (may take 2-5 minutes)[/yellow]")
+    
+    if num_agents == 1:
+        console.print("[yellow]Using 1 comprehensive agent (2-5 min)[/yellow]")
+    else:
+        agent_types = ["security", "performance", "quality"][:num_agents]
+        console.print(f"[yellow]Using {num_agents} specialized agents: {', '.join(agent_types)} (3-8 min)[/yellow]")
 
     # Status callback
     last_status = [None]
@@ -104,6 +118,7 @@ async def review_pr_async(
             cursor_config=cursor_config,
             github_token=config.github.token,
             on_status=on_status,
+            num_agents=num_agents,
         )
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -130,7 +145,13 @@ async def review_pr_async(
             body = formatter.format_review(review)
             action = formatter.get_review_action(review)
             gh.post_review(pr, review, body, action)
-            console.print(f"📝 Posted review to GitHub ({action})")
+            console.print(f"📝 Posted review summary to GitHub ({action})")
+            
+            # Post inline comments for each finding
+            if review.findings:
+                console.print(f"💬 Posting {len(review.findings)} inline comments...")
+                gh.post_inline_comments(pr, review)
+                console.print("✅ Inline comments posted")
 
 
 @cli.group("config")
