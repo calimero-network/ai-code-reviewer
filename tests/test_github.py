@@ -1,7 +1,8 @@
 """Tests for GitHub integration."""
 
+from unittest.mock import AsyncMock, MagicMock, patch
+
 import pytest
-from unittest.mock import MagicMock, patch, AsyncMock
 
 
 class TestGitHubClient:
@@ -22,7 +23,7 @@ class TestGitHubClient:
             )
         ]
 
-        with patch("ai_reviewer.github.client.Github") as mock_github:
+        with patch("ai_reviewer.github.client.Github"):
             client = GitHubClient(token="test-token")
             diff = client.get_pr_diff(mock_pr)
 
@@ -32,7 +33,6 @@ class TestGitHubClient:
     def test_builds_review_context(self):
         """Test building review context from PR."""
         from ai_reviewer.github.client import GitHubClient
-        from ai_reviewer.models.context import ReviewContext
 
         mock_pr = MagicMock()
         mock_pr.number = 42
@@ -66,7 +66,7 @@ class TestGitHubPRHandler:
     @pytest.mark.asyncio
     async def test_handles_pr_opened_event(self):
         """Test handling PR opened webhook event."""
-        from ai_reviewer.github.webhook import handle_pr_event, PREvent
+        from ai_reviewer.github.webhook import PREvent, handle_pr_event
 
         event = PREvent(
             repo="test-org/test-repo",
@@ -84,7 +84,7 @@ class TestGitHubPRHandler:
     @pytest.mark.asyncio
     async def test_ignores_irrelevant_actions(self):
         """Test that irrelevant PR actions are ignored."""
-        from ai_reviewer.github.webhook import handle_pr_event, PREvent
+        from ai_reviewer.github.webhook import PREvent, handle_pr_event
 
         event = PREvent(
             repo="test-org/test-repo",
@@ -102,10 +102,11 @@ class TestReviewFormatter:
 
     def test_formats_critical_findings(self):
         """Test formatting critical findings for GitHub."""
-        from ai_reviewer.github.formatter import GitHubFormatter
-        from ai_reviewer.models.review import ConsolidatedReview
-        from ai_reviewer.models.findings import ConsolidatedFinding, Severity, Category
         from datetime import datetime
+
+        from ai_reviewer.github.formatter import GitHubFormatter
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+        from ai_reviewer.models.review import ConsolidatedReview
 
         findings = [
             ConsolidatedFinding(
@@ -150,9 +151,10 @@ class TestReviewFormatter:
 
     def test_formats_empty_review(self):
         """Test formatting review with no findings."""
+        from datetime import datetime
+
         from ai_reviewer.github.formatter import GitHubFormatter
         from ai_reviewer.models.review import ConsolidatedReview
-        from datetime import datetime
 
         review = ConsolidatedReview(
             id="review-123",
@@ -174,10 +176,11 @@ class TestReviewFormatter:
 
     def test_determines_review_action(self):
         """Test determining GitHub review action based on findings."""
-        from ai_reviewer.github.formatter import GitHubFormatter
-        from ai_reviewer.models.review import ConsolidatedReview
-        from ai_reviewer.models.findings import ConsolidatedFinding, Severity, Category
         from datetime import datetime
+
+        from ai_reviewer.github.formatter import GitHubFormatter
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+        from ai_reviewer.models.review import ConsolidatedReview
 
         formatter = GitHubFormatter()
 

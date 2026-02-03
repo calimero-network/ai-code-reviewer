@@ -1,6 +1,5 @@
 """Tests for data models."""
 
-import pytest
 from datetime import datetime
 
 
@@ -10,7 +9,7 @@ class TestReviewFinding:
     def test_finding_creation(self):
         """Test creating a basic finding."""
         # Will test once models are implemented
-        from ai_reviewer.models.findings import ReviewFinding, Severity, Category
+        from ai_reviewer.models.findings import Category, ReviewFinding, Severity
 
         finding = ReviewFinding(
             file_path="auth/login.py",
@@ -30,7 +29,7 @@ class TestReviewFinding:
 
     def test_finding_without_suggested_fix(self):
         """Test finding without a suggested fix."""
-        from ai_reviewer.models.findings import ReviewFinding, Severity, Category
+        from ai_reviewer.models.findings import Category, ReviewFinding, Severity
 
         finding = ReviewFinding(
             file_path="utils/helper.py",
@@ -53,8 +52,8 @@ class TestAgentReview:
 
     def test_agent_review_creation(self):
         """Test creating an agent review."""
+        from ai_reviewer.models.findings import Category, ReviewFinding, Severity
         from ai_reviewer.models.review import AgentReview
-        from ai_reviewer.models.findings import ReviewFinding, Severity, Category
 
         findings = [
             ReviewFinding(
@@ -89,12 +88,12 @@ class TestConsolidatedReview:
 
     def test_consolidated_review_statistics(self):
         """Test that consolidated review computes statistics correctly."""
-        from ai_reviewer.models.review import ConsolidatedReview
         from ai_reviewer.models.findings import (
+            Category,
             ConsolidatedFinding,
             Severity,
-            Category,
         )
+        from ai_reviewer.models.review import ConsolidatedReview
 
         findings = [
             ConsolidatedFinding(

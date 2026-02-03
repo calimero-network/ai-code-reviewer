@@ -1,17 +1,14 @@
 """Tests for the review aggregator."""
 
-import pytest
-from datetime import datetime
-
 
 class TestReviewAggregator:
     """Tests for ReviewAggregator."""
 
     def test_deduplicates_identical_findings(self):
         """Test that identical findings from multiple agents are merged."""
-        from ai_reviewer.orchestrator.aggregator import ReviewAggregator
+        from ai_reviewer.models.findings import Category, ReviewFinding, Severity
         from ai_reviewer.models.review import AgentReview
-        from ai_reviewer.models.findings import ReviewFinding, Severity, Category
+        from ai_reviewer.orchestrator.aggregator import ReviewAggregator
 
         # Same finding from two agents
         finding_1 = ReviewFinding(
@@ -66,9 +63,9 @@ class TestReviewAggregator:
 
     def test_keeps_unique_findings_separate(self):
         """Test that different findings remain separate."""
-        from ai_reviewer.orchestrator.aggregator import ReviewAggregator
+        from ai_reviewer.models.findings import Category, ReviewFinding, Severity
         from ai_reviewer.models.review import AgentReview
-        from ai_reviewer.models.findings import ReviewFinding, Severity, Category
+        from ai_reviewer.orchestrator.aggregator import ReviewAggregator
 
         finding_security = ReviewFinding(
             file_path="auth/login.py",
@@ -122,9 +119,9 @@ class TestReviewAggregator:
 
     def test_priority_ranking(self):
         """Test that findings are ranked by severity × consensus."""
-        from ai_reviewer.orchestrator.aggregator import ReviewAggregator
+        from ai_reviewer.models.findings import Category, ReviewFinding, Severity
         from ai_reviewer.models.review import AgentReview
-        from ai_reviewer.models.findings import ReviewFinding, Severity, Category
+        from ai_reviewer.orchestrator.aggregator import ReviewAggregator
 
         # Critical finding with partial consensus
         critical_partial = ReviewFinding(
@@ -179,9 +176,9 @@ class TestReviewAggregator:
 
     def test_computes_review_quality_score(self):
         """Test that overall review quality score is computed."""
-        from ai_reviewer.orchestrator.aggregator import ReviewAggregator
+        from ai_reviewer.models.findings import Category, ReviewFinding, Severity
         from ai_reviewer.models.review import AgentReview
-        from ai_reviewer.models.findings import ReviewFinding, Severity, Category
+        from ai_reviewer.orchestrator.aggregator import ReviewAggregator
 
         finding = ReviewFinding(
             file_path="test.py",
@@ -216,8 +213,8 @@ class TestReviewAggregator:
 
     def test_handles_empty_reviews(self):
         """Test aggregating reviews with no findings."""
-        from ai_reviewer.orchestrator.aggregator import ReviewAggregator
         from ai_reviewer.models.review import AgentReview
+        from ai_reviewer.orchestrator.aggregator import ReviewAggregator
 
         review_1 = AgentReview(
             agent_id="agent-1",
