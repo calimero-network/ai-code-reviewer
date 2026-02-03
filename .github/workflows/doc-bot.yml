@@ -34,15 +34,15 @@ jobs:
         # Pinned to v4.1.7 - https://github.com/actions/checkout/releases/tag/v4.1.7
         uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
         with:
-          # Fetch enough history for merge scenarios and rebases
-          fetch-depth: 50
+          # Fetch enough history for merge scenarios, rebases, and long-running PRs
+          fetch-depth: 100
       
       - name: Fetch base branch for comparison
         env:
           # Pass through env var to avoid shell interpolation issues
           BASE_REF: ${{ github.base_ref }}
         run: |
-          git fetch origin "$BASE_REF" --depth=50
+          git fetch origin "$BASE_REF" --depth=100
       
       - name: Get changed files
         id: changed-files
@@ -144,7 +144,8 @@ suggestions = []
 for filepath in changed:
     # Sanitize filepath - only allow expected characters
     if not all(c.isalnum() or c in '._-/' for c in filepath):
-        print(f"Warning: Skipping file with unexpected characters: {filepath}", file=sys.stderr)
+        # Don't log unsanitized filepath - just log length to avoid log injection
+        print(f"Warning: Skipping file with unexpected characters (length={len(filepath)})", file=sys.stderr)
         continue
     
     path = Path(filepath)
@@ -214,10 +215,17 @@ PYTHON_EOF
               echo ""
               echo "**Changed files to manually check for doc updates:**"
               echo ""
-              # Use proper quoting to handle filenames safely
+              # Sanitize and escape filenames for markdown output (consistent with Python path)
               echo "$CHANGED_FILES" | while IFS= read -r file; do
                 if [ -n "$file" ]; then
-                  echo "- \`$file\`"
+                  # Only allow safe characters (alphanumeric, dots, underscores, hyphens, slashes)
+                  if echo "$file" | grep -qE '^[a-zA-Z0-9._/-]+$'; then
+                    # Escape backticks for markdown safety
+                    safe_file="${file//\`/\\\`}"
+                    echo "- \`$safe_file\`"
+                  else
+                    echo "- *(skipped file with unexpected characters)*"
+                  fi
                 fi
               done
               echo ""
