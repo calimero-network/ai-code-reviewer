@@ -1,0 +1,115 @@
+# AI Code Reviewer Configuration for this Repository
+# This file configures how AI Code Reviewer reviews its own code
+
+version: 1
+
+# Inherit default settings
+inherit_from: default
+
+# Agent customization for self-review
+agents:
+  - name: security-reviewer
+    model: claude-3-opus-20240229
+    focus_areas: [security, authentication]
+    custom_prompt_append: |
+      This is a Python codebase that handles API keys and GitHub tokens.
+      Pay special attention to:
+      - Credentials not being logged or exposed
+      - Webhook signature validation
+      - Rate limiting and abuse prevention
+
+  - name: architecture-reviewer
+    model: claude-3-opus-20240229
+    focus_areas: [architecture, patterns]
+    custom_prompt_append: |
+      This codebase follows these key patterns:
+      - All LLM access via CursorClient (never direct provider APIs)
+      - Agents are stateless and run independently
+      - Async throughout for I/O operations
+      - Dataclasses for all data structures
+      
+      Flag violations of these patterns as architectural issues.
+      Reference .ai/rules/ for detailed module conventions.
+
+  - name: documentation-reviewer
+    model: claude-3-opus-20240229
+    focus_areas: [documentation]
+    custom_prompt_append: |
+      Check if code changes require documentation updates.
+      
+      Documentation locations:
+      - README.md - User-facing features
+      - DESIGN.md - Architecture decisions
+      - .cursor/rules/ - AI rules per module
+      - .ai/context.md - Quick AI context
+      
+      Flag missing or outdated documentation as suggestions.
+
+# Files to ignore in reviews
+ignore:
+  - "**/__pycache__/**"
+  - "**/*.pyc"
+  - ".git/**"
+  - ".ruff_cache/**"
+  - "**/.mypy_cache/**"
+  - "**/htmlcov/**"
+  - "dist/**"
+  - "*.egg-info/**"
+
+# Review policy
+review_policy:
+  auto_approve_if_no_findings: false
+  block_on_critical: true
+  require_human_review_for: [security]
+
+# Documentation sync rules
+documentation:
+  enabled: true
+  check_files:
+    - README.md
+    - DESIGN.md
+    - .ai/rules/*.md
+    - .ai/context.md
+    - config.example.yaml
+  
+  # Map source files to docs that may need updates
+  source_to_docs_mapping:
+    "src/ai_reviewer/agents/**":
+      - .ai/rules/agents.md
+      - .ai/context.md
+    "src/ai_reviewer/orchestrator/**":
+      - .ai/rules/orchestrator.md
+      - DESIGN.md
+    "src/ai_reviewer/github/**":
+      - .ai/rules/github.md
+      - README.md
+    "src/ai_reviewer/models/**":
+      - .ai/rules/models.md
+      - .ai/context.md
+    "src/ai_reviewer/config.py":
+      - config.example.yaml
+      - README.md
+    "src/ai_reviewer/cli.py":
+      - README.md
+
+# Custom rules for this repo
+custom_rules:
+  # Enforce async patterns
+  - name: no-blocking-io
+    description: "All I/O operations must be async"
+    pattern: "requests\\.(get|post|put|delete)"
+    severity: warning
+    message: "Use httpx async client instead of blocking requests"
+
+  # Enforce type hints
+  - name: require-type-hints
+    description: "Public functions must have type hints"
+    check: "missing_type_hints_on_public_functions"
+    severity: suggestion
+
+  # No direct LLM imports
+  - name: no-direct-llm
+    description: "LLM access must go through CursorClient"
+    pattern: "^(import (anthropic|openai)|from (anthropic|openai) import)"
+    severity: critical
+    message: "Use CursorClient from agents/cursor_client.py instead"

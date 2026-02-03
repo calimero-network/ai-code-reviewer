@@ -200,6 +200,43 @@ mypy src/
 
 ---
 
+## AI Rules & Documentation
+
+This repository is designed to be AI-friendly with structured documentation that helps AI agents understand and work with the codebase.
+
+### For AI Assistants (Cursor, Claude, etc.)
+
+```
+.ai/                 # AI context, rules & automation
+├── context.md         # Fast codebase overview (read first!)
+├── doc-bot.md         # Documentation bot instructions
+├── prompts/           # Reusable AI prompts
+└── rules/             # Detailed rules per module
+    ├── architecture.md  # High-level design & invariants
+    ├── agents.md        # Agent module patterns
+    ├── orchestrator.md  # Orchestration rules
+    ├── github.md        # GitHub integration patterns
+    ├── models.md        # Data model conventions
+    └── conventions.md   # Coding style guide
+```
+
+### Quick Start for AI Agents
+
+1. Read `.ai/context.md` for a fast overview
+2. Check `.ai/rules/<module>.md` for the specific module you're working on
+3. Follow patterns in `.ai/rules/conventions.md`
+
+### Documentation Bot
+
+PRs that change source code automatically trigger a documentation bot that:
+- Analyzes which docs might need updates
+- Posts suggestions as PR comments
+- Helps keep documentation in sync with code
+
+Configure via `.ai-reviewer.yaml` in the repo root.
+
+---
+
 ## Related Projects
 
 - [ai-bounty-hunter](https://github.com/calimero-network/ai-bounty-hunter) - Automatic bounty fixing

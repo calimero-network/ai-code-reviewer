@@ -1,0 +1,286 @@
+name: Documentation Bot
+
+on:
+  pull_request:
+    types: [opened, synchronize]
+    paths:
+      - 'src/**'
+      - 'config.example.yaml'
+      - 'pyproject.toml'
+
+# Permission: pull-requests: write is required to post documentation review comments.
+# Security: Fork PRs are excluded (line 27) to prevent untrusted code from getting write access.
+# Content: Only file paths are processed, sanitized via allowlist before use.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  doc-check:
+    name: Check Documentation Sync
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    
+    # Prevent duplicate comments from concurrent runs on rapid pushes
+    concurrency:
+      group: doc-bot-${{ github.event.pull_request.number }}
+      cancel-in-progress: true
+    
+    # Don't run on forks to avoid security issues with write permissions
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    
+    steps:
+      - name: Checkout code
+        # Pinned to v4.1.7 - https://github.com/actions/checkout/releases/tag/v4.1.7
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332
+        with:
+          # Fetch enough history for merge scenarios, rebases, and long-running PRs
+          fetch-depth: 100
+      
+      - name: Fetch base branch for comparison
+        env:
+          # Pass through env var to avoid shell interpolation issues
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          git fetch origin "$BASE_REF" --depth=100
+      
+      - name: Get changed files
+        id: changed-files
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -o pipefail
+          
+          # Use native git to get changed files (avoids third-party action supply chain risk)
+          # Get the merge base to handle rebases correctly
+          USE_TWO_DOT=false
+          if ! MERGE_BASE=$(git merge-base HEAD "origin/$BASE_REF" 2>&1); then
+            echo "::warning::git merge-base failed: $MERGE_BASE"
+            # Fallback: resolve branch to commit SHA explicitly
+            if ! MERGE_BASE=$(git rev-parse "origin/$BASE_REF" 2>&1); then
+              echo "::error::Failed to resolve base ref: $MERGE_BASE"
+              exit 1
+            fi
+            # When using rev-parse fallback, use two-dot diff (branch tip, not merge-base)
+            USE_TWO_DOT=true
+            echo "::notice::Using two-dot diff with branch tip fallback"
+          fi
+          
+          echo "Using base commit: $MERGE_BASE (two-dot: $USE_TWO_DOT)"
+          
+          # Get changed files matching our patterns
+          # Use two-dot (..) for branch tip comparison, three-dot (...) for merge-base
+          if [ "$USE_TWO_DOT" = "true" ]; then
+            DIFF_SPEC="$MERGE_BASE..HEAD"
+          else
+            DIFF_SPEC="$MERGE_BASE...HEAD"
+          fi
+          
+          if ! CHANGED=$(git diff --name-only "$DIFF_SPEC" -- \
+            'src/**' \
+            'config.example.yaml' \
+            'pyproject.toml' 2>&1); then
+            echo "::error::git diff failed: $CHANGED"
+            echo "diff_failed=true" >> "$GITHUB_OUTPUT"
+            # Don't silently continue - surface the error
+            exit 1
+          fi
+          
+          # Check if any files changed
+          if [ -n "$CHANGED" ]; then
+            echo "any_changed=true" >> "$GITHUB_OUTPUT"
+            # Store as newline-separated for safer parsing
+            {
+              echo "CHANGED_FILES<<EOF"
+              echo "$CHANGED"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "any_changed=false" >> "$GITHUB_OUTPUT"
+            echo "CHANGED_FILES=" >> "$GITHUB_OUTPUT"
+          fi
+          
+          # Log for debugging
+          echo "Changed files:"
+          echo "$CHANGED"
+      
+      # Only install dependencies if files actually changed
+      - name: Setup Python
+        if: steps.changed-files.outputs.any_changed == 'true'
+        # Pinned to v5.1.0 - https://github.com/actions/setup-python/releases/tag/v5.1.0
+        uses: actions/setup-python@39cd14951b08e74b54015e9e001cdefcf80e669f
+        with:
+          python-version: '3.11'
+      
+      - name: Install minimal dependencies
+        if: steps.changed-files.outputs.any_changed == 'true'
+        run: |
+          # Only install what's needed for doc analysis (not full dev dependencies)
+          pip install pyyaml
+      
+      - name: Analyze documentation needs
+        id: doc-analysis
+        if: steps.changed-files.outputs.any_changed == 'true'
+        env:
+          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Pass changed files via environment variable to prevent command injection
+          CHANGED_FILES: ${{ steps.changed-files.outputs.CHANGED_FILES }}
+        run: |
+          # Run the doc-check analysis
+          if [ -n "$CURSOR_API_KEY" ]; then
+            python << 'PYTHON_EOF'
+import os
+import sys
+from pathlib import Path
+
+# Read changed files safely from environment (newline-separated)
+changed_files_str = os.environ.get('CHANGED_FILES', '')
+changed = [f.strip() for f in changed_files_str.strip().split('\n') if f.strip()]
+
+# Analyze each changed file for documentation impact
+suggestions = []
+
+for filepath in changed:
+    # Sanitize filepath - only allow expected characters
+    if not all(c.isalnum() or c in '._-/' for c in filepath):
+        # Don't log unsanitized filepath - just log length to avoid log injection
+        print(f"Warning: Skipping file with unexpected characters (length={len(filepath)})", file=sys.stderr)
+        continue
+    
+    path = Path(filepath)
+    
+    # Check if it's a Python file in a documented module
+    if path.suffix == '.py' and path.parent.name in ['agents', 'orchestrator', 'github', 'models']:
+        suggestions.append({
+            'file': f'.ai/rules/{path.parent.name}.md',
+            'reason': f'File `{filepath}` changed - may need documentation update',
+            'priority': 'normal'
+        })
+    
+    # Check if it changes config
+    if 'config' in filepath.lower():
+        suggestions.append({
+            'file': 'config.example.yaml',
+            'reason': 'Configuration changes may need example updates',
+            'priority': 'normal'
+        })
+        suggestions.append({
+            'file': 'README.md',
+            'reason': 'Configuration changes may affect README docs',
+            'priority': 'normal'
+        })
+    
+    # Check if it's CLI changes
+    if 'cli' in filepath.lower():
+        suggestions.append({
+            'file': 'README.md',
+            'reason': 'CLI changes may need README command documentation update',
+            'priority': 'normal'
+        })
+
+# Deduplicate suggestions by file
+seen_files = set()
+unique_suggestions = []
+for s in suggestions:
+    if s['file'] not in seen_files:
+        seen_files.add(s['file'])
+        unique_suggestions.append(s)
+
+# Output suggestions using GitHub Actions output format
+output_file = os.environ.get('GITHUB_OUTPUT', '/dev/stdout')
+with open(output_file, 'a') as f:
+    f.write('SUGGESTIONS<<EOF\n')
+    if unique_suggestions:
+        # HTML marker for reliable comment detection (won't appear in normal comments)
+        f.write('<!-- AI-CODE-REVIEWER-DOC-BOT -->\n')
+        f.write('## 📚 Documentation Check\n\n')
+        f.write('The following documentation files may need updates based on code changes:\n\n')
+        for s in unique_suggestions:
+            f.write(f"- **{s['file']}**: {s['reason']} [{s['priority']}]\n")
+        f.write('\n*Please review these suggestions and update documentation if needed.*\n')
+    # When no suggestions, write empty string so the condition skips posting
+    f.write('EOF\n')
+PYTHON_EOF
+          else
+            # Fallback when no API key - provide manual checklist
+            echo "::notice::Documentation bot running in manual mode (no CURSOR_API_KEY configured)"
+            {
+              echo "SUGGESTIONS<<EOF"
+              # HTML marker for reliable comment detection
+              echo "<!-- AI-CODE-REVIEWER-DOC-BOT -->"
+              echo "## 📚 Documentation Check (Manual Mode)"
+              echo ""
+              echo "⚠️ Automated analysis skipped (no API key configured)."
+              echo ""
+              echo "**Changed files to manually check for doc updates:**"
+              echo ""
+              # Sanitize and escape filenames for markdown output (consistent with Python path)
+              echo "$CHANGED_FILES" | while IFS= read -r file; do
+                if [ -n "$file" ]; then
+                  # Only allow safe characters (alphanumeric, dots, underscores, hyphens, slashes)
+                  if echo "$file" | grep -qE '^[a-zA-Z0-9._/-]+$'; then
+                    # Escape backticks for markdown safety
+                    safe_file="${file//\`/\\\`}"
+                    echo "- \`$safe_file\`"
+                  else
+                    echo "- *(skipped file with unexpected characters)*"
+                  fi
+                fi
+              done
+              echo ""
+              echo "*Please manually verify if documentation updates are needed.*"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
+      
+      - name: Post comment on PR
+        if: steps.doc-analysis.outputs.SUGGESTIONS != ''
+        # Pinned to v7.0.1 - https://github.com/actions/github-script/releases/tag/v7.0.1
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        env:
+          # Pass suggestions via environment to avoid interpolation issues
+          SUGGESTIONS: ${{ steps.doc-analysis.outputs.SUGGESTIONS }}
+        with:
+          script: |
+            const suggestions = process.env.SUGGESTIONS;
+            
+            // Unique marker to reliably identify our bot's comments
+            const COMMENT_MARKER = '<!-- AI-CODE-REVIEWER-DOC-BOT -->';
+            
+            // Find existing bot comment by unique marker (more reliable than user type check)
+            let botComment = null;
+            for await (const response of github.paginate.iterator(github.rest.issues.listComments, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              per_page: 100,
+            })) {
+              for (const comment of response.data) {
+                if (comment.body.includes(COMMENT_MARKER)) {
+                  botComment = comment;
+                  break;
+                }
+              }
+              if (botComment) break; // Early exit once found
+            }
+            
+            const body = suggestions + '\n\n---\n<sub>🤖 Generated by Documentation Bot | [Configure](.ai/doc-bot.md)</sub>';
+            
+            if (botComment) {
+              // Update existing comment
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body: body
+              });
+            } else {
+              // Create new comment
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body: body
+              });
+            }
