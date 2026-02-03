@@ -5,6 +5,7 @@ import base64
 import json
 import logging
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -152,7 +153,7 @@ class CursorClient:
     async def wait_for_agent(
         self,
         agent_id: str,
-        on_status: callable | None = None,
+        on_status: Callable[..., Any] | None = None,
     ) -> dict[str, Any]:
         """Wait for an agent to complete.
 
@@ -187,7 +188,7 @@ class CursorClient:
         repo_url: str,
         ref: str,
         prompt: str,
-        on_status: callable | None = None,
+        on_status: Callable[..., Any] | None = None,
     ) -> AgentResult:
         """Run a complete review agent flow.
 

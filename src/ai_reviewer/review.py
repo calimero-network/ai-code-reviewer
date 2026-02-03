@@ -4,7 +4,9 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Callable
 from datetime import datetime
+from typing import Any
 from uuid import uuid4
 
 from ai_reviewer.agents.cursor_client import CursorClient, CursorConfig
@@ -165,7 +167,7 @@ async def run_single_agent(
     ref: str,
     prompt: str,
     agent_name: str,
-    on_status: callable | None = None,
+    on_status: Callable[..., Any] | None = None,
 ) -> tuple[str, list[dict], str]:
     """Run a single agent and return its findings."""
     try:
@@ -272,7 +274,7 @@ async def review_pr_with_cursor_agent(
     pr_number: int,
     cursor_config: CursorConfig,
     github_token: str,
-    on_status: callable | None = None,
+    on_status: Callable[..., Any] | None = None,
     num_agents: int = 1,
 ) -> ConsolidatedReview:
     """Review a PR using Cursor Background Agent(s).
