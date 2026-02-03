@@ -312,12 +312,12 @@ Respond with the requested format."""
     ) -> dict[str, Any]:
         """Legacy JSON completion method."""
         content = await self.complete(
-            model=model,
+            _model=model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            response_format="json",
+            _max_tokens=max_tokens,
+            _temperature=temperature,
+            _response_format="json",
         )
         return self._parse_json_response(content)
 
