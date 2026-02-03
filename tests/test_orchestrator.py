@@ -1,9 +1,10 @@
 """Tests for the agent orchestrator."""
 
-import pytest
 import asyncio
-from unittest.mock import AsyncMock, MagicMock
 from datetime import datetime
+from unittest.mock import MagicMock
+
+import pytest
 
 
 class TestAgentOrchestrator:
@@ -12,9 +13,8 @@ class TestAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_parallel_execution(self, sample_vulnerable_diff, mock_review_context):
         """Test that agents are executed in parallel."""
-        from ai_reviewer.orchestrator.orchestrator import AgentOrchestrator
         from ai_reviewer.models.review import AgentReview
-        from ai_reviewer.models.findings import ReviewFinding, Severity, Category
+        from ai_reviewer.orchestrator.orchestrator import AgentOrchestrator
 
         # Create mock agents
         mock_agent_1 = MagicMock()
@@ -28,7 +28,7 @@ class TestAgentOrchestrator:
         # Track execution times to verify parallelism
         execution_times = []
 
-        async def mock_review_1(*args, **kwargs):
+        async def mock_review_1(*_args, **_kwargs):
             start = datetime.now()
             await asyncio.sleep(0.1)  # Simulate work
             execution_times.append(("agent-1", start, datetime.now()))
@@ -41,7 +41,7 @@ class TestAgentOrchestrator:
                 review_time_ms=100,
             )
 
-        async def mock_review_2(*args, **kwargs):
+        async def mock_review_2(*_args, **_kwargs):
             start = datetime.now()
             await asyncio.sleep(0.1)  # Simulate work
             execution_times.append(("agent-2", start, datetime.now()))
@@ -81,8 +81,8 @@ class TestAgentOrchestrator:
     @pytest.mark.asyncio
     async def test_handles_agent_timeout(self, sample_vulnerable_diff, mock_review_context):
         """Test that orchestrator handles agent timeouts gracefully."""
-        from ai_reviewer.orchestrator.orchestrator import AgentOrchestrator
         from ai_reviewer.models.review import AgentReview
+        from ai_reviewer.orchestrator.orchestrator import AgentOrchestrator
 
         # Create mock agents - one fast, one slow
         fast_agent = MagicMock()
@@ -93,7 +93,7 @@ class TestAgentOrchestrator:
         slow_agent.agent_id = "slow-agent"
         slow_agent.focus_areas = ["performance"]
 
-        async def fast_review(*args, **kwargs):
+        async def fast_review(*_args, **_kwargs):
             await asyncio.sleep(0.01)
             return AgentReview(
                 agent_id="fast-agent",
@@ -104,7 +104,7 @@ class TestAgentOrchestrator:
                 review_time_ms=10,
             )
 
-        async def slow_review(*args, **kwargs):
+        async def slow_review(*_args, **_kwargs):
             await asyncio.sleep(10)  # Will timeout
             return AgentReview(
                 agent_id="slow-agent",
@@ -135,9 +135,7 @@ class TestAgentOrchestrator:
         assert any(r.agent_id == "fast-agent" for r in results)
 
     @pytest.mark.asyncio
-    async def test_fails_if_insufficient_agents(
-        self, sample_vulnerable_diff, mock_review_context
-    ):
+    async def test_fails_if_insufficient_agents(self, sample_vulnerable_diff, mock_review_context):
         """Test that orchestrator fails if too few agents succeed."""
         from ai_reviewer.orchestrator.orchestrator import (
             AgentOrchestrator,
@@ -149,7 +147,7 @@ class TestAgentOrchestrator:
         failing_agent.agent_id = "failing-agent"
         failing_agent.focus_areas = ["security"]
 
-        async def failing_review(*args, **kwargs):
+        async def failing_review(*_args, **_kwargs):
             raise Exception("Agent failed")
 
         failing_agent.review = failing_review

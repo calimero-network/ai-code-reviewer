@@ -1,8 +1,8 @@
 """Tests for CLI commands."""
 
-import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+
 from click.testing import CliRunner
-from unittest.mock import patch, AsyncMock, MagicMock
 
 
 class TestCLI:
@@ -31,7 +31,7 @@ class TestCLI:
                 agent_count=3,
             )
 
-            result = runner.invoke(
+            runner.invoke(
                 cli,
                 ["review-pr", "test-org/test-repo", "42"],
                 catch_exceptions=False,
@@ -56,7 +56,7 @@ class TestCLI:
                 agent_count=3,
             )
 
-            result = runner.invoke(
+            runner.invoke(
                 cli,
                 ["review-pr", "test-org/test-repo", "42", "--dry-run"],
             )
@@ -121,7 +121,7 @@ class TestCLI:
 
         with patch("ai_reviewer.cli.uvicorn") as mock_uvicorn:
             # Don't actually start server, just verify it would be called
-            result = runner.invoke(
+            runner.invoke(
                 cli,
                 ["serve", "--port", "9000", "--host", "127.0.0.1"],
                 catch_exceptions=False,
@@ -161,7 +161,7 @@ index 1234567..abcdefg 100644
                 agent_count=3,
             )
 
-            result = runner.invoke(
+            runner.invoke(
                 cli,
                 ["review", "--output", "markdown"],
                 input=sample_diff,
@@ -190,7 +190,7 @@ index 1234567..abcdefg 100644
                     agent_count=3,
                 )
 
-                result = runner.invoke(
+                runner.invoke(
                     cli,
                     ["review", "--diff", "changes.patch"],
                 )
