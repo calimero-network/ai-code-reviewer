@@ -110,6 +110,6 @@ custom_rules:
   # No direct LLM imports
   - name: no-direct-llm
     description: "LLM access must go through CursorClient"
-    pattern: "^import (anthropic|openai)"
+    pattern: "^(import (anthropic|openai)|from (anthropic|openai) import)"
     severity: critical
     message: "Use CursorClient from agents/cursor_client.py instead"
