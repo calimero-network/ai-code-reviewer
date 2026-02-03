@@ -173,26 +173,80 @@ async def review_pr_async(
         formatter = GitHubFormatter()
         print(formatter.format_review(review))
     else:  # github
+        gh = GitHubClient(config.github.token)
+        pr = gh.get_pull_request(repo, pr_number)
+        formatter = GitHubFormatter()
+
+        # Compute delta from previous reviews
+        console.print("🔄 Checking for previous review comments...")
+        delta = gh.compute_review_delta(pr, review.findings)
+
+        # Show delta summary
+        if delta.previous_comments:
+            console.print(
+                f"   Found {len(delta.previous_comments)} previous comments: "
+                f"[green]{len(delta.fixed_findings)} fixed[/green], "
+                f"[yellow]{len(delta.open_findings)} open[/yellow], "
+                f"[cyan]{len(delta.new_findings)} new[/cyan]"
+            )
+        else:
+            console.print("   No previous review comments found (first run)")
+
         if dry_run:
             console.print("\n[yellow]Dry run - not posting to GitHub[/yellow]")
-            formatter = GitHubFormatter()
-            print(formatter.format_review(review))
+            if delta.previous_comments:
+                print(formatter.format_review_with_delta(review, delta))
+            else:
+                print(formatter.format_review(review))
         else:
-            gh = GitHubClient(config.github.token)
-            pr = gh.get_pull_request(repo, pr_number)
-            formatter = GitHubFormatter()
-            body = formatter.format_review(review)
-            action = formatter.get_review_action(review, allow_approve=allow_approve)
+            # Format review with delta info if we have previous comments
+            if delta.previous_comments:
+                body = formatter.format_review_with_delta(review, delta)
+                action = formatter.get_review_action_with_delta(review, delta, allow_approve)
+            else:
+                body = formatter.format_review(review)
+                action = formatter.get_review_action(review, allow_approve=allow_approve)
+
             gh.post_review(pr, review, body, action)
             console.print(f"📝 Posted review to GitHub ({action})")
 
-            # Post inline comments for each finding
-            if review.findings:
-                console.print(
-                    f"💬 Posting inline comments for {min(len(review.findings), 10)} findings..."
+            # Resolve fixed comments
+            if delta.fixed_findings:
+                console.print(f"✅ Marking {len(delta.fixed_findings)} fixed issues as resolved...")
+                resolved = gh.resolve_fixed_comments(pr, delta)
+                console.print(f"   Resolved {resolved} comments")
+
+            # Post inline comments only for NEW findings
+            new_findings_to_post = (
+                delta.new_findings if delta.previous_comments else review.findings
+            )
+            if new_findings_to_post:
+                # Create a temporary review with only new findings for inline comments
+                from ai_reviewer.models.review import ConsolidatedReview as CR
+
+                new_only_review = CR(
+                    id=review.id,
+                    created_at=review.created_at,
+                    repo=review.repo,
+                    pr_number=review.pr_number,
+                    findings=new_findings_to_post,
+                    summary=review.summary,
+                    agent_count=review.agent_count,
+                    review_quality_score=review.review_quality_score,
+                    total_review_time_ms=review.total_review_time_ms,
                 )
-                posted = gh.post_inline_comments(pr, review)
-                console.print(f"✅ Posted {posted} inline comments")
+                console.print(
+                    f"💬 Posting inline comments for {min(len(new_findings_to_post), 10)} new findings..."
+                )
+                posted = gh.post_inline_comments(pr, new_only_review)
+                console.print(f"   Posted {posted} inline comments")
+
+            # Final status
+            if delta.all_issues_resolved:
+                console.print("\n[green]🎉 All issues resolved! Ready to merge.[/green]")
+            elif delta.previous_comments:
+                open_count = len(delta.open_findings) + len(delta.new_findings)
+                console.print(f"\n[yellow]⚠️  {open_count} issues remaining[/yellow]")
 
 
 @cli.group("config")
