@@ -125,7 +125,12 @@ class GitHubClient:
         graphql_url = GITHUB_GRAPHQL_URL
         if self._base_url:
             # For GitHub Enterprise, construct GraphQL endpoint
-            graphql_url = f"{self._base_url.rstrip('/')}/graphql"
+            # PyGithub uses REST API URL (e.g., https://github.example.com/api/v3)
+            # but GraphQL endpoint is at /api/graphql (without /v3)
+            base = self._base_url.rstrip("/")
+            if base.endswith("/v3"):
+                base = base[:-3]  # Remove '/v3', keeping '/api'
+            graphql_url = f"{base}/graphql"
 
         headers = {
             "Authorization": f"Bearer {self._token}",
