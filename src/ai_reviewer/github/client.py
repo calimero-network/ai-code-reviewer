@@ -451,13 +451,21 @@ class GitHubClient:
         """
         resolved_count = 0
 
+        if not delta.fixed_findings:
+            logger.debug("No fixed findings to resolve")
+            return 0
+
         # Get all existing replies to avoid duplicates
         existing_replies = self._get_resolved_comment_ids(pr)
+        logger.info(
+            f"Resolving {len(delta.fixed_findings)} fixed comments, "
+            f"{len(existing_replies)} already resolved"
+        )
 
         for fixed in delta.fixed_findings:
             # Skip if we've already marked this as resolved
             if fixed.id in existing_replies:
-                logger.debug(f"Comment {fixed.id} already has resolved reply, skipping")
+                logger.info(f"Comment {fixed.id} already has resolved reply, skipping")
                 continue
 
             try:
@@ -481,7 +489,7 @@ class GitHubClient:
         return resolved_count
 
     def _get_resolved_comment_ids(self, pr: PullRequest) -> set[int]:
-        """Get IDs of comments that already have a 'Resolved' reply.
+        """Get IDs of comments that already have a 'Resolved' reply from this reviewer.
 
         Args:
             pr: Pull request object
@@ -491,9 +499,34 @@ class GitHubClient:
         """
         resolved_ids: set[int] = set()
 
-        for comment in pr.get_review_comments():
-            # Check if this is a "Resolved" reply with a parent
-            if "✅ **Resolved**" in comment.body and comment.in_reply_to_id:
-                resolved_ids.add(comment.in_reply_to_id)
+        # Get allowed users (current user + known bot users)
+        try:
+            current_user = self._gh.get_user().login
+            allowed_users = self.AI_REVIEWER_USERS | {current_user}
+        except Exception:
+            allowed_users = self.AI_REVIEWER_USERS
 
+        for comment in pr.get_review_comments():
+            # Check if this is a "Resolved" reply from our reviewer
+            if "✅ **Resolved**" not in comment.body:
+                continue
+
+            # Only count resolved comments from allowed users
+            if comment.user.login not in allowed_users:
+                continue
+
+            # Check if this comment has a valid in_reply_to_id
+            # PyGithub may return NotSet, None, or 0 for non-reply comments
+            reply_to_id = getattr(comment, "in_reply_to_id", None)
+            if reply_to_id is not None and reply_to_id != 0:
+                # Handle PyGithub's NotSet sentinel
+                try:
+                    reply_id = int(reply_to_id)
+                    resolved_ids.add(reply_id)
+                    logger.debug(f"Found existing resolved reply for comment {reply_id}")
+                except (TypeError, ValueError):
+                    # in_reply_to_id was NotSet or invalid
+                    pass
+
+        logger.debug(f"Found {len(resolved_ids)} already-resolved comment IDs")
         return resolved_ids

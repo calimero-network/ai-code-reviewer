@@ -97,6 +97,152 @@ class TestGitHubPRHandler:
             mock_review.assert_not_called()
 
 
+class TestResolveFixedComments:
+    """Tests for duplicate resolved comment prevention."""
+
+    def test_get_resolved_comment_ids_finds_existing_resolved(self):
+        """Test that _get_resolved_comment_ids finds already-resolved comments."""
+        from ai_reviewer.github.client import GitHubClient
+
+        # Create mock comments - one is a resolved reply
+        mock_original_comment = MagicMock()
+        mock_original_comment.id = 100
+        mock_original_comment.body = "🔴 **SQL Injection**\n\nBad query"
+        mock_original_comment.user.login = "github-actions[bot]"
+        mock_original_comment.in_reply_to_id = None
+
+        mock_resolved_reply = MagicMock()
+        mock_resolved_reply.id = 200
+        mock_resolved_reply.body = "✅ **Resolved** - This issue has been addressed in the latest changes."
+        mock_resolved_reply.user.login = "github-actions[bot]"
+        mock_resolved_reply.in_reply_to_id = 100  # Reply to comment 100
+
+        mock_pr = MagicMock()
+        mock_pr.get_review_comments.return_value = [mock_original_comment, mock_resolved_reply]
+
+        with patch("ai_reviewer.github.client.Github") as mock_github:
+            mock_github.return_value.get_user.return_value.login = "github-actions[bot]"
+            client = GitHubClient(token="test-token")
+            resolved_ids = client._get_resolved_comment_ids(mock_pr)
+
+            assert 100 in resolved_ids
+            assert len(resolved_ids) == 1
+
+    def test_get_resolved_comment_ids_ignores_other_users(self):
+        """Test that resolved comments from other users are not counted."""
+        from ai_reviewer.github.client import GitHubClient
+
+        # Create a resolved reply from a different user
+        mock_resolved_reply = MagicMock()
+        mock_resolved_reply.id = 200
+        mock_resolved_reply.body = "✅ **Resolved** - Fixed!"
+        mock_resolved_reply.user.login = "random-user"  # Not the bot
+        mock_resolved_reply.in_reply_to_id = 100
+
+        mock_pr = MagicMock()
+        mock_pr.get_review_comments.return_value = [mock_resolved_reply]
+
+        with patch("ai_reviewer.github.client.Github") as mock_github:
+            mock_github.return_value.get_user.return_value.login = "github-actions[bot]"
+            client = GitHubClient(token="test-token")
+            resolved_ids = client._get_resolved_comment_ids(mock_pr)
+
+            # Should not include comment 100 since the resolver was a different user
+            assert 100 not in resolved_ids
+            assert len(resolved_ids) == 0
+
+    def test_get_resolved_comment_ids_handles_none_reply_to(self):
+        """Test handling of comments without in_reply_to_id."""
+        from ai_reviewer.github.client import GitHubClient
+
+        # Comment with Resolved text but no in_reply_to_id
+        mock_comment = MagicMock()
+        mock_comment.id = 100
+        mock_comment.body = "✅ **Resolved** - Fixed!"
+        mock_comment.user.login = "github-actions[bot]"
+        mock_comment.in_reply_to_id = None
+
+        mock_pr = MagicMock()
+        mock_pr.get_review_comments.return_value = [mock_comment]
+
+        with patch("ai_reviewer.github.client.Github") as mock_github:
+            mock_github.return_value.get_user.return_value.login = "github-actions[bot]"
+            client = GitHubClient(token="test-token")
+            resolved_ids = client._get_resolved_comment_ids(mock_pr)
+
+            # Should be empty since comment has no in_reply_to_id
+            assert len(resolved_ids) == 0
+
+    def test_resolve_fixed_comments_skips_already_resolved(self):
+        """Test that resolve_fixed_comments skips already-resolved comments."""
+        from ai_reviewer.github.client import GitHubClient, PreviousComment, ReviewDelta
+
+        # Create a fixed finding
+        fixed_comment = PreviousComment(
+            id=100,
+            file_path="test.py",
+            line=10,
+            title="SQL Injection",
+            severity="critical",
+            body="🔴 **SQL Injection**",
+        )
+
+        delta = ReviewDelta(fixed_findings=[fixed_comment])
+
+        # Mock existing resolved reply
+        mock_resolved_reply = MagicMock()
+        mock_resolved_reply.id = 200
+        mock_resolved_reply.body = "✅ **Resolved** - This issue has been addressed in the latest changes."
+        mock_resolved_reply.user.login = "github-actions[bot]"
+        mock_resolved_reply.in_reply_to_id = 100  # Already resolved
+
+        mock_pr = MagicMock()
+        mock_pr.get_review_comments.return_value = [mock_resolved_reply]
+
+        with patch("ai_reviewer.github.client.Github") as mock_github:
+            mock_github.return_value.get_user.return_value.login = "github-actions[bot]"
+            client = GitHubClient(token="test-token")
+            resolved_count = client.resolve_fixed_comments(mock_pr, delta)
+
+            # Should skip the comment since it's already resolved
+            assert resolved_count == 0
+            # Should NOT call create_review_comment_reply
+            mock_pr.create_review_comment_reply.assert_not_called()
+
+    def test_resolve_fixed_comments_posts_for_new_fixes(self):
+        """Test that resolve_fixed_comments posts for newly fixed issues."""
+        from ai_reviewer.github.client import GitHubClient, PreviousComment, ReviewDelta
+
+        # Create a fixed finding
+        fixed_comment = PreviousComment(
+            id=100,
+            file_path="test.py",
+            line=10,
+            title="SQL Injection",
+            severity="critical",
+            body="🔴 **SQL Injection**",
+        )
+
+        delta = ReviewDelta(fixed_findings=[fixed_comment])
+
+        # No existing resolved comments
+        mock_pr = MagicMock()
+        mock_pr.get_review_comments.return_value = []
+        mock_pr.get_review_comment.return_value = MagicMock()
+
+        with patch("ai_reviewer.github.client.Github") as mock_github:
+            mock_github.return_value.get_user.return_value.login = "github-actions[bot]"
+            client = GitHubClient(token="test-token")
+            resolved_count = client.resolve_fixed_comments(mock_pr, delta)
+
+            # Should post a resolved reply
+            assert resolved_count == 1
+            mock_pr.create_review_comment_reply.assert_called_once_with(
+                comment_id=100,
+                body="✅ **Resolved** - This issue has been addressed in the latest changes.",
+            )
+
+
 class TestReviewFormatter:
     """Tests for GitHub comment formatting."""
 
