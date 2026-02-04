@@ -592,6 +592,8 @@ class GitHubClient:
             threads = threads_data.get("nodes", [])
 
             for thread in threads:
+                if not thread:
+                    continue  # Skip null entries in GraphQL nodes array
                 if thread.get("isResolved"):
                     continue  # Skip already resolved threads
 
@@ -601,6 +603,8 @@ class GitHubClient:
 
                 comments = (thread.get("comments") or {}).get("nodes") or []
                 for comment in comments:
+                    if not comment:
+                        continue  # Skip null entries in GraphQL nodes array
                     db_id = comment.get("databaseId")
                     if db_id:
                         comment_to_thread[db_id] = thread_id
