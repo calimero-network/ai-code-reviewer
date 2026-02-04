@@ -57,6 +57,9 @@ class ReviewDelta:
 class GitHubClient:
     """Client for GitHub API operations."""
 
+    # Sentinel value to indicate that user login fetch was attempted but failed
+    _USER_FETCH_FAILED = ""
+
     def __init__(self, token: str, base_url: str | None = None) -> None:
         """Initialize the GitHub client.
 
@@ -82,7 +85,10 @@ class GitHubClient:
                 self._current_user_login = self._gh.get_user().login
             except GithubException as e:
                 logger.warning(f"Could not fetch current user: {e}")
+                self._current_user_login = self._USER_FETCH_FAILED
                 return None
+        if self._current_user_login == self._USER_FETCH_FAILED:
+            return None
         return self._current_user_login
 
     def _get_allowed_users(self) -> set[str]:
