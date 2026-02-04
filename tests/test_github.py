@@ -363,14 +363,59 @@ class TestResolveFixedComments:
         mock_pr = MagicMock()
         mock_pr.get_review_comments.return_value = []
         mock_pr.get_review_comment.return_value = MagicMock()
+        mock_pr.base.repo.full_name = "test-org/test-repo"
 
         with patch("ai_reviewer.github.client.Github"):
             client = GitHubClient(token="test-token")
             client._current_user_login = "github-actions[bot]"
+            # Mock the thread resolution to avoid actual API calls
+            client._resolve_thread_for_comment = MagicMock(return_value=True)
             client.resolve_fixed_comments(mock_pr, delta)
 
             # get_review_comments should only be called once
             assert mock_pr.get_review_comments.call_count == 1
+
+    def test_resolve_thread_for_comment_calls_graphql(self):
+        """Test that thread resolution uses GraphQL API."""
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github"):
+            with patch("ai_reviewer.github.client.requests.post") as mock_post:
+                # Mock successful GraphQL responses
+                mock_post.return_value.status_code = 200
+                mock_post.return_value.json.side_effect = [
+                    # First call: get thread ID
+                    {
+                        "data": {
+                            "repository": {
+                                "pullRequest": {
+                                    "reviewThreads": {
+                                        "nodes": [
+                                            {
+                                                "id": "thread-node-123",
+                                                "isResolved": False,
+                                                "comments": {"nodes": [{"databaseId": 100}]},
+                                            }
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    # Second call: resolve thread
+                    {
+                        "data": {
+                            "resolveReviewThread": {"thread": {"isResolved": True}}
+                        }
+                    },
+                ]
+                mock_post.return_value.raise_for_status = MagicMock()
+
+                client = GitHubClient(token="test-token")
+                result = client._resolve_thread_for_comment("test-org/test-repo", 42, 100)
+
+                assert result is True
+                assert mock_post.call_count == 2  # One for query, one for mutation
 
 
 class TestReviewFormatter:
