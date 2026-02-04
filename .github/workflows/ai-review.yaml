@@ -69,7 +69,8 @@ jobs:
       - name: Run AI Code Review
         env:
           CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Use GH_PAT for full features (thread resolution), fallback to GITHUB_TOKEN
+          GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         run: |
           echo "🔍 Reviewing PR #${{ steps.pr.outputs.number }} with ${{ steps.pr.outputs.agents }} agent(s)..."
           ai-reviewer review-pr \

@@ -86,7 +86,7 @@ cursor:
 
 # GitHub integration
 github:
-  token: ${GITHUB_TOKEN}
+  token: ${GITHUB_TOKEN}  # or PAT for thread resolution (see below)
 
 # Agents - different models, same Cursor API
 agents:
@@ -177,6 +177,46 @@ policy:
   require_human_review_for: [security]
   block_on_critical: true
 ```
+
+---
+
+## GitHub Actions Setup
+
+### Basic Setup (GITHUB_TOKEN)
+
+The default `GITHUB_TOKEN` provided by GitHub Actions works for most features:
+- ✅ Posting reviews and comments
+- ✅ Adding reactions
+- ✅ Posting "Resolved" replies
+- ❌ Resolving review threads (requires PAT)
+
+### Full Features (Personal Access Token)
+
+To enable automatic thread resolution when issues are fixed, use a PAT instead:
+
+1. Create a [Fine-grained Personal Access Token](https://github.com/settings/tokens?type=beta) with:
+   - **Repository access**: Select the repositories where the reviewer runs
+   - **Permissions**:
+     - `Pull requests`: Read and write
+     - `Contents`: Read (for fetching file contents)
+
+2. Add the PAT as a repository secret named `GH_PAT`:
+   ```
+   Settings → Secrets and variables → Actions → New repository secret
+   Name: GH_PAT
+   Value: github_pat_...
+   ```
+
+3. Update your workflow to use the PAT:
+   ```yaml
+   env:
+     GITHUB_TOKEN: ${{ secrets.GH_PAT }}
+   ```
+
+> **Note**: The default `GITHUB_TOKEN` cannot resolve review threads because GitHub's
+> GraphQL `resolveReviewThread` mutation requires user-level authentication, not
+> integration/app tokens. With `GITHUB_TOKEN`, the reviewer will still post "✅ Resolved"
+> replies, but threads won't collapse automatically.
 
 ---
 
