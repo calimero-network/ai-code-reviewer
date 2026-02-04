@@ -23,6 +23,11 @@ on:
           - '2'
           - '3'
 
+# Prevent race conditions: only one review per PR at a time
+concurrency:
+  group: ai-review-${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+  cancel-in-progress: true
+
 jobs:
   review:
     runs-on: ubuntu-latest

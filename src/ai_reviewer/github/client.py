@@ -5,6 +5,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 
+import requests
 from github import Github
 from github.GithubException import GithubException
 from github.PullRequest import PullRequest
@@ -16,6 +17,9 @@ from ai_reviewer.models.findings import ConsolidatedFinding
 from ai_reviewer.models.review import ConsolidatedReview
 
 logger = logging.getLogger(__name__)
+
+# Sentinel for failed user login fetch (distinct from empty string)
+_USER_FETCH_FAILED = "__FETCH_FAILED__"
 
 
 @dataclass
@@ -64,10 +68,46 @@ class GitHubClient:
             token: GitHub personal access token or app token
             base_url: Optional base URL for GitHub Enterprise
         """
+        self._token = token
+        self._base_url = base_url
+        self._current_user_login: str | None = None
+        self._allowed_users: set[str] | None = None
+
         if base_url:
             self._gh = Github(token, base_url=base_url)
         else:
             self._gh = Github(token)
+
+    def _get_current_user_login(self) -> str | None:
+        """Get the current authenticated user's login, with caching.
+
+        Returns:
+            The user login string, or None if fetch failed
+        """
+        if self._current_user_login is None:
+            try:
+                self._current_user_login = self._gh.get_user().login
+            except Exception as e:
+                logger.warning(f"Could not fetch current user: {e}")
+                self._current_user_login = _USER_FETCH_FAILED
+
+        if self._current_user_login == _USER_FETCH_FAILED:
+            return None
+        return self._current_user_login
+
+    def _get_allowed_users(self) -> set[str]:
+        """Get the set of allowed AI reviewer users, with caching.
+
+        Returns:
+            Set of allowed usernames (current user + known bot users)
+        """
+        if self._allowed_users is None:
+            current_user = self._get_current_user_login()
+            if current_user:
+                self._allowed_users = self.AI_REVIEWER_USERS | {current_user}
+            else:
+                self._allowed_users = self.AI_REVIEWER_USERS.copy()
+        return self._allowed_users
 
     def get_repo(self, repo_name: str) -> Repository:
         """Get a repository by name.
@@ -178,7 +218,11 @@ class GitHubClient:
             True if a pending review was dismissed
         """
         try:
-            current_user = self._gh.get_user().login
+            current_user = self._get_current_user_login()
+            if not current_user:
+                logger.warning("Could not fetch current user, skipping pending review dismissal")
+                return False
+
             reviews = pr.get_reviews()
 
             for review in reviews:
@@ -299,16 +343,14 @@ class GitHubClient:
             List of previous comments from AI reviewers
         """
         comments: list[PreviousComment] = []
-
-        # Include current user and known bot users
-        try:
-            current_user = self._gh.get_user().login
-            allowed_users = self.AI_REVIEWER_USERS | {current_user}
-        except Exception:
-            allowed_users = self.AI_REVIEWER_USERS
+        allowed_users = self._get_allowed_users()
 
         # Get review comments (inline comments on code)
         for comment in pr.get_review_comments():
+            # Skip our own "Resolved" replies - they are not findings
+            if "✅ **Resolved**" in comment.body:
+                continue
+
             user_login = comment.user.login
 
             # Check if from known AI reviewer OR has AI reviewer format
@@ -439,6 +481,173 @@ class GitHubClient:
         """
         return title.lower().strip()
 
+    def _graphql_request(self, query: str, variables: dict | None = None) -> dict | None:
+        """Make a GraphQL request to GitHub API.
+
+        Args:
+            query: GraphQL query string
+            variables: Optional query variables
+
+        Returns:
+            Response data dict or None on error
+        """
+        # Determine GraphQL endpoint
+        if self._base_url:
+            # GitHub Enterprise: /api/v3 -> /api/graphql
+            base = self._base_url.rstrip("/")
+            if base.endswith("/api/v3"):
+                graphql_url = base[:-3] + "/graphql"  # Replace /v3 with /graphql
+            else:
+                graphql_url = f"{base}/graphql"
+        else:
+            graphql_url = "https://api.github.com/graphql"
+
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Content-Type": "application/json",
+        }
+
+        payload = {"query": query}
+        if variables:
+            payload["variables"] = variables
+
+        try:
+            response = requests.post(graphql_url, json=payload, headers=headers, timeout=30)
+            response.raise_for_status()
+            result = response.json()
+
+            if "errors" in result:
+                logger.warning(f"GraphQL errors: {result['errors']}")
+                return None
+
+            return result.get("data")
+        except Exception as e:
+            logger.warning(f"GraphQL request failed: {e}")
+            return None
+
+    def _get_thread_id_for_comment(
+        self, repo_name: str, pr_number: int, comment_id: int
+    ) -> str | None:
+        """Get the review thread node ID for a comment.
+
+        Args:
+            repo_name: Repository in "owner/name" format
+            pr_number: Pull request number
+            comment_id: The REST API comment ID to find
+
+        Returns:
+            The thread's GraphQL node ID, or None if not found
+        """
+        owner, name = repo_name.split("/")
+
+        query = """
+        query($owner: String!, $name: String!, $pr_number: Int!, $cursor: String) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $pr_number) {
+              reviewThreads(first: 100, after: $cursor) {
+                pageInfo {
+                  hasNextPage
+                  endCursor
+                }
+                nodes {
+                  id
+                  isResolved
+                  comments(first: 50) {
+                    nodes {
+                      databaseId
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+        """
+
+        cursor = None
+        while True:
+            variables = {
+                "owner": owner,
+                "name": name,
+                "pr_number": pr_number,
+                "cursor": cursor,
+            }
+
+            data = self._graphql_request(query, variables)
+            if not data:
+                return None
+
+            pr_data = data.get("repository", {}).get("pullRequest", {})
+            threads_data = pr_data.get("reviewThreads", {})
+            threads = threads_data.get("nodes", [])
+
+            for thread in threads:
+                if thread.get("isResolved"):
+                    continue  # Skip already resolved threads
+
+                comments = thread.get("comments", {}).get("nodes", [])
+                for comment in comments:
+                    if comment.get("databaseId") == comment_id:
+                        return thread.get("id")
+
+            # Check for more pages
+            page_info = threads_data.get("pageInfo", {})
+            if page_info.get("hasNextPage"):
+                cursor = page_info.get("endCursor")
+            else:
+                break
+
+        return None
+
+    def _resolve_review_thread(self, thread_id: str) -> bool:
+        """Resolve a review thread using GraphQL.
+
+        Args:
+            thread_id: The GraphQL node ID of the thread
+
+        Returns:
+            True if successfully resolved
+        """
+        mutation = """
+        mutation($thread_id: ID!) {
+          resolveReviewThread(input: {threadId: $thread_id}) {
+            thread {
+              isResolved
+            }
+          }
+        }
+        """
+
+        data = self._graphql_request(mutation, {"thread_id": thread_id})
+        if data:
+            thread = data.get("resolveReviewThread", {}).get("thread", {})
+            return thread.get("isResolved", False)
+        return False
+
+    def _resolve_thread_for_comment(
+        self, repo_name: str, pr_number: int, comment_id: int
+    ) -> bool:
+        """Resolve the review thread containing a specific comment.
+
+        Args:
+            repo_name: Repository in "owner/name" format
+            pr_number: Pull request number
+            comment_id: The comment ID whose thread to resolve
+
+        Returns:
+            True if thread was resolved
+        """
+        thread_id = self._get_thread_id_for_comment(repo_name, pr_number, comment_id)
+        if not thread_id:
+            logger.debug(f"Could not find thread for comment {comment_id}")
+            return False
+
+        if self._resolve_review_thread(thread_id):
+            logger.info(f"Resolved thread for comment {comment_id}")
+            return True
+
+        return False
+
     def resolve_fixed_comments(self, pr: PullRequest, delta: ReviewDelta) -> int:
         """Mark fixed issues as resolved by replying to them.
 
@@ -449,10 +658,23 @@ class GitHubClient:
         Returns:
             Number of comments marked as resolved
         """
+        if not delta.fixed_findings:
+            logger.debug("No fixed findings to resolve")
+            return 0
+
         resolved_count = 0
 
+        # Fetch comments once and pass to helper to avoid redundant API calls
+        raw_comments = list(pr.get_review_comments())
+
         # Get all existing replies to avoid duplicates
-        existing_replies = self._get_resolved_comment_ids(pr)
+        existing_replies = self._get_resolved_comment_ids(pr, raw_comments)
+        logger.info(
+            f"Found {len(existing_replies)} already-resolved comments, "
+            f"processing {len(delta.fixed_findings)} fixed findings"
+        )
+
+        repo_name = pr.base.repo.full_name
 
         for fixed in delta.fixed_findings:
             # Skip if we've already marked this as resolved
@@ -475,25 +697,54 @@ class GitHubClient:
                 )
                 resolved_count += 1
                 logger.debug(f"Marked comment {fixed.id} as resolved")
+
+                # Resolve the thread via GraphQL
+                self._resolve_thread_for_comment(repo_name, pr.number, fixed.id)
             except Exception as e:
                 logger.warning(f"Could not resolve comment {fixed.id}: {e}")
 
         return resolved_count
 
-    def _get_resolved_comment_ids(self, pr: PullRequest) -> set[int]:
-        """Get IDs of comments that already have a 'Resolved' reply.
+    def _get_resolved_comment_ids(
+        self, pr: PullRequest, raw_comments: list | None = None
+    ) -> set[int]:
+        """Get IDs of comments that already have a 'Resolved' reply from us.
 
         Args:
             pr: Pull request object
+            raw_comments: Optional pre-fetched comments to avoid redundant API calls
 
         Returns:
             Set of comment IDs that have been marked resolved
         """
         resolved_ids: set[int] = set()
+        allowed_users = self._get_allowed_users()
 
-        for comment in pr.get_review_comments():
+        comments = raw_comments if raw_comments is not None else pr.get_review_comments()
+
+        for comment in comments:
             # Check if this is a "Resolved" reply with a parent
-            if "✅ **Resolved**" in comment.body and comment.in_reply_to_id:
-                resolved_ids.add(comment.in_reply_to_id)
+            if "✅ **Resolved**" not in comment.body:
+                continue
+
+            # Safely get in_reply_to_id (may be NotSet, None, or 0)
+            reply_to = getattr(comment, "in_reply_to_id", None)
+            if reply_to is None or reply_to == 0:
+                continue
+
+            # Handle PyGithub's NotSet sentinel
+            try:
+                if not isinstance(reply_to, int):
+                    continue
+            except Exception:
+                continue
+
+            # Only count resolved comments from allowed users
+            if comment.user is None or comment.user.login is None:
+                continue
+            if comment.user.login not in allowed_users:
+                continue
+
+            resolved_ids.add(reply_to)
 
         return resolved_ids
