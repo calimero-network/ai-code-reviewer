@@ -587,7 +587,7 @@ class GitHubClient:
                 break
 
             pages_fetched += 1
-            pr_data = data.get("repository", {}).get("pullRequest", {})
+            pr_data = (data.get("repository") or {}).get("pullRequest") or {}
             threads_data = pr_data.get("reviewThreads", {})
             threads = threads_data.get("nodes", [])
 
@@ -599,7 +599,7 @@ class GitHubClient:
                 if not thread_id:
                     continue
 
-                comments = thread.get("comments", {}).get("nodes", [])
+                comments = (thread.get("comments") or {}).get("nodes") or []
                 for comment in comments:
                     db_id = comment.get("databaseId")
                     if db_id:
@@ -640,7 +640,7 @@ class GitHubClient:
 
         data = self._graphql_request(mutation, {"thread_id": thread_id})
         if data:
-            thread = data.get("resolveReviewThread", {}).get("thread", {})
+            thread = (data.get("resolveReviewThread") or {}).get("thread") or {}
             return thread.get("isResolved", False)
         return False
 
