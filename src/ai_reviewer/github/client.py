@@ -125,7 +125,12 @@ class GitHubClient:
         graphql_url = GITHUB_GRAPHQL_URL
         if self._base_url:
             # For GitHub Enterprise, construct GraphQL endpoint
-            graphql_url = f"{self._base_url.rstrip('/')}/graphql"
+            # The base_url is typically https://HOSTNAME/api/v3, but GraphQL is at https://HOSTNAME/api/graphql
+            base = self._base_url.rstrip("/")
+            if base.endswith("/api/v3"):
+                graphql_url = base[:-3] + "/graphql"  # Replace /api/v3 with /api/graphql
+            else:
+                graphql_url = f"{base}/graphql"
 
         headers = {
             "Authorization": f"Bearer {self._token}",
@@ -338,7 +343,10 @@ class GitHubClient:
             True if a pending review was dismissed
         """
         try:
-            current_user = self._gh.get_user().login
+            current_user = self._get_current_user_login()
+            if not current_user:
+                logger.warning("Could not fetch current user, skipping pending review dismissal")
+                return False
             reviews = pr.get_reviews()
 
             for review in reviews:
