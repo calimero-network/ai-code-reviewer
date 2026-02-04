@@ -36,6 +36,8 @@ dependencies = [
     "rich>=13.7.0",        # Beautiful terminal output
     "tenacity>=8.2.0",     # Retry logic
     "sentence-transformers>=2.3.0",  # For finding similarity clustering
+    "PyJWT>=2.8.0",        # GitHub App authentication
+    "cryptography>=42.0.0", # For JWT RS256 signing
 ]
 
 [project.optional-dependencies]
