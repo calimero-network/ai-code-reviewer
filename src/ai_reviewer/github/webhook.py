@@ -141,7 +141,7 @@ def _setup_default_review_handler() -> None:
 
         cursor_config = CursorConfig(
             api_key=cursor_api_key,
-            base_url=os.environ.get("CURSOR_BASE_URL", "https://api.cursor.com/v1"),
+            base_url=os.environ.get("CURSOR_BASE_URL", "https://api.cursor.com/v0"),
             timeout=int(os.environ.get("CURSOR_TIMEOUT", "300")),
         )
 
