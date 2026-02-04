@@ -120,9 +120,9 @@ class TestResolveFixedComments:
         mock_pr = MagicMock()
         mock_pr.get_review_comments.return_value = [mock_original_comment, mock_resolved_reply]
 
-        with patch("ai_reviewer.github.client.Github") as mock_github:
-            mock_github.return_value.get_user.return_value.login = "github-actions[bot]"
+        with patch("ai_reviewer.github.client.Github"):
             client = GitHubClient(token="test-token")
+            client._current_user_login = "github-actions[bot]"
             resolved_ids = client._get_resolved_comment_ids(mock_pr)
 
             assert 100 in resolved_ids
@@ -142,9 +142,9 @@ class TestResolveFixedComments:
         mock_pr = MagicMock()
         mock_pr.get_review_comments.return_value = [mock_resolved_reply]
 
-        with patch("ai_reviewer.github.client.Github") as mock_github:
-            mock_github.return_value.get_user.return_value.login = "github-actions[bot]"
+        with patch("ai_reviewer.github.client.Github"):
             client = GitHubClient(token="test-token")
+            client._current_user_login = "github-actions[bot]"
             resolved_ids = client._get_resolved_comment_ids(mock_pr)
 
             # Should not include comment 100 since the resolver was a different user
@@ -165,12 +165,34 @@ class TestResolveFixedComments:
         mock_pr = MagicMock()
         mock_pr.get_review_comments.return_value = [mock_comment]
 
-        with patch("ai_reviewer.github.client.Github") as mock_github:
-            mock_github.return_value.get_user.return_value.login = "github-actions[bot]"
+        with patch("ai_reviewer.github.client.Github"):
             client = GitHubClient(token="test-token")
+            client._current_user_login = "github-actions[bot]"
             resolved_ids = client._get_resolved_comment_ids(mock_pr)
 
             # Should be empty since comment has no in_reply_to_id
+            assert len(resolved_ids) == 0
+
+    def test_get_resolved_comment_ids_handles_none_user(self):
+        """Test handling of comments from deleted users."""
+        from ai_reviewer.github.client import GitHubClient
+
+        # Comment with Resolved text but user is None (deleted user)
+        mock_comment = MagicMock()
+        mock_comment.id = 100
+        mock_comment.body = "✅ **Resolved** - Fixed!"
+        mock_comment.user = None  # Deleted user
+        mock_comment.in_reply_to_id = 50
+
+        mock_pr = MagicMock()
+        mock_pr.get_review_comments.return_value = [mock_comment]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._current_user_login = "github-actions[bot]"
+            resolved_ids = client._get_resolved_comment_ids(mock_pr)
+
+            # Should be empty since comment.user is None
             assert len(resolved_ids) == 0
 
     def test_resolve_fixed_comments_skips_already_resolved(self):
@@ -199,9 +221,9 @@ class TestResolveFixedComments:
         mock_pr = MagicMock()
         mock_pr.get_review_comments.return_value = [mock_resolved_reply]
 
-        with patch("ai_reviewer.github.client.Github") as mock_github:
-            mock_github.return_value.get_user.return_value.login = "github-actions[bot]"
+        with patch("ai_reviewer.github.client.Github"):
             client = GitHubClient(token="test-token")
+            client._current_user_login = "github-actions[bot]"
             resolved_count = client.resolve_fixed_comments(mock_pr, delta)
 
             # Should skip the comment since it's already resolved
@@ -230,9 +252,9 @@ class TestResolveFixedComments:
         mock_pr.get_review_comments.return_value = []
         mock_pr.get_review_comment.return_value = MagicMock()
 
-        with patch("ai_reviewer.github.client.Github") as mock_github:
-            mock_github.return_value.get_user.return_value.login = "github-actions[bot]"
+        with patch("ai_reviewer.github.client.Github"):
             client = GitHubClient(token="test-token")
+            client._current_user_login = "github-actions[bot]"
             resolved_count = client.resolve_fixed_comments(mock_pr, delta)
 
             # Should post a resolved reply
@@ -241,6 +263,25 @@ class TestResolveFixedComments:
                 comment_id=100,
                 body="✅ **Resolved** - This issue has been addressed in the latest changes.",
             )
+
+    def test_get_current_user_login_caches_result(self):
+        """Test that _get_current_user_login caches the API response."""
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github") as mock_github:
+            mock_github.return_value.get_user.return_value.login = "test-bot"
+            client = GitHubClient(token="test-token")
+
+            # First call should fetch from API
+            login1 = client._get_current_user_login()
+            assert login1 == "test-bot"
+
+            # Second call should use cached value, not call API again
+            login2 = client._get_current_user_login()
+            assert login2 == "test-bot"
+
+            # get_user should only be called once due to caching
+            assert mock_github.return_value.get_user.call_count == 1
 
 
 class TestReviewFormatter:

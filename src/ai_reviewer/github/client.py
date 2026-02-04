@@ -68,6 +68,33 @@ class GitHubClient:
             self._gh = Github(token, base_url=base_url)
         else:
             self._gh = Github(token)
+        # Cache for current user login (lazily populated)
+        self._current_user_login: str | None = None
+
+    def _get_current_user_login(self) -> str | None:
+        """Get the current authenticated user's login, with caching.
+
+        Returns:
+            The current user's login or None if unable to fetch
+        """
+        if self._current_user_login is None:
+            try:
+                self._current_user_login = self._gh.get_user().login
+            except GithubException as e:
+                logger.warning(f"Could not fetch current user: {e}")
+                return None
+        return self._current_user_login
+
+    def _get_allowed_users(self) -> set[str]:
+        """Get the set of allowed AI reviewer users.
+
+        Returns:
+            Set of usernames that are considered AI reviewers
+        """
+        current_user = self._get_current_user_login()
+        if current_user:
+            return self.AI_REVIEWER_USERS | {current_user}
+        return self.AI_REVIEWER_USERS
 
     def get_repo(self, repo_name: str) -> Repository:
         """Get a repository by name.
@@ -299,16 +326,14 @@ class GitHubClient:
             List of previous comments from AI reviewers
         """
         comments: list[PreviousComment] = []
-
-        # Include current user and known bot users
-        try:
-            current_user = self._gh.get_user().login
-            allowed_users = self.AI_REVIEWER_USERS | {current_user}
-        except Exception:
-            allowed_users = self.AI_REVIEWER_USERS
+        allowed_users = self._get_allowed_users()
 
         # Get review comments (inline comments on code)
         for comment in pr.get_review_comments():
+            # Skip comments from deleted users or integrations
+            if comment.user is None:
+                continue
+
             user_login = comment.user.login
 
             # Check if from known AI reviewer OR has AI reviewer format
@@ -498,17 +523,15 @@ class GitHubClient:
             Set of comment IDs that have been marked resolved
         """
         resolved_ids: set[int] = set()
-
-        # Get allowed users (current user + known bot users)
-        try:
-            current_user = self._gh.get_user().login
-            allowed_users = self.AI_REVIEWER_USERS | {current_user}
-        except Exception:
-            allowed_users = self.AI_REVIEWER_USERS
+        allowed_users = self._get_allowed_users()
 
         for comment in pr.get_review_comments():
             # Check if this is a "Resolved" reply from our reviewer
             if "✅ **Resolved**" not in comment.body:
+                continue
+
+            # Skip comments from deleted users or integrations
+            if comment.user is None:
                 continue
 
             # Only count resolved comments from allowed users
