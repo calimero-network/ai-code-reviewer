@@ -525,20 +525,27 @@ class GitHubClient:
             logger.warning(f"GraphQL request failed: {e}")
             return None
 
-    def _get_thread_id_for_comment(
-        self, repo_name: str, pr_number: int, comment_id: int
-    ) -> str | None:
-        """Get the review thread node ID for a comment.
+    # Maximum pages to fetch when paginating GraphQL results (prevents runaway loops)
+    _MAX_GRAPHQL_PAGES = 20
+
+    def _fetch_thread_mapping(
+        self, repo_name: str, pr_number: int
+    ) -> dict[int, str]:
+        """Fetch all review threads and build a mapping of comment_id to thread_id.
+
+        This batches the GraphQL calls to avoid N+1 queries when resolving multiple
+        threads.
 
         Args:
             repo_name: Repository in "owner/name" format
             pr_number: Pull request number
-            comment_id: The REST API comment ID to find
 
         Returns:
-            The thread's GraphQL node ID, or None if not found
+            Dict mapping comment database IDs to their thread's GraphQL node ID
+            (only includes unresolved threads)
         """
         owner, name = repo_name.split("/")
+        comment_to_thread: dict[int, str] = {}
 
         query = """
         query($owner: String!, $name: String!, $pr_number: Int!, $cursor: String) {
@@ -552,7 +559,7 @@ class GitHubClient:
                 nodes {
                   id
                   isResolved
-                  comments(first: 50) {
+                  comments(first: 100) {
                     nodes {
                       databaseId
                     }
@@ -565,7 +572,9 @@ class GitHubClient:
         """
 
         cursor = None
-        while True:
+        pages_fetched = 0
+
+        while pages_fetched < self._MAX_GRAPHQL_PAGES:
             variables = {
                 "owner": owner,
                 "name": name,
@@ -575,8 +584,9 @@ class GitHubClient:
 
             data = self._graphql_request(query, variables)
             if not data:
-                return None
+                break
 
+            pages_fetched += 1
             pr_data = data.get("repository", {}).get("pullRequest", {})
             threads_data = pr_data.get("reviewThreads", {})
             threads = threads_data.get("nodes", [])
@@ -585,10 +595,15 @@ class GitHubClient:
                 if thread.get("isResolved"):
                     continue  # Skip already resolved threads
 
+                thread_id = thread.get("id")
+                if not thread_id:
+                    continue
+
                 comments = thread.get("comments", {}).get("nodes", [])
                 for comment in comments:
-                    if comment.get("databaseId") == comment_id:
-                        return thread.get("id")
+                    db_id = comment.get("databaseId")
+                    if db_id:
+                        comment_to_thread[db_id] = thread_id
 
             # Check for more pages
             page_info = threads_data.get("pageInfo", {})
@@ -597,7 +612,12 @@ class GitHubClient:
             else:
                 break
 
-        return None
+        if pages_fetched >= self._MAX_GRAPHQL_PAGES:
+            logger.warning(
+                f"Hit max page limit ({self._MAX_GRAPHQL_PAGES}) fetching threads for PR #{pr_number}"
+            )
+
+        return comment_to_thread
 
     def _resolve_review_thread(self, thread_id: str) -> bool:
         """Resolve a review thread using GraphQL.
@@ -625,19 +645,20 @@ class GitHubClient:
         return False
 
     def _resolve_thread_for_comment(
-        self, repo_name: str, pr_number: int, comment_id: int
+        self,
+        comment_id: int,
+        thread_mapping: dict[int, str],
     ) -> bool:
         """Resolve the review thread containing a specific comment.
 
         Args:
-            repo_name: Repository in "owner/name" format
-            pr_number: Pull request number
             comment_id: The comment ID whose thread to resolve
+            thread_mapping: Pre-fetched mapping of comment_id to thread_id
 
         Returns:
             True if thread was resolved
         """
-        thread_id = self._get_thread_id_for_comment(repo_name, pr_number, comment_id)
+        thread_id = thread_mapping.get(comment_id)
         if not thread_id:
             logger.debug(f"Could not find thread for comment {comment_id}")
             return False
@@ -676,6 +697,9 @@ class GitHubClient:
 
         repo_name = pr.base.repo.full_name
 
+        # Batch-fetch all thread mappings once (avoids N+1 GraphQL calls)
+        thread_mapping = self._fetch_thread_mapping(repo_name, pr.number)
+
         for fixed in delta.fixed_findings:
             # Skip if we've already marked this as resolved
             if fixed.id in existing_replies:
@@ -698,8 +722,8 @@ class GitHubClient:
                 resolved_count += 1
                 logger.debug(f"Marked comment {fixed.id} as resolved")
 
-                # Resolve the thread via GraphQL
-                self._resolve_thread_for_comment(repo_name, pr.number, fixed.id)
+                # Resolve the thread via GraphQL (uses pre-fetched mapping)
+                self._resolve_thread_for_comment(fixed.id, thread_mapping)
             except Exception as e:
                 logger.warning(f"Could not resolve comment {fixed.id}: {e}")
 
@@ -732,11 +756,8 @@ class GitHubClient:
             if reply_to is None or reply_to == 0:
                 continue
 
-            # Handle PyGithub's NotSet sentinel
-            try:
-                if not isinstance(reply_to, int):
-                    continue
-            except Exception:
+            # Handle PyGithub's NotSet sentinel (isinstance never raises)
+            if not isinstance(reply_to, int):
                 continue
 
             # Only count resolved comments from allowed users

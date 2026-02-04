@@ -486,19 +486,71 @@ class TestResolveFixedComments:
         assert comments[0].id == 100
         assert "SQL Injection" in comments[0].title
 
-    def test_resolve_thread_for_comment_calls_graphql(self):
-        """Test that thread resolution uses GraphQL."""
+    def test_resolve_thread_for_comment_uses_mapping(self):
+        """Test that thread resolution uses pre-fetched mapping."""
         from ai_reviewer.github.client import GitHubClient
 
         with patch("ai_reviewer.github.client.Github"):
             client = GitHubClient(token="test-token")
 
-            # Mock the GraphQL methods
-            client._get_thread_id_for_comment = MagicMock(return_value="thread_123")
+            # Mock the resolve method
             client._resolve_review_thread = MagicMock(return_value=True)
 
-            result = client._resolve_thread_for_comment("test/repo", 1, 456)
+            # Pre-built mapping from comment_id to thread_id
+            thread_mapping = {456: "thread_123", 789: "thread_456"}
+
+            result = client._resolve_thread_for_comment(456, thread_mapping)
 
             assert result is True
-            client._get_thread_id_for_comment.assert_called_once_with("test/repo", 1, 456)
             client._resolve_review_thread.assert_called_once_with("thread_123")
+
+    def test_resolve_thread_for_comment_missing_in_mapping(self):
+        """Test that missing comment in mapping returns False."""
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._resolve_review_thread = MagicMock(return_value=True)
+
+            thread_mapping = {456: "thread_123"}  # 999 not in mapping
+
+            result = client._resolve_thread_for_comment(999, thread_mapping)
+
+            assert result is False
+            client._resolve_review_thread.assert_not_called()
+
+    def test_fetch_thread_mapping_respects_max_pages(self):
+        """Test that thread mapping fetch respects max page limit."""
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+
+            # Mock GraphQL to always return hasNextPage=True (infinite loop scenario)
+            def mock_graphql(query, variables=None):
+                return {
+                    "repository": {
+                        "pullRequest": {
+                            "reviewThreads": {
+                                "pageInfo": {"hasNextPage": True, "endCursor": "cursor"},
+                                "nodes": [
+                                    {
+                                        "id": "thread_1",
+                                        "isResolved": False,
+                                        "comments": {"nodes": [{"databaseId": 123}]},
+                                    }
+                                ],
+                            }
+                        }
+                    }
+                }
+
+            client._graphql_request = MagicMock(side_effect=mock_graphql)
+
+            # This should NOT loop forever due to _MAX_GRAPHQL_PAGES
+            result = client._fetch_thread_mapping("test/repo", 1)
+
+            # Should have called GraphQL exactly _MAX_GRAPHQL_PAGES times
+            assert client._graphql_request.call_count == client._MAX_GRAPHQL_PAGES
+            # Should still return the mapping it built
+            assert 123 in result
