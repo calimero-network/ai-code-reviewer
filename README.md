@@ -86,7 +86,7 @@ cursor:
 
 # GitHub integration
 github:
-  token: ${GITHUB_TOKEN}
+  token: ${GITHUB_TOKEN}  # or PAT for thread resolution (see below)
 
 # Agents - different models, same Cursor API
 agents:
@@ -177,6 +177,46 @@ policy:
   require_human_review_for: [security]
   block_on_critical: true
 ```
+
+---
+
+## GitHub Actions Setup
+
+### Basic Setup (GITHUB_TOKEN)
+
+The default `GITHUB_TOKEN` provided by GitHub Actions works for most features:
+- ✅ Posting reviews and comments
+- ✅ Adding reactions
+- ✅ Posting "Resolved" replies
+- ❌ Resolving review threads (requires PAT)
+
+### Full Features (Classic Personal Access Token)
+
+To enable automatic thread resolution when issues are fixed, use a **Classic PAT** (not Fine-grained):
+
+> ⚠️ **Important**: Fine-grained PATs do NOT support the `resolveReviewThread` GraphQL mutation.
+> You must use a Classic PAT with `repo` scope.
+
+1. Create a [Classic Personal Access Token](https://github.com/settings/tokens/new) with:
+   - **Note**: `ai-code-reviewer`
+   - **Expiration**: 90 days (or custom)
+   - **Scopes**: ✅ `repo` (Full control of private repositories)
+
+2. Add the PAT as a repository secret named `GH_PAT`:
+   ```
+   Settings → Secrets and variables → Actions → New repository secret
+   Name: GH_PAT
+   Value: ghp_xxxxxxxxxxxxxxxxxxxx
+   ```
+
+3. The workflow automatically uses `GH_PAT` if available (falls back to `GITHUB_TOKEN`).
+
+> **Why Classic PAT?** GitHub's GraphQL `resolveReviewThread` mutation requires:
+> - User-level authentication (not app/integration tokens)
+> - Classic PAT with `repo` scope (Fine-grained PATs return "Resource not accessible")
+>
+> Without a Classic PAT, the reviewer will still post "✅ Resolved" replies, but
+> threads won't collapse automatically in the GitHub UI.
 
 ---
 
