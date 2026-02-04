@@ -195,6 +195,28 @@ class TestResolveFixedComments:
             # Should be empty since comment.user is None
             assert len(resolved_ids) == 0
 
+    def test_get_resolved_comment_ids_handles_none_login(self):
+        """Test handling of comments where user exists but login is None."""
+        from ai_reviewer.github.client import GitHubClient
+
+        # Comment with Resolved text but user.login is None
+        mock_comment = MagicMock()
+        mock_comment.id = 100
+        mock_comment.body = "✅ **Resolved** - Fixed!"
+        mock_comment.user.login = None  # Login is None
+        mock_comment.in_reply_to_id = 50
+
+        mock_pr = MagicMock()
+        mock_pr.get_review_comments.return_value = [mock_comment]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._current_user_login = "github-actions[bot]"
+            resolved_ids = client._get_resolved_comment_ids(mock_pr)
+
+            # Should be empty since comment.user.login is None
+            assert len(resolved_ids) == 0
+
     def test_resolve_fixed_comments_skips_already_resolved(self):
         """Test that resolve_fixed_comments skips already-resolved comments."""
         from ai_reviewer.github.client import GitHubClient, PreviousComment, ReviewDelta
@@ -282,6 +304,73 @@ class TestResolveFixedComments:
 
             # get_user should only be called once due to caching
             assert mock_github.return_value.get_user.call_count == 1
+
+    def test_get_current_user_login_caches_failure(self):
+        """Test that _get_current_user_login caches API failures."""
+        from github.GithubException import GithubException
+
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github") as mock_github:
+            mock_github.return_value.get_user.side_effect = GithubException(401, "Unauthorized", None)
+            client = GitHubClient(token="test-token")
+
+            # First call should fail and return None
+            login1 = client._get_current_user_login()
+            assert login1 is None
+
+            # Second call should also return None without calling API again
+            login2 = client._get_current_user_login()
+            assert login2 is None
+
+            # get_user should only be called once - failure is cached
+            assert mock_github.return_value.get_user.call_count == 1
+
+    def test_get_allowed_users_caches_result(self):
+        """Test that _get_allowed_users caches the set."""
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._current_user_login = "test-bot"
+
+            # First call should build the set
+            users1 = client._get_allowed_users()
+            assert "test-bot" in users1
+            assert "github-actions[bot]" in users1
+
+            # Second call should return cached set (same object)
+            users2 = client._get_allowed_users()
+            assert users1 is users2  # Same object, not rebuilt
+
+    def test_resolve_fixed_comments_avoids_redundant_api_calls(self):
+        """Test that resolve_fixed_comments fetches comments only once."""
+        from ai_reviewer.github.client import GitHubClient, PreviousComment, ReviewDelta
+
+        # Create a fixed finding
+        fixed_comment = PreviousComment(
+            id=100,
+            file_path="test.py",
+            line=10,
+            title="SQL Injection",
+            severity="critical",
+            body="🔴 **SQL Injection**",
+        )
+
+        delta = ReviewDelta(fixed_findings=[fixed_comment])
+
+        # No existing resolved comments
+        mock_pr = MagicMock()
+        mock_pr.get_review_comments.return_value = []
+        mock_pr.get_review_comment.return_value = MagicMock()
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._current_user_login = "github-actions[bot]"
+            client.resolve_fixed_comments(mock_pr, delta)
+
+            # get_review_comments should only be called once
+            assert mock_pr.get_review_comments.call_count == 1
 
 
 class TestReviewFormatter:

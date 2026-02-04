@@ -69,7 +69,10 @@ class GitHubClient:
         else:
             self._gh = Github(token)
         # Cache for current user login (lazily populated)
+        # None = not fetched yet, "" = fetch failed, other = actual login
         self._current_user_login: str | None = None
+        # Cache for allowed users set (lazily populated after user login fetch)
+        self._allowed_users_cache: set[str] | None = None
 
     def _get_current_user_login(self) -> str | None:
         """Get the current authenticated user's login, with caching.
@@ -82,19 +85,26 @@ class GitHubClient:
                 self._current_user_login = self._gh.get_user().login
             except GithubException as e:
                 logger.warning(f"Could not fetch current user: {e}")
-                return None
-        return self._current_user_login
+                # Cache the failure to avoid repeated API calls
+                self._current_user_login = ""
+        # Return None if fetch failed (empty string)
+        return self._current_user_login if self._current_user_login else None
 
     def _get_allowed_users(self) -> set[str]:
-        """Get the set of allowed AI reviewer users.
+        """Get the set of allowed AI reviewer users, with caching.
 
         Returns:
             Set of usernames that are considered AI reviewers
         """
+        if self._allowed_users_cache is not None:
+            return self._allowed_users_cache
+
         current_user = self._get_current_user_login()
         if current_user:
-            return self.AI_REVIEWER_USERS | {current_user}
-        return self.AI_REVIEWER_USERS
+            self._allowed_users_cache = self.AI_REVIEWER_USERS | {current_user}
+        else:
+            self._allowed_users_cache = self.AI_REVIEWER_USERS.copy()
+        return self._allowed_users_cache
 
     def get_repo(self, repo_name: str) -> Repository:
         """Get a repository by name.
@@ -316,11 +326,16 @@ class GitHubClient:
         "cursor[bot]",
     }
 
-    def get_previous_review_comments(self, pr: PullRequest) -> list[PreviousComment]:
+    def get_previous_review_comments(
+        self,
+        pr: PullRequest,
+        raw_comments: list[PullRequestComment] | None = None,
+    ) -> list[PreviousComment]:
         """Get all previous review comments from AI reviewers.
 
         Args:
             pr: Pull request object
+            raw_comments: Optional pre-fetched list of raw comments to avoid redundant API calls
 
         Returns:
             List of previous comments from AI reviewers
@@ -328,10 +343,12 @@ class GitHubClient:
         comments: list[PreviousComment] = []
         allowed_users = self._get_allowed_users()
 
-        # Get review comments (inline comments on code)
-        for comment in pr.get_review_comments():
+        # Use provided comments or fetch from API
+        review_comments = raw_comments if raw_comments is not None else list(pr.get_review_comments())
+
+        for comment in review_comments:
             # Skip comments from deleted users or integrations
-            if comment.user is None:
+            if comment.user is None or comment.user.login is None:
                 continue
 
             user_login = comment.user.login
@@ -480,8 +497,11 @@ class GitHubClient:
             logger.debug("No fixed findings to resolve")
             return 0
 
+        # Fetch comments once to avoid redundant API calls
+        raw_comments = list(pr.get_review_comments())
+
         # Get all existing replies to avoid duplicates
-        existing_replies = self._get_resolved_comment_ids(pr)
+        existing_replies = self._get_resolved_comment_ids(pr, raw_comments=raw_comments)
         logger.info(
             f"Resolving {len(delta.fixed_findings)} fixed comments, "
             f"{len(existing_replies)} already resolved"
@@ -513,11 +533,16 @@ class GitHubClient:
 
         return resolved_count
 
-    def _get_resolved_comment_ids(self, pr: PullRequest) -> set[int]:
+    def _get_resolved_comment_ids(
+        self,
+        pr: PullRequest,
+        raw_comments: list[PullRequestComment] | None = None,
+    ) -> set[int]:
         """Get IDs of comments that already have a 'Resolved' reply from this reviewer.
 
         Args:
             pr: Pull request object
+            raw_comments: Optional pre-fetched list of raw comments to avoid redundant API calls
 
         Returns:
             Set of comment IDs that have been marked resolved
@@ -525,13 +550,16 @@ class GitHubClient:
         resolved_ids: set[int] = set()
         allowed_users = self._get_allowed_users()
 
-        for comment in pr.get_review_comments():
+        # Use provided comments or fetch from API
+        review_comments = raw_comments if raw_comments is not None else list(pr.get_review_comments())
+
+        for comment in review_comments:
             # Check if this is a "Resolved" reply from our reviewer
             if "✅ **Resolved**" not in comment.body:
                 continue
 
             # Skip comments from deleted users or integrations
-            if comment.user is None:
+            if comment.user is None or comment.user.login is None:
                 continue
 
             # Only count resolved comments from allowed users
