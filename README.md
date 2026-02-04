@@ -190,33 +190,33 @@ The default `GITHUB_TOKEN` provided by GitHub Actions works for most features:
 - ✅ Posting "Resolved" replies
 - ❌ Resolving review threads (requires PAT)
 
-### Full Features (Personal Access Token)
+### Full Features (Classic Personal Access Token)
 
-To enable automatic thread resolution when issues are fixed, use a PAT instead:
+To enable automatic thread resolution when issues are fixed, use a **Classic PAT** (not Fine-grained):
 
-1. Create a [Fine-grained Personal Access Token](https://github.com/settings/tokens?type=beta) with:
-   - **Repository access**: Select the repositories where the reviewer runs
-   - **Permissions**:
-     - `Pull requests`: Read and write
-     - `Contents`: Read (for fetching file contents)
+> ⚠️ **Important**: Fine-grained PATs do NOT support the `resolveReviewThread` GraphQL mutation.
+> You must use a Classic PAT with `repo` scope.
+
+1. Create a [Classic Personal Access Token](https://github.com/settings/tokens/new) with:
+   - **Note**: `ai-code-reviewer`
+   - **Expiration**: 90 days (or custom)
+   - **Scopes**: ✅ `repo` (Full control of private repositories)
 
 2. Add the PAT as a repository secret named `GH_PAT`:
    ```
    Settings → Secrets and variables → Actions → New repository secret
    Name: GH_PAT
-   Value: github_pat_...
+   Value: ghp_xxxxxxxxxxxxxxxxxxxx
    ```
 
-3. Update your workflow to use the PAT:
-   ```yaml
-   env:
-     GITHUB_TOKEN: ${{ secrets.GH_PAT }}
-   ```
+3. The workflow automatically uses `GH_PAT` if available (falls back to `GITHUB_TOKEN`).
 
-> **Note**: The default `GITHUB_TOKEN` cannot resolve review threads because GitHub's
-> GraphQL `resolveReviewThread` mutation requires user-level authentication, not
-> integration/app tokens. With `GITHUB_TOKEN`, the reviewer will still post "✅ Resolved"
-> replies, but threads won't collapse automatically.
+> **Why Classic PAT?** GitHub's GraphQL `resolveReviewThread` mutation requires:
+> - User-level authentication (not app/integration tokens)
+> - Classic PAT with `repo` scope (Fine-grained PATs return "Resource not accessible")
+>
+> Without a Classic PAT, the reviewer will still post "✅ Resolved" replies, but
+> threads won't collapse automatically in the GitHub UI.
 
 ---
 
