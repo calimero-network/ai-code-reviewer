@@ -500,19 +500,21 @@ class GitHubClient:
         resolved_ids: set[int] = set()
 
         # Get allowed users (current user + known bot users)
+        # If we can't get the current user, set to None to disable user filtering
+        # to avoid missing our own resolved comments
         try:
             current_user = self._gh.get_user().login
-            allowed_users = self.AI_REVIEWER_USERS | {current_user}
+            allowed_users: set[str] | None = self.AI_REVIEWER_USERS | {current_user}
         except Exception:
-            allowed_users = self.AI_REVIEWER_USERS
+            allowed_users = None
 
         for comment in pr.get_review_comments():
             # Check if this is a "Resolved" reply from our reviewer
             if "✅ **Resolved**" not in comment.body:
                 continue
 
-            # Only count resolved comments from allowed users
-            if comment.user.login not in allowed_users:
+            # Only count resolved comments from allowed users (if we could determine them)
+            if allowed_users is not None and comment.user.login not in allowed_users:
                 continue
 
             # Check if this comment has a valid in_reply_to_id
