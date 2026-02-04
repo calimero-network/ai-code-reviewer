@@ -29,6 +29,11 @@ jobs:
     # Don't run on draft PRs
     if: github.event.pull_request.draft == false || github.event_name == 'workflow_dispatch'
     
+    # Prevent duplicate reviews from concurrent runs on rapid pushes
+    concurrency:
+      group: ai-review-${{ github.event.pull_request.number || github.event.inputs.pr_number }}
+      cancel-in-progress: true
+    
     permissions:
       contents: read
       pull-requests: write

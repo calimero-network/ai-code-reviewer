@@ -164,6 +164,7 @@ class GitHubClient:
         owner, name = repo_name.split("/")
 
         # Query to find the thread containing this comment
+        # Fetch more comments per thread to find comments that might not be first
         query = """
         query($owner: String!, $name: String!, $prNumber: Int!) {
             repository(owner: $owner, name: $name) {
@@ -172,7 +173,7 @@ class GitHubClient:
                         nodes {
                             id
                             isResolved
-                            comments(first: 1) {
+                            comments(first: 50) {
                                 nodes {
                                     databaseId
                                 }
@@ -188,19 +189,26 @@ class GitHubClient:
         data = self._graphql_request(query, variables)
 
         if not data:
+            logger.warning(f"GraphQL query returned no data for PR #{pr_number}")
             return None
 
         try:
             threads = data["repository"]["pullRequest"]["reviewThreads"]["nodes"]
+            logger.debug(f"Found {len(threads)} review threads in PR #{pr_number}")
             for thread in threads:
+                # Skip already resolved threads
+                if thread.get("isResolved"):
+                    continue
                 # Check if this thread contains our comment
                 comments = thread.get("comments", {}).get("nodes", [])
                 for comment in comments:
                     if comment.get("databaseId") == comment_id:
+                        logger.debug(f"Found thread {thread['id']} for comment {comment_id}")
                         return thread["id"]
         except (KeyError, TypeError) as e:
             logger.warning(f"Failed to parse thread data: {e}")
 
+        logger.debug(f"Could not find thread for comment {comment_id} in PR #{pr_number}")
         return None
 
     def _resolve_review_thread(self, thread_id: str) -> bool:
@@ -222,11 +230,14 @@ class GitHubClient:
         }
         """
 
+        logger.debug(f"Attempting to resolve thread {thread_id}")
         data = self._graphql_request(mutation, {"threadId": thread_id})
 
         if data and data.get("resolveReviewThread", {}).get("thread", {}).get("isResolved"):
+            logger.info(f"Successfully resolved thread {thread_id}")
             return True
 
+        logger.warning(f"Failed to resolve thread {thread_id}, response: {data}")
         return False
 
     def get_repo(self, repo_name: str) -> Repository:
