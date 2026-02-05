@@ -9,7 +9,7 @@ inherit_from: default
 # Agent customization for self-review
 agents:
   - name: security-reviewer
-    model: claude-3-opus-20240229
+    model: claude-4.5-opus-high-thinking
     focus_areas: [security, authentication]
     custom_prompt_append: |
       This is a Python codebase that handles API keys and GitHub tokens.
@@ -19,7 +19,7 @@ agents:
       - Rate limiting and abuse prevention
 
   - name: architecture-reviewer
-    model: claude-3-opus-20240229
+    model: claude-4.5-opus-high-thinking
     focus_areas: [architecture, patterns]
     custom_prompt_append: |
       This codebase follows these key patterns:
@@ -27,22 +27,22 @@ agents:
       - Agents are stateless and run independently
       - Async throughout for I/O operations
       - Dataclasses for all data structures
-      
+
       Flag violations of these patterns as architectural issues.
       Reference .ai/rules/ for detailed module conventions.
 
   - name: documentation-reviewer
-    model: claude-3-opus-20240229
+    model: claude-4.5-opus-high-thinking
     focus_areas: [documentation]
     custom_prompt_append: |
       Check if code changes require documentation updates.
-      
+
       Documentation locations:
       - README.md - User-facing features
       - DESIGN.md - Architecture decisions
       - .cursor/rules/ - AI rules per module
       - .ai/context.md - Quick AI context
-      
+
       Flag missing or outdated documentation as suggestions.
 
 # Files to ignore in reviews
@@ -71,7 +71,7 @@ documentation:
     - .ai/rules/*.md
     - .ai/context.md
     - config.example.yaml
-  
+
   # Map source files to docs that may need updates
   source_to_docs_mapping:
     "src/ai_reviewer/agents/**":

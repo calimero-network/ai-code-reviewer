@@ -43,6 +43,7 @@ git diff main | ai-reviewer review --output markdown
 ## How It Works
 
 All LLM agents access Claude, GPT-4, and other models through **Cursor's unified API**:
+
 - ✅ **Single API key** for all models
 - ✅ **Consistent interface** across different LLMs
 - ✅ **Codebase context** for pattern-aware reviews
@@ -91,15 +92,15 @@ github:
 # Agents - different models, same Cursor API
 agents:
   - name: security-reviewer
-    model: claude-3-opus-20240229
+    model: claude-4.5-opus-high-thinking
     focus_areas: [security, architecture]
-    
+
   - name: performance-reviewer
-    model: gpt-4-turbo-preview
+    model: gpt-5.2
     focus_areas: [performance, logic]
-    
+
   - name: patterns-reviewer
-    model: claude-3-opus-20240229
+    model: claude-4.5-opus-high-thinking
     focus_areas: [consistency, patterns]
     include_codebase_context: true
 
@@ -140,14 +141,18 @@ ai-reviewer agents test <type>                   # Test single agent
 **Reviewed by 3 agents** | Consensus score: 87%
 
 ### 🔴 Critical (1)
+
 **SQL Injection** in `auth/login.py:45` | 3/3 agents ✓
+
 > User input interpolated into SQL query
 
-### 🟡 Warning (2)  
+### 🟡 Warning (2)
+
 **Missing rate limiting** | 2/3 agents
 **Inefficient O(n²) loop** | 2/3 agents
 
 ### 💡 Suggestions (3)
+
 - Add type hints to `process_user()`
 - Extract magic number to constant
 - Add docstring to `AuthHandler`
@@ -229,6 +234,7 @@ This repository is designed to be AI-friendly with structured documentation that
 ### Documentation Bot
 
 PRs that change source code automatically trigger a documentation bot that:
+
 - Analyzes which docs might need updates
 - Posts suggestions as PR comments
 - Helps keep documentation in sync with code
