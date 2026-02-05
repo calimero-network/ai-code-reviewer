@@ -18,6 +18,7 @@ The system integrates with GitHub for PR reviews and can utilize Cursor's API fo
 ## 2. Goals & Non-Goals
 
 ### Goals
+
 - **Multi-Agent Orchestration**: Spawn N parallel LLM agents to review code independently
 - **Consensus-Based Reviews**: Aggregate findings with confidence scoring based on agent agreement
 - **GitHub Integration**: Automatically review PRs and post consolidated feedback
@@ -26,6 +27,7 @@ The system integrates with GitHub for PR reviews and can utilize Cursor's API fo
 - **Actionable Output**: Generate clear, prioritized, and actionable review comments
 
 ### Non-Goals (v1)
+
 - Automatic code fixes (that's what ai-bounty-hunter does)
 - IDE plugins (may come in v2)
 - Real-time streaming reviews
@@ -36,6 +38,7 @@ The system integrates with GitHub for PR reviews and can utilize Cursor's API fo
 ## 3. Architecture Overview
 
 The system uses **Cursor API as the unified gateway** to access multiple LLM models (Claude, GPT-4, etc.). This simplifies the architecture by:
+
 - Single API key management
 - Consistent request/response format across all models
 - Leveraging Cursor's built-in rate limiting and infrastructure
@@ -73,14 +76,14 @@ The system uses **Cursor API as the unified gateway** to access multiple LLM mod
 
 ### Why Cursor API as the Single Gateway?
 
-| Aspect | Direct Provider APIs | Cursor API (Chosen) |
-|--------|---------------------|---------------------|
-| API Keys | 3+ keys (Anthropic, OpenAI, etc.) | 1 key |
-| Client Libraries | Multiple, different interfaces | Single unified client |
-| Rate Limiting | Handle per provider | Cursor manages it |
-| Response Format | Varies by provider | Consistent |
-| Codebase Context | Manual implementation | Built-in support |
-| Model Switching | Code changes required | Configuration only |
+| Aspect           | Direct Provider APIs              | Cursor API (Chosen)   |
+| ---------------- | --------------------------------- | --------------------- |
+| API Keys         | 3+ keys (Anthropic, OpenAI, etc.) | 1 key                 |
+| Client Libraries | Multiple, different interfaces    | Single unified client |
+| Rate Limiting    | Handle per provider               | Cursor manages it     |
+| Response Format  | Varies by provider                | Consistent            |
+| Codebase Context | Manual implementation             | Built-in support      |
+| Model Switching  | Code changes required             | Configuration only    |
 
 ---
 
@@ -120,19 +123,19 @@ class AgentReview:
 
 class ReviewAgent(ABC):
     """Base class for all review agents."""
-    
+
     @property
     @abstractmethod
     def agent_id(self) -> str:
         """Unique identifier for this agent instance."""
         pass
-    
+
     @property
     @abstractmethod
     def focus_areas(self) -> List[str]:
         """Categories this agent specializes in."""
         pass
-    
+
     @abstractmethod
     async def review(
         self,
@@ -142,7 +145,7 @@ class ReviewAgent(ABC):
     ) -> AgentReview:
         """
         Perform code review and return findings.
-        
+
         Args:
             diff: The git diff to review
             file_contents: Full contents of changed files
@@ -156,6 +159,7 @@ class ReviewAgent(ABC):
 All agents use the **Cursor API** as the unified gateway, specifying different models and prompts:
 
 #### 4.2.1 Cursor Client (Unified Interface)
+
 ```python
 from dataclasses import dataclass
 from typing import Optional
@@ -169,7 +173,7 @@ class CursorConfig:
 
 class CursorClient:
     """Unified client for accessing multiple models via Cursor API."""
-    
+
     def __init__(self, config: CursorConfig):
         self.config = config
         self._client = httpx.AsyncClient(
@@ -177,7 +181,7 @@ class CursorClient:
             headers={"Authorization": f"Bearer {config.api_key}"},
             timeout=config.timeout,
         )
-    
+
     async def complete(
         self,
         model: str,  # "claude-3-opus", "gpt-4-turbo", etc.
@@ -204,26 +208,27 @@ class CursorClient:
 ```
 
 #### 4.2.2 Claude Agent (Security & Architecture Focus)
+
 ```python
 class ClaudeSecurityAgent(ReviewAgent):
     """Claude-based agent focused on security vulnerabilities."""
-    
-    MODEL = "claude-3-opus-20240229"  # Specified to Cursor API
-    
-    SYSTEM_PROMPT = """You are an expert security code reviewer. 
+
+    MODEL = "claude-4.5-opus-high-thinking"  # Specified to Cursor API
+
+    SYSTEM_PROMPT = """You are an expert security code reviewer.
     Focus on:
     - SQL injection, XSS, CSRF vulnerabilities
     - Authentication/authorization flaws
     - Cryptographic misuse
     - Data exposure risks
     - Input validation issues
-    
-    Be thorough but avoid false positives. Only report issues with 
+
+    Be thorough but avoid false positives. Only report issues with
     concrete evidence in the code."""
-    
+
     def __init__(self, cursor_client: CursorClient):
         self.client = cursor_client
-    
+
     async def review(self, diff: str, files: dict, context: ReviewContext) -> AgentReview:
         response = await self.client.complete(
             model=self.MODEL,
@@ -234,12 +239,13 @@ class ClaudeSecurityAgent(ReviewAgent):
 ```
 
 #### 4.2.3 GPT-4 Agent (Performance & Logic Focus)
+
 ```python
 class GPTPerformanceAgent(ReviewAgent):
     """GPT-4-based agent focused on performance and correctness."""
-    
-    MODEL = "gpt-4-turbo-preview"  # Specified to Cursor API
-    
+
+    MODEL = "gpt-5.2"  # Specified to Cursor API
+
     SYSTEM_PROMPT = """You are an expert performance engineer reviewing code.
     Focus on:
     - Algorithm complexity issues (O(n²) where O(n) possible)
@@ -247,18 +253,19 @@ class GPTPerformanceAgent(ReviewAgent):
     - Unnecessary computations
     - Race conditions and concurrency bugs
     - Edge cases and error handling"""
-    
+
     def __init__(self, cursor_client: CursorClient):
         self.client = cursor_client
 ```
 
 #### 4.2.4 Codebase-Aware Agent (Cursor's Unique Capability)
+
 ```python
 class CodebaseContextAgent(ReviewAgent):
     """Uses Cursor's codebase indexing for context-aware reviews."""
-    
-    MODEL = "claude-3-opus-20240229"  # Can use any model
-    
+
+    MODEL = "claude-4.5-opus-high-thinking"  # Can use any model
+
     SYSTEM_PROMPT = """You have full context of the codebase.
     Focus on:
     - Consistency with existing patterns
@@ -266,11 +273,11 @@ class CodebaseContextAgent(ReviewAgent):
     - Breaking changes
     - Missing test coverage for critical paths
     - Integration concerns"""
-    
+
     def __init__(self, cursor_client: CursorClient, repo_path: str):
         self.client = cursor_client
         self.repo_path = repo_path
-    
+
     async def review(self, diff: str, files: dict, context: ReviewContext) -> AgentReview:
         # Cursor API can include codebase context automatically
         response = await self.client.complete(
@@ -291,7 +298,7 @@ The orchestrator manages parallel execution and handles agent failures gracefull
 ```python
 class AgentOrchestrator:
     """Coordinates multiple agents to review code in parallel."""
-    
+
     def __init__(
         self,
         agents: List[ReviewAgent],
@@ -301,7 +308,7 @@ class AgentOrchestrator:
         self.agents = agents
         self.timeout = timeout_seconds
         self.min_agents = min_agents_required
-    
+
     async def review(
         self,
         diff: str,
@@ -310,7 +317,7 @@ class AgentOrchestrator:
     ) -> List[AgentReview]:
         """
         Execute all agents in parallel and collect results.
-        
+
         Handles timeouts and failures gracefully—partial results
         are still valuable as long as min_agents succeed.
         """
@@ -320,17 +327,17 @@ class AgentOrchestrator:
             )
             for agent in self.agents
         ]
-        
+
         results = await asyncio.gather(*tasks, return_exceptions=True)
-        
+
         successful_reviews = [r for r in results if isinstance(r, AgentReview)]
-        
+
         if len(successful_reviews) < self.min_agents:
             raise InsufficientAgentsError(
                 f"Only {len(successful_reviews)} agents succeeded, "
                 f"minimum {self.min_agents} required"
             )
-        
+
         return successful_reviews
 ```
 
@@ -341,11 +348,11 @@ The aggregator combines findings from multiple agents using consensus-based scor
 ```python
 class ReviewAggregator:
     """Combines multiple agent reviews into a unified review."""
-    
+
     def aggregate(self, reviews: List[AgentReview]) -> ConsolidatedReview:
         """
         Merge findings using semantic similarity and voting.
-        
+
         Algorithm:
         1. Cluster similar findings using embedding similarity
         2. For each cluster, compute consensus score
@@ -355,27 +362,27 @@ class ReviewAggregator:
         """
         all_findings = self._extract_all_findings(reviews)
         clusters = self._cluster_similar_findings(all_findings)
-        
+
         consolidated = []
         for cluster in clusters:
             merged = self._merge_cluster(cluster)
             merged.consensus_score = len(cluster.findings) / len(reviews)
             merged.agreeing_agents = [f.agent_id for f in cluster.findings]
             consolidated.append(merged)
-        
+
         # Sort by priority (severity × consensus)
         consolidated.sort(
             key=lambda f: self._priority_score(f),
             reverse=True
         )
-        
+
         return ConsolidatedReview(
             findings=consolidated,
             summary=self._generate_summary(consolidated),
             agent_count=len(reviews),
             review_quality_score=self._compute_quality_score(reviews),
         )
-    
+
     def _priority_score(self, finding: ConsolidatedFinding) -> float:
         """Compute priority based on severity and consensus."""
         severity_weights = {
@@ -396,33 +403,33 @@ class ReviewAggregator:
 ```python
 class GitHubPRHandler:
     """Handles GitHub PR events and posts reviews."""
-    
+
     def __init__(self, github_token: str, orchestrator: AgentOrchestrator):
         self.gh = Github(github_token)
         self.orchestrator = orchestrator
         self.aggregator = ReviewAggregator()
-    
+
     async def handle_pr_event(self, event: PREvent) -> None:
         """Process a PR event and post review."""
         pr = self.gh.get_repo(event.repo).get_pull(event.pr_number)
-        
+
         # Extract diff and file contents
         diff = self._get_pr_diff(pr)
         files = self._get_changed_files(pr)
         context = self._build_context(pr)
-        
+
         # Run multi-agent review
         agent_reviews = await self.orchestrator.review(diff, files, context)
         consolidated = self.aggregator.aggregate(agent_reviews)
-        
+
         # Post to GitHub
         self._post_pr_review(pr, consolidated)
         self._post_inline_comments(pr, consolidated)
-    
+
     def _post_pr_review(self, pr, review: ConsolidatedReview) -> None:
         """Post overall review comment."""
         body = self._format_review_summary(review)
-        
+
         # Determine review action based on findings
         if any(f.severity == "critical" for f in review.findings):
             event = "REQUEST_CHANGES"
@@ -430,7 +437,7 @@ class GitHubPRHandler:
             event = "COMMENT"
         else:
             event = "APPROVE"
-        
+
         pr.create_review(body=body, event=event)
 ```
 
@@ -447,7 +454,7 @@ async def github_webhook(request: Request):
     """Handle GitHub webhook events."""
     payload = await request.json()
     event_type = request.headers.get("X-GitHub-Event")
-    
+
     if event_type == "pull_request":
         action = payload["action"]
         if action in ("opened", "synchronize", "reopened"):
@@ -456,10 +463,10 @@ async def github_webhook(request: Request):
                 pr_number=payload["pull_request"]["number"],
                 action=action,
             )
-            
+
             # Process async to respond quickly
             asyncio.create_task(pr_handler.handle_pr_event(pr_event))
-    
+
     return {"status": "ok"}
 ```
 
@@ -476,12 +483,12 @@ version: 1
 # Single API key for all LLM access via Cursor
 cursor:
   api_key: ${CURSOR_API_KEY}
-  base_url: https://api.cursor.com/v1  # or self-hosted
+  base_url: https://api.cursor.com/v1 # or self-hosted
   timeout_seconds: 120
 
 # GitHub Integration
 github:
-  token: ${GITHUB_TOKEN}  # Personal Access Token (simple)
+  token: ${GITHUB_TOKEN} # Personal Access Token (simple)
   # Or use GitHub App for production:
   # app_id: ${GITHUB_APP_ID}
   # private_key_path: ./github-app.pem
@@ -490,21 +497,21 @@ github:
 # Agent Configuration - All use Cursor API with different models
 agents:
   - name: security-claude
-    model: claude-3-opus-20240229  # Model selection via Cursor
+    model: claude-4.5-opus-high-thinking # Model selection via Cursor
     focus_areas: [security, architecture]
     max_tokens: 4096
     temperature: 0.3
-    
+
   - name: performance-gpt4
-    model: gpt-4-turbo-preview  # Different model, same Cursor API
+    model: gpt-5.2 # Different model, same Cursor API
     focus_areas: [performance, logic, edge_cases]
     max_tokens: 4096
     temperature: 0.3
-    
+
   - name: patterns-claude
-    model: claude-3-opus-20240229
+    model: claude-4.5-opus-high-thinking
     focus_areas: [consistency, patterns, integration]
-    include_codebase_context: true  # Cursor's unique feature
+    include_codebase_context: true # Cursor's unique feature
 
 orchestrator:
   timeout_seconds: 120
@@ -512,14 +519,14 @@ orchestrator:
   max_parallel_agents: 5
 
 aggregator:
-  similarity_threshold: 0.85  # For clustering similar findings
-  min_consensus_for_critical: 0.5  # At least half must agree
-  
+  similarity_threshold: 0.85 # For clustering similar findings
+  min_consensus_for_critical: 0.5 # At least half must agree
+
 output:
   include_agent_breakdown: true
   include_confidence_scores: true
   max_findings_per_file: 10
-  
+
 review_policy:
   auto_approve_if_no_findings: false
   block_on_critical: true
@@ -537,7 +544,7 @@ inherit_from: default
 # Override agent focus for this repo
 agents:
   - type: claude
-    focus_areas: [security, crypto]  # Crypto-focused for this repo
+    focus_areas: [security, crypto] # Crypto-focused for this repo
     custom_prompt_append: |
       This is a Rust codebase using the `eyre` error handling crate.
       Pay special attention to unwrap() and expect() calls.
@@ -611,12 +618,12 @@ class ConsolidatedFinding:
     title: str
     description: str
     suggested_fix: Optional[str]
-    
+
     # Consensus metadata
     consensus_score: float  # 0.0 - 1.0 (% of agents that found this)
     agreeing_agents: List[str]
     confidence: float  # Average confidence across agents
-    
+
     # Source tracking
     original_findings: List[ReviewFinding] = field(default_factory=list)
 
@@ -627,16 +634,16 @@ class ConsolidatedReview:
     created_at: datetime
     repo: str
     pr_number: int
-    
+
     # Results
     findings: List[ConsolidatedFinding]
     summary: str
-    
+
     # Metadata
     agent_count: int
     review_quality_score: float  # How confident we are in this review
     total_review_time_ms: int
-    
+
     # Breakdown
     findings_by_severity: Dict[Severity, int]
     findings_by_category: Dict[Category, int]
@@ -687,12 +694,12 @@ async def review_pr(repo: str, pr: int, output: str, dry_run: bool):
     """Review a GitHub pull request."""
     config = load_config()
     orchestrator = create_orchestrator(config)
-    
+
     click.echo(f"🔍 Reviewing PR #{pr} in {repo}...")
     click.echo(f"📡 Launching {len(orchestrator.agents)} agents...")
-    
+
     # ... implementation
-    
+
     click.echo("✅ Review complete!")
 
 @cli.command()
@@ -714,13 +721,14 @@ if __name__ == "__main__":
 
 ### 9.1 GitHub PR Comment
 
-```markdown
+````markdown
 ## 🤖 AI Code Review
 
 **Reviewed by 3 agents** | Consensus score: 87% | Review time: 45s
 
 ### Summary
-This PR introduces user authentication improvements. Found 2 critical issues 
+
+This PR introduces user authentication improvements. Found 2 critical issues
 that should be addressed, 3 warnings, and 5 suggestions.
 
 ---
@@ -728,35 +736,40 @@ that should be addressed, 3 warnings, and 5 suggestions.
 ### 🔴 Critical Issues (2)
 
 #### 1. SQL Injection Vulnerability
+
 **File:** `src/auth/login.py` (lines 45-48) | **Consensus:** 3/3 agents ✓
 
 ```python
 # Current code
 query = f"SELECT * FROM users WHERE username = '{username}'"
 ```
+````
 
 **Issue:** User input directly interpolated into SQL query.
 
 **Suggested fix:**
+
 ```python
 query = "SELECT * FROM users WHERE username = %s"
 cursor.execute(query, (username,))
 ```
 
-> 🔒 *Found by: claude-security, gpt4-security, cursor-context*
+> 🔒 _Found by: claude-security, gpt4-security, cursor-context_
 
 ---
 
 #### 2. Missing Rate Limiting
+
 **File:** `src/auth/login.py` (lines 12-15) | **Consensus:** 2/3 agents
 
 Login endpoint lacks rate limiting, enabling brute force attacks.
 
-> 🔒 *Found by: claude-security, gpt4-security*
+> 🔒 _Found by: claude-security, gpt4-security_
 
 ---
 
 ### 🟡 Warnings (3)
+
 <details>
 <summary>Click to expand</summary>
 
@@ -767,6 +780,7 @@ Login endpoint lacks rate limiting, enabling brute force attacks.
 </details>
 
 ### 💡 Suggestions (5)
+
 <details>
 <summary>Click to expand</summary>
 
@@ -780,9 +794,10 @@ Login endpoint lacks rate limiting, enabling brute force attacks.
 
 ---
 
-<sub>🤖 Generated by [AI Code Reviewer](https://github.com/calimero-network/ai-code-reviewer) | 
+<sub>🤖 Generated by [AI Code Reviewer](https://github.com/calimero-network/ai-code-reviewer) |
 [Configure](.ai-reviewer.yaml) | [Report Issue](https://github.com/calimero-network/ai-code-reviewer/issues)</sub>
-```
+
+````
 
 ### 9.2 JSON Output
 
@@ -821,7 +836,7 @@ Login endpoint lacks rate limiting, enabling brute force attacks.
     }
   ]
 }
-```
+````
 
 ---
 
@@ -890,16 +905,19 @@ ai-code-reviewer/
 ## 11. Security Considerations
 
 ### 11.1 Secret Management
+
 - API keys stored in environment variables, never in config files
 - GitHub App private key stored securely (not in repo)
 - Webhook secret validated for all incoming requests
 
 ### 11.2 Code Exposure
+
 - Only diff and changed file contents sent to LLMs
 - Option to exclude sensitive paths via config
 - No credentials or secrets in review context
 
 ### 11.3 Rate Limiting
+
 - Respect LLM provider rate limits
 - Implement backoff and retry logic
 - Queue large PRs to avoid burst costs
@@ -917,7 +935,7 @@ review_duration_seconds = Histogram(
 )
 
 findings_total = Counter(
-    "ai_reviewer_findings_total", 
+    "ai_reviewer_findings_total",
     "Total findings by severity",
     ["severity", "category"]
 )
@@ -945,6 +963,7 @@ agent_success_rate = Gauge(
 ## 14. Implementation Roadmap
 
 ### Phase 1: Core (Week 1-2)
+
 - [ ] Project setup (pyproject.toml, CI)
 - [ ] Data models and types
 - [ ] Agent base class and Claude implementation
@@ -953,18 +972,21 @@ agent_success_rate = Gauge(
 - [ ] CLI for local diff review
 
 ### Phase 2: Multi-Agent (Week 3)
+
 - [ ] GPT-4 agent implementation
 - [ ] Cursor agent implementation
 - [ ] Advanced aggregator (embeddings, consensus)
 - [ ] Configuration system
 
 ### Phase 3: GitHub Integration (Week 4)
+
 - [ ] GitHub App setup
 - [ ] Webhook server
 - [ ] PR comment formatting
 - [ ] Inline comment support
 
 ### Phase 4: Polish (Week 5)
+
 - [ ] Comprehensive tests
 - [ ] Documentation
 - [ ] Docker packaging
@@ -984,8 +1006,9 @@ agent_success_rate = Gauge(
 ## Appendix A: Example Agent Prompts
 
 ### Security Review Prompt
+
 ```
-You are a senior security engineer performing a code review. Your task is to 
+You are a senior security engineer performing a code review. Your task is to
 identify security vulnerabilities in the provided code changes.
 
 Focus areas:
@@ -1013,4 +1036,4 @@ Code changes to review:
 
 ---
 
-*Document version: 0.1.0 | Last updated: 2026-02-03*
+_Document version: 0.1.0 | Last updated: 2026-02-03_

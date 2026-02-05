@@ -69,20 +69,24 @@ class ConsolidatedReview:
 ## Common Tasks
 
 ### Add a new agent type
+
 1. Create `src/ai_reviewer/agents/new_agent.py`
 2. Extend `ReviewAgent` base class
 3. Define `MODEL`, `AGENT_TYPE`, `FOCUS_AREAS`, `SYSTEM_PROMPT`
 4. Add to agent config in `config.yaml`
 
 ### Change how findings are aggregated
+
 - Edit `src/ai_reviewer/orchestrator/aggregator.py`
 - Key method: `ReviewAggregator.aggregate()`
 
 ### Modify GitHub output format
+
 - Edit `src/ai_reviewer/github/formatter.py`
 - Look for `to_github_markdown()` method
 
 ### Add new configuration option
+
 1. Add field to appropriate dataclass in `config.py`
 2. Parse it in `_parse_config()`
 3. Document in `config.example.yaml`
@@ -104,10 +108,10 @@ cursor:
 
 agents:
   - name: security-reviewer
-    model: claude-3-opus-20240229
+    model: claude-4.5-opus-high-thinking
     focus_areas: [security]
   - name: performance-reviewer
-    model: gpt-4-turbo-preview
+    model: gpt-5.2
     focus_areas: [performance]
 
 orchestrator:

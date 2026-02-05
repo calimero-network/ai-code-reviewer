@@ -97,7 +97,8 @@ class Config:
     cursor: CursorApiConfig
     github: GitHubConfig
     agents: list[AgentConfig]
-    orchestrator: OrchestratorSettings = field(default_factory=OrchestratorSettings)
+    orchestrator: OrchestratorSettings = field(
+        default_factory=OrchestratorSettings)
     aggregator: AggregatorSettings = field(default_factory=AggregatorSettings)
     output: OutputSettings = field(default_factory=OutputSettings)
     review_policy: ReviewPolicy = field(default_factory=ReviewPolicy)
@@ -151,7 +152,8 @@ def _parse_config(raw: dict[str, Any]) -> Config:
     # Cursor config
     cursor_raw = raw.get("cursor", {})
     cursor = CursorApiConfig(
-        api_key=cursor_raw.get("api_key") or os.environ.get("CURSOR_API_KEY", ""),
+        api_key=cursor_raw.get("api_key") or os.environ.get(
+            "CURSOR_API_KEY", ""),
         base_url=cursor_raw.get("base_url", "https://api.cursor.com/v0"),
         timeout_seconds=cursor_raw.get("timeout_seconds", 120),
     )
@@ -176,7 +178,8 @@ def _parse_config(raw: dict[str, Any]) -> Config:
                 max_tokens=agent_raw.get("max_tokens", 4096),
                 temperature=agent_raw.get("temperature", 0.3),
                 custom_prompt_append=agent_raw.get("custom_prompt_append"),
-                include_codebase_context=agent_raw.get("include_codebase_context", False),
+                include_codebase_context=agent_raw.get(
+                    "include_codebase_context", False),
             )
         )
 
@@ -185,17 +188,17 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         agents = [
             AgentConfig(
                 name="security-reviewer",
-                model="claude-3-opus-20240229",
+                model="claude-4.5-opus-high-thinking",
                 focus_areas=["security", "authentication"],
             ),
             AgentConfig(
                 name="performance-reviewer",
-                model="gpt-4-turbo-preview",
+                model="gpt-5.2",
                 focus_areas=["performance", "complexity"],
             ),
             AgentConfig(
                 name="patterns-reviewer",
-                model="claude-3-opus-20240229",
+                model="claude-4.5-opus-high-thinking",
                 focus_areas=["consistency", "patterns"],
             ),
         ]
@@ -214,7 +217,8 @@ def _parse_config(raw: dict[str, Any]) -> Config:
     agg_raw = raw.get("aggregator", {})
     aggregator = AggregatorSettings(
         similarity_threshold=agg_raw.get("similarity_threshold", 0.85),
-        min_consensus_for_critical=agg_raw.get("min_consensus_for_critical", 0.5),
+        min_consensus_for_critical=agg_raw.get(
+            "min_consensus_for_critical", 0.5),
         use_embeddings=agg_raw.get("use_embeddings", False),
     )
 
@@ -222,7 +226,8 @@ def _parse_config(raw: dict[str, Any]) -> Config:
     out_raw = raw.get("output", {})
     output = OutputSettings(
         include_agent_breakdown=out_raw.get("include_agent_breakdown", True),
-        include_confidence_scores=out_raw.get("include_confidence_scores", True),
+        include_confidence_scores=out_raw.get(
+            "include_confidence_scores", True),
         max_findings_per_file=out_raw.get("max_findings_per_file", 10),
         max_total_findings=out_raw.get("max_total_findings", 50),
     )
@@ -230,9 +235,11 @@ def _parse_config(raw: dict[str, Any]) -> Config:
     # Review policy
     policy_raw = raw.get("review_policy", {})
     review_policy = ReviewPolicy(
-        auto_approve_if_no_findings=policy_raw.get("auto_approve_if_no_findings", False),
+        auto_approve_if_no_findings=policy_raw.get(
+            "auto_approve_if_no_findings", False),
         block_on_critical=policy_raw.get("block_on_critical", True),
-        require_human_review_for=policy_raw.get("require_human_review_for", []),
+        require_human_review_for=policy_raw.get(
+            "require_human_review_for", []),
         ignore_patterns=policy_raw.get("ignore_patterns", []),
     )
 
@@ -269,10 +276,12 @@ def validate_config(config: Config) -> list[str]:
     errors = []
 
     if not config.cursor.api_key:
-        errors.append("Missing Cursor API key (set CURSOR_API_KEY or cursor.api_key)")
+        errors.append(
+            "Missing Cursor API key (set CURSOR_API_KEY or cursor.api_key)")
 
     if not config.github.token:
-        errors.append("Missing GitHub token (set GITHUB_TOKEN or github.token)")
+        errors.append(
+            "Missing GitHub token (set GITHUB_TOKEN or github.token)")
 
     if not config.agents:
         errors.append("No agents configured")

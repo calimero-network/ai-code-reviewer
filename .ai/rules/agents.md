@@ -1,6 +1,7 @@
 # Agents Module Rules
 
 ## Purpose
+
 The `agents/` module contains all LLM agent implementations that perform code reviews. Each agent is specialized for particular review focuses.
 
 ## Key Types
@@ -9,7 +10,7 @@ The `agents/` module contains all LLM agent implementations that perform code re
 # Base class all agents inherit from
 class ReviewAgent:
     MODEL: str           # LLM model identifier
-    AGENT_TYPE: str      # Agent classification  
+    AGENT_TYPE: str      # Agent classification
     FOCUS_AREAS: list    # What this agent specializes in
     SYSTEM_PROMPT: str   # Instructions for the LLM
 
@@ -39,15 +40,19 @@ agents/
 ## Invariants
 
 ### A1: All Agents Extend ReviewAgent
+
 Never create standalone agent functions. Always inherit from `ReviewAgent`.
 
 ### A2: Agents Return JSON-Structured Findings
+
 Use `client.complete_json()` to ensure structured output.
 
 ### A3: Agents Are Stateless
+
 No mutable state between `review()` calls. Each review is independent.
 
 ### A4: Focus Areas Match System Prompt
+
 If `FOCUS_AREAS = ["security"]`, the system prompt must emphasize security.
 
 ## Creating a New Agent
@@ -59,16 +64,16 @@ from ai_reviewer.agents.base import ReviewAgent
 
 class NewFocusAgent(ReviewAgent):
     """Agent focused on [specific area]."""
-    
-    MODEL = "claude-3-opus-20240229"  # Model accessed via Cursor
+
+    MODEL = "claude-4.5-opus-high-thinking"  # Model accessed via Cursor
     AGENT_TYPE = "new-focus"
     FOCUS_AREAS = ["focus1", "focus2"]
-    
+
     SYSTEM_PROMPT = """You are an expert in [area].
     Focus on:
     - Point 1
     - Point 2
-    
+
     Be thorough but avoid false positives."""
 ```
 
@@ -79,7 +84,7 @@ class NewFocusAgent(ReviewAgent):
 class MyAgent(ReviewAgent):
     def __init__(self, client: CursorClient, agent_id: str | None = None):
         super().__init__(client, agent_id)
-    
+
     async def review(self, diff, files, context):
         # JSON responses for structured findings
         response = await self.client.complete_json(
@@ -93,12 +98,12 @@ class MyAgent(ReviewAgent):
 
 ## Severity Guidelines for Agents
 
-| Severity | When to Use |
-|----------|-------------|
-| `critical` | Security vulnerabilities, data loss, crashes |
-| `warning` | Bugs, performance issues, bad practices |
-| `suggestion` | Improvements, refactoring opportunities |
-| `nitpick` | Style, formatting, minor preferences |
+| Severity     | When to Use                                  |
+| ------------ | -------------------------------------------- |
+| `critical`   | Security vulnerabilities, data loss, crashes |
+| `warning`    | Bugs, performance issues, bad practices      |
+| `suggestion` | Improvements, refactoring opportunities      |
+| `nitpick`    | Style, formatting, minor preferences         |
 
 ## Anti-Patterns
 

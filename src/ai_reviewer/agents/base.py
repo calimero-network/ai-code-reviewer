@@ -16,7 +16,7 @@ class ReviewAgent:
     """Base class for all review agents."""
 
     # Subclasses should override these
-    MODEL: str = "claude-3-opus-20240229"
+    MODEL: str = "claude-4.5-opus-high-thinking"
     AGENT_TYPE: str = "base"
     FOCUS_AREAS: list[str] = []
     SYSTEM_PROMPT: str = "You are a code reviewer."
@@ -157,7 +157,8 @@ Please review the code changes above and identify any issues within your focus a
                 finding = ReviewFinding(
                     file_path=raw["file_path"],
                     line_start=int(raw["line_start"]),
-                    line_end=int(raw["line_end"]) if raw.get("line_end") else None,
+                    line_end=int(raw["line_end"]) if raw.get(
+                        "line_end") else None,
                     severity=Severity(raw["severity"].lower()),
                     category=Category(raw["category"].lower()),
                     title=raw["title"],

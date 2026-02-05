@@ -6,6 +6,7 @@ import logging
 import re
 from collections.abc import Callable
 from datetime import datetime
+from difflib import SequenceMatcher
 from typing import Any
 from uuid import uuid4
 
@@ -184,6 +185,88 @@ async def run_single_agent(
         return agent_name, [], f"Agent failed: {e}"
 
 
+# Similarity threshold for clustering findings (match aggregator default)
+_SIMILARITY_THRESHOLD = 0.85
+
+
+def _normalize_path(path: str) -> str:
+    """Normalize file path for comparison."""
+    if not path:
+        return ""
+    return path.strip().replace("\\", "/").lstrip("./")
+
+
+def _raw_lines_overlap(raw1: dict, raw2: dict, tolerance: int = 5) -> bool:
+    """Check if two raw findings have overlapping or close line ranges."""
+    start1 = int(raw1.get("line_start", 1))
+    end1 = raw1.get("line_end")
+    end1 = int(end1) if end1 is not None else start1
+    start2 = int(raw2.get("line_start", 1))
+    end2 = raw2.get("line_end")
+    end2 = int(end2) if end2 is not None else start2
+    return not (end1 + tolerance < start2 or end2 + tolerance < start1)
+
+
+def _raw_text_similarity(text1: str, text2: str) -> float:
+    """Compute text similarity using SequenceMatcher (0.0–1.0)."""
+    if not text1 and not text2:
+        return 1.0
+    if not text1 or not text2:
+        return 0.0
+    return SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
+
+
+def _raw_findings_similar(raw1: dict, raw2: dict, threshold: float = _SIMILARITY_THRESHOLD) -> bool:
+    """Check if two raw findings describe the same issue (for consensus clustering)."""
+    path1 = _normalize_path(raw1.get("file_path", ""))
+    path2 = _normalize_path(raw2.get("file_path", ""))
+    if path1 != path2:
+        return False
+
+    cat1 = (raw1.get("category") or "logic").lower().strip()
+    cat2 = (raw2.get("category") or "logic").lower().strip()
+    if cat1 != cat2:
+        return False
+
+    if not _raw_lines_overlap(raw1, raw2):
+        return False
+
+    title1 = (raw1.get("title") or "").strip()
+    title2 = (raw2.get("title") or "").strip()
+    desc1 = (raw1.get("description") or "").strip()
+    desc2 = (raw2.get("description") or "").strip()
+    title_sim = _raw_text_similarity(title1, title2)
+    desc_sim = _raw_text_similarity(desc1, desc2)
+    combined = (title_sim * 0.6) + (desc_sim * 0.4)
+    return combined >= threshold
+
+
+def _cluster_raw_findings(
+    tagged: list[tuple[str, dict]], threshold: float = _SIMILARITY_THRESHOLD
+) -> list[list[tuple[str, dict]]]:
+    """Cluster similar raw findings so consensus = agents that found the same issue."""
+    if not tagged:
+        return []
+
+    clusters: list[list[tuple[str, dict]]] = []
+    used = set()
+
+    for i, (agent_i, raw_i) in enumerate(tagged):
+        if i in used:
+            continue
+        cluster = [(agent_i, raw_i)]
+        used.add(i)
+        for j, (agent_j, raw_j) in enumerate(tagged):
+            if j in used:
+                continue
+            if _raw_findings_similar(raw_i, raw_j, threshold):
+                cluster.append((agent_j, raw_j))
+                used.add(j)
+        clusters.append(cluster)
+
+    return clusters
+
+
 def aggregate_findings(
     all_findings: list[tuple[str, list[dict], str]],
     repo: str,
@@ -195,26 +278,22 @@ def aggregate_findings(
     summaries = []
     failed_agents = []
 
-    # Track which findings are similar (for consensus scoring)
-    finding_clusters: dict[str, list[tuple[str, dict]]] = {}
-
+    # Flatten to (agent_name, raw) and collect summaries
+    tagged: list[tuple[str, dict]] = []
     for agent_name, findings, summary in all_findings:
         summaries.append(f"**{agent_name}**: {summary}")
 
-        # Track failed agents (summary contains error message)
         if "Agent failed:" in summary or "401 Unauthorized" in summary:
             failed_agents.append(agent_name)
 
         for raw in findings:
-            # Create a key for clustering similar findings
-            key = f"{raw.get('file_path', '')}:{raw.get('line_start', 0)}:{raw.get('category', '')}"
+            tagged.append((agent_name, raw))
 
-            if key not in finding_clusters:
-                finding_clusters[key] = []
-            finding_clusters[key].append((agent_name, raw))
+    # Cluster by similarity (same file, overlapping lines, same category, similar title/description)
+    finding_clusters = _cluster_raw_findings(tagged)
 
     # Process clusters
-    for _key, cluster in finding_clusters.items():
+    for cluster in finding_clusters:
         # Use the first finding as base, but track all agreeing agents
         agent_name, raw = cluster[0]
         agreeing_agents = [a for a, _ in cluster]
@@ -231,7 +310,8 @@ def aggregate_findings(
 
         # Consensus score based on how many agents found this
         total_agents = len(all_findings)
-        consensus_score = len(cluster) / total_agents if total_agents > 0 else 1.0
+        consensus_score = len(cluster) / \
+            total_agents if total_agents > 0 else 1.0
 
         finding = ConsolidatedFinding(
             id=f"finding-{len(consolidated) + 1}",
@@ -253,7 +333,20 @@ def aggregate_findings(
     consolidated.sort(key=lambda f: f.priority_score, reverse=True)
 
     # Build combined summary
-    combined_summary = "\n".join(summaries) if summaries else "Review completed"
+    combined_summary = "\n".join(
+        summaries) if summaries else "Review completed"
+
+    # Compute quality score from consensus and agent count
+    total_agents = len(all_findings)
+    if not consolidated:
+        # No findings: higher score for more agents (max 0.95)
+        quality_score = min(0.95, 0.7 + total_agents * 0.1)
+    else:
+        # With findings: score based on average consensus weighted by agent coverage
+        avg_consensus = sum(
+            f.consensus_score for f in consolidated) / len(consolidated)
+        agent_factor = min(1.0, total_agents / 3)  # Full credit at 3+ agents
+        quality_score = round(avg_consensus * agent_factor, 2)
 
     return ConsolidatedReview(
         id=f"review-{uuid4().hex[:8]}",
@@ -263,7 +356,7 @@ def aggregate_findings(
         findings=consolidated,
         summary=combined_summary,
         agent_count=len(all_findings),
-        review_quality_score=0.85 if consolidated else 0.95,
+        review_quality_score=quality_score,
         total_review_time_ms=0,
         failed_agents=failed_agents,
     )
@@ -341,12 +434,14 @@ async def review_pr_with_cursor_agent(
         all_findings = [("cursor-agent", raw_findings, summary)]
     else:
         # Multi-agent review
-        logger.info(f"Running {len(agents_to_run)} specialized agents in parallel...")
+        logger.info(
+            f"Running {len(agents_to_run)} specialized agents in parallel...")
 
         async with CursorClient(cursor_config) as client:
             tasks = []
             for agent_config in agents_to_run:
-                prompt = base_prompt + agent_config["prompt_addition"] + output_format
+                prompt = base_prompt + \
+                    agent_config["prompt_addition"] + output_format
 
                 def make_status_callback(name: str):
                     def callback(status: str):
