@@ -8,8 +8,7 @@ class SecurityAgent(ReviewAgent):
 
     MODEL = "claude-4.5-opus-high-thinking"
     AGENT_TYPE = "claude-security"
-    FOCUS_AREAS = ["security", "authentication",
-                   "data_validation", "cryptography"]
+    FOCUS_AREAS = ["security", "authentication", "data_validation", "cryptography"]
 
     SYSTEM_PROMPT = """You are an expert security code reviewer with deep knowledge of:
 - OWASP Top 10 vulnerabilities

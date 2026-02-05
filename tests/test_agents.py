@@ -33,9 +33,7 @@ class TestCursorClient:
 
         # Mock the HTTP client
         mock_response = MagicMock()
-        mock_response.json.return_value = {
-            "choices": [{"message": {"content": "Review response"}}]
-        }
+        mock_response.json.return_value = {"choices": [{"message": {"content": "Review response"}}]}
         mock_response.raise_for_status = MagicMock()
 
         with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
@@ -97,8 +95,7 @@ class TestSecurityAgent:
 
             assert len(review.findings) >= 1
             # Should find the SQL injection
-            sql_findings = [
-                f for f in review.findings if "sql" in f.title.lower()]
+            sql_findings = [f for f in review.findings if "sql" in f.title.lower()]
             assert len(sql_findings) >= 1
             assert sql_findings[0].severity == Severity.CRITICAL
 
@@ -129,8 +126,7 @@ class TestSecurityAgent:
             )
 
             # Should not have critical findings for safe code
-            critical_findings = [
-                f for f in review.findings if f.severity.value == "critical"]
+            critical_findings = [f for f in review.findings if f.severity.value == "critical"]
             assert len(critical_findings) == 0
 
 
@@ -176,6 +172,5 @@ class TestPerformanceAgent:
                 context=mock_review_context,
             )
 
-            perf_findings = [
-                f for f in review.findings if f.category == Category.PERFORMANCE]
+            perf_findings = [f for f in review.findings if f.category == Category.PERFORMANCE]
             assert len(perf_findings) >= 1
