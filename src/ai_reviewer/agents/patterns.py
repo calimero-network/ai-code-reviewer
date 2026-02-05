@@ -8,8 +8,7 @@ class PatternsAgent(ReviewAgent):
 
     MODEL = "claude-4.5-opus-high-thinking"
     AGENT_TYPE = "claude-patterns"
-    FOCUS_AREAS = ["consistency", "patterns",
-                   "architecture", "maintainability"]
+    FOCUS_AREAS = ["consistency", "patterns", "architecture", "maintainability"]
 
     SYSTEM_PROMPT = """You are an expert code reviewer focused on code quality and consistency.
 

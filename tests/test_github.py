@@ -486,7 +486,9 @@ class TestResolveFixedComments:
 
         # Our "Resolved" reply - should be excluded
         resolved_reply = MagicMock()
-        resolved_reply.body = "✅ **Resolved** - This issue has been addressed in the latest changes."
+        resolved_reply.body = (
+            "✅ **Resolved** - This issue has been addressed in the latest changes."
+        )
         resolved_reply.user.login = "github-actions[bot]"
         resolved_reply.id = 101
         resolved_reply.path = "test.py"
@@ -551,9 +553,7 @@ class TestResolveFixedComments:
 
         with patch("ai_reviewer.github.client.Github"):
             client = GitHubClient(token="test-token")
-            client.get_previous_review_comments = MagicMock(
-                return_value=[prev_removed]
-            )
+            client.get_previous_review_comments = MagicMock(return_value=[prev_removed])
 
             delta = client.compute_review_delta(mock_pr, [])
 
@@ -569,7 +569,9 @@ class TestResolveFixedComments:
         # File still in diff with changes around line 10
         mock_file = MagicMock()
         mock_file.filename = "src/foo.py"
-        mock_file.patch = "@@ -8,7 +8,7 @@\n context\n context\n-old line 10\n+new line 10\n context\n context"
+        mock_file.patch = (
+            "@@ -8,7 +8,7 @@\n context\n context\n-old line 10\n+new line 10\n context\n context"
+        )
         mock_pr.get_files.return_value = [mock_file]
 
         # Previous comment on line 10 - line was modified, so should be fixed
@@ -584,9 +586,7 @@ class TestResolveFixedComments:
 
         with patch("ai_reviewer.github.client.Github"):
             client = GitHubClient(token="test-token")
-            client.get_previous_review_comments = MagicMock(
-                return_value=[prev_modified]
-            )
+            client.get_previous_review_comments = MagicMock(return_value=[prev_modified])
 
             # AI didn't find the issue again → fixed
             delta = client.compute_review_delta(mock_pr, [])
@@ -617,9 +617,7 @@ class TestResolveFixedComments:
 
         with patch("ai_reviewer.github.client.Github"):
             client = GitHubClient(token="test-token")
-            client.get_previous_review_comments = MagicMock(
-                return_value=[prev_untouched]
-            )
+            client.get_previous_review_comments = MagicMock(return_value=[prev_untouched])
 
             delta = client.compute_review_delta(mock_pr, [])
 
@@ -661,20 +659,93 @@ class TestResolveFixedComments:
             modified_lines = {10, 11, 12}
 
             # Line 10 is exactly modified
-            assert client._is_line_in_modified_range(
-                10, modified_lines) is True
+            assert client._is_line_in_modified_range(10, modified_lines) is True
 
             # Line 13 is within tolerance (3) of line 12
-            assert client._is_line_in_modified_range(
-                13, modified_lines, tolerance=3) is True
+            assert client._is_line_in_modified_range(13, modified_lines, tolerance=3) is True
 
             # Line 7 is within tolerance (3) of line 10
-            assert client._is_line_in_modified_range(
-                7, modified_lines, tolerance=3) is True
+            assert client._is_line_in_modified_range(7, modified_lines, tolerance=3) is True
 
             # Line 20 is outside tolerance
-            assert client._is_line_in_modified_range(
-                20, modified_lines, tolerance=3) is False
+            assert client._is_line_in_modified_range(20, modified_lines, tolerance=3) is False
+
+    def test_comment_already_has_resolved_reply_true_when_reply_exists(self):
+        """_comment_already_has_resolved_reply returns True when we already replied."""
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+
+            # Original finding comment
+            original = MagicMock()
+            original.id = 100
+            original.body = "🔴 **Bug**"
+            original.in_reply_to_id = None
+
+            # Our Resolved reply to 100
+            reply = MagicMock()
+            reply.id = 101
+            reply.body = "✅ **Resolved** - This issue has been addressed"
+            reply.in_reply_to_id = 100
+            reply.user.login = "github-actions[bot]"
+
+            raw_comments = [original, reply]
+
+            assert client._comment_already_has_resolved_reply(100, raw_comments) is True
+            assert client._comment_already_has_resolved_reply(999, raw_comments) is False
+
+    def test_resolve_fixed_comments_skips_when_already_replied(self):
+        """resolve_fixed_comments does not post a second Resolved reply."""
+        from ai_reviewer.github.client import (
+            GitHubClient,
+            PreviousComment,
+            ReviewDelta,
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.base.repo.full_name = "test/repo"
+        mock_pr.number = 1
+
+        # Comment 100 is the original finding; comment 101 is our existing Resolved reply
+        original_comment = MagicMock()
+        original_comment.id = 100
+        original_comment.body = "🔴 **Bug**"
+        original_comment.in_reply_to_id = None
+        original_comment.user.login = "github-actions[bot]"
+
+        resolved_reply = MagicMock()
+        resolved_reply.id = 101
+        resolved_reply.body = (
+            "✅ **Resolved** - This issue has been addressed in the latest changes."
+        )
+        resolved_reply.in_reply_to_id = 100
+        resolved_reply.user.login = "github-actions[bot]"
+
+        mock_pr.get_review_comments.return_value = [original_comment, resolved_reply]
+
+        delta = ReviewDelta(
+            fixed_findings=[
+                PreviousComment(
+                    id=100,
+                    file_path="src/foo.py",
+                    line=10,
+                    title="Bug",
+                    severity="warning",
+                    body="🔴 **Bug**",
+                )
+            ]
+        )
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._fetch_thread_mapping = MagicMock(return_value={})
+
+            count = client.resolve_fixed_comments(mock_pr, delta)
+
+        # Should not post again
+        assert count == 0
+        mock_pr.create_review_comment_reply.assert_not_called()
 
     def test_resolve_thread_for_comment_uses_mapping(self):
         """Test that thread resolution uses pre-fetched mapping."""

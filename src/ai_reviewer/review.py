@@ -311,8 +311,7 @@ def aggregate_findings(
 
         # Consensus score based on unique agents that found this issue
         total_agents = len(all_findings)
-        consensus_score = len(agreeing_agents) / \
-            total_agents if total_agents > 0 else 1.0
+        consensus_score = len(agreeing_agents) / total_agents if total_agents > 0 else 1.0
 
         finding = ConsolidatedFinding(
             id=f"finding-{len(consolidated) + 1}",
@@ -334,8 +333,7 @@ def aggregate_findings(
     consolidated.sort(key=lambda f: f.priority_score, reverse=True)
 
     # Build combined summary
-    combined_summary = "\n".join(
-        summaries) if summaries else "Review completed"
+    combined_summary = "\n".join(summaries) if summaries else "Review completed"
 
     # Compute quality score from consensus and agent count
     total_agents = len(all_findings)
@@ -344,8 +342,7 @@ def aggregate_findings(
         quality_score = min(0.95, 0.7 + total_agents * 0.1)
     else:
         # With findings: score based on average consensus weighted by agent coverage
-        avg_consensus = sum(
-            f.consensus_score for f in consolidated) / len(consolidated)
+        avg_consensus = sum(f.consensus_score for f in consolidated) / len(consolidated)
         agent_factor = min(1.0, total_agents / 3)  # Full credit at 3+ agents
         quality_score = round(avg_consensus * agent_factor, 2)
 
@@ -435,14 +432,12 @@ async def review_pr_with_cursor_agent(
         all_findings = [("cursor-agent", raw_findings, summary)]
     else:
         # Multi-agent review
-        logger.info(
-            f"Running {len(agents_to_run)} specialized agents in parallel...")
+        logger.info(f"Running {len(agents_to_run)} specialized agents in parallel...")
 
         async with CursorClient(cursor_config) as client:
             tasks = []
             for agent_config in agents_to_run:
-                prompt = base_prompt + \
-                    agent_config["prompt_addition"] + output_format
+                prompt = base_prompt + agent_config["prompt_addition"] + output_format
 
                 def make_status_callback(name: str):
                     def callback(status: str):

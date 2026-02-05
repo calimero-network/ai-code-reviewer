@@ -73,10 +73,26 @@ class TestClusterRawFindings:
         """Similar findings from different agents are clustered together."""
         # Use identical titles/descriptions to ensure clustering
         tagged = [
-            ("agent-1", {"file_path": "a.py", "line_start": 10, "category": "security",
-                         "title": "SQL Injection vulnerability", "description": "User input in query"}),
-            ("agent-2", {"file_path": "a.py", "line_start": 10, "category": "security",
-                         "title": "SQL Injection vulnerability", "description": "User input in query"}),
+            (
+                "agent-1",
+                {
+                    "file_path": "a.py",
+                    "line_start": 10,
+                    "category": "security",
+                    "title": "SQL Injection vulnerability",
+                    "description": "User input in query",
+                },
+            ),
+            (
+                "agent-2",
+                {
+                    "file_path": "a.py",
+                    "line_start": 10,
+                    "category": "security",
+                    "title": "SQL Injection vulnerability",
+                    "description": "User input in query",
+                },
+            ),
         ]
         clusters = _cluster_raw_findings(tagged)
         assert len(clusters) == 1
@@ -86,10 +102,26 @@ class TestClusterRawFindings:
         """Multiple similar findings from same agent are also clustered."""
         # Use identical content with overlapping lines
         tagged = [
-            ("agent-1", {"file_path": "a.py", "line_start": 10, "category": "security",
-                         "title": "SQL Injection vulnerability", "description": "Dangerous query"}),
-            ("agent-1", {"file_path": "a.py", "line_start": 12, "category": "security",
-                         "title": "SQL Injection vulnerability", "description": "Dangerous query"}),
+            (
+                "agent-1",
+                {
+                    "file_path": "a.py",
+                    "line_start": 10,
+                    "category": "security",
+                    "title": "SQL Injection vulnerability",
+                    "description": "Dangerous query",
+                },
+            ),
+            (
+                "agent-1",
+                {
+                    "file_path": "a.py",
+                    "line_start": 12,
+                    "category": "security",
+                    "title": "SQL Injection vulnerability",
+                    "description": "Dangerous query",
+                },
+            ),
         ]
         clusters = _cluster_raw_findings(tagged)
         # Both findings are similar (same file, overlapping lines within tolerance, same category, same title)
@@ -99,10 +131,24 @@ class TestClusterRawFindings:
     def test_keeps_different_findings_separate(self):
         """Different findings are kept in separate clusters."""
         tagged = [
-            ("agent-1", {"file_path": "a.py", "line_start": 10,
-             "category": "security", "title": "SQL Injection"}),
-            ("agent-2", {"file_path": "b.py", "line_start": 50,
-             "category": "performance", "title": "Slow loop"}),
+            (
+                "agent-1",
+                {
+                    "file_path": "a.py",
+                    "line_start": 10,
+                    "category": "security",
+                    "title": "SQL Injection",
+                },
+            ),
+            (
+                "agent-2",
+                {
+                    "file_path": "b.py",
+                    "line_start": 50,
+                    "category": "performance",
+                    "title": "Slow loop",
+                },
+            ),
         ]
         clusters = _cluster_raw_findings(tagged)
         assert len(clusters) == 2
@@ -121,12 +167,30 @@ class TestAggregateFindingsConsensus:
         # Use identical titles/descriptions so they cluster together
         all_findings = [
             # Agent A has 2 similar findings (same file, overlapping lines, same category, identical text)
-            ("agent-A", [
-                {"file_path": "auth.py", "line_start": 10, "line_end": 12, "category": "security",
-                 "severity": "warning", "title": "SQL Injection vulnerability", "description": "User input in query"},
-                {"file_path": "auth.py", "line_start": 11, "line_end": 13, "category": "security",
-                 "severity": "warning", "title": "SQL Injection vulnerability", "description": "User input in query"},
-            ], "Agent A summary"),
+            (
+                "agent-A",
+                [
+                    {
+                        "file_path": "auth.py",
+                        "line_start": 10,
+                        "line_end": 12,
+                        "category": "security",
+                        "severity": "warning",
+                        "title": "SQL Injection vulnerability",
+                        "description": "User input in query",
+                    },
+                    {
+                        "file_path": "auth.py",
+                        "line_start": 11,
+                        "line_end": 13,
+                        "category": "security",
+                        "severity": "warning",
+                        "title": "SQL Injection vulnerability",
+                        "description": "User input in query",
+                    },
+                ],
+                "Agent A summary",
+            ),
             # Agents B and C have no findings
             ("agent-B", [], "Agent B: no issues"),
             ("agent-C", [], "Agent C: no issues"),
@@ -150,14 +214,34 @@ class TestAggregateFindingsConsensus:
         """
         # Use identical text so they cluster together
         all_findings = [
-            ("agent-A", [
-                {"file_path": "auth.py", "line_start": 10, "category": "security",
-                 "severity": "critical", "title": "SQL Injection vulnerability", "description": "User input in query"},
-            ], "Agent A summary"),
-            ("agent-B", [
-                {"file_path": "auth.py", "line_start": 10, "category": "security",
-                 "severity": "critical", "title": "SQL Injection vulnerability", "description": "User input in query"},
-            ], "Agent B summary"),
+            (
+                "agent-A",
+                [
+                    {
+                        "file_path": "auth.py",
+                        "line_start": 10,
+                        "category": "security",
+                        "severity": "critical",
+                        "title": "SQL Injection vulnerability",
+                        "description": "User input in query",
+                    },
+                ],
+                "Agent A summary",
+            ),
+            (
+                "agent-B",
+                [
+                    {
+                        "file_path": "auth.py",
+                        "line_start": 10,
+                        "category": "security",
+                        "severity": "critical",
+                        "title": "SQL Injection vulnerability",
+                        "description": "User input in query",
+                    },
+                ],
+                "Agent B summary",
+            ),
             ("agent-C", [], "Agent C: no issues"),
         ]
 
@@ -177,16 +261,42 @@ class TestAggregateFindingsConsensus:
         """
         # Use identical text so all three findings cluster together
         all_findings = [
-            ("agent-A", [
-                {"file_path": "auth.py", "line_start": 10, "category": "security",
-                 "severity": "warning", "title": "SQL Injection vulnerability", "description": "User input in query"},
-                {"file_path": "auth.py", "line_start": 11, "category": "security",
-                 "severity": "warning", "title": "SQL Injection vulnerability", "description": "User input in query"},
-            ], "Agent A summary"),
-            ("agent-B", [
-                {"file_path": "auth.py", "line_start": 10, "category": "security",
-                 "severity": "warning", "title": "SQL Injection vulnerability", "description": "User input in query"},
-            ], "Agent B summary"),
+            (
+                "agent-A",
+                [
+                    {
+                        "file_path": "auth.py",
+                        "line_start": 10,
+                        "category": "security",
+                        "severity": "warning",
+                        "title": "SQL Injection vulnerability",
+                        "description": "User input in query",
+                    },
+                    {
+                        "file_path": "auth.py",
+                        "line_start": 11,
+                        "category": "security",
+                        "severity": "warning",
+                        "title": "SQL Injection vulnerability",
+                        "description": "User input in query",
+                    },
+                ],
+                "Agent A summary",
+            ),
+            (
+                "agent-B",
+                [
+                    {
+                        "file_path": "auth.py",
+                        "line_start": 10,
+                        "category": "security",
+                        "severity": "warning",
+                        "title": "SQL Injection vulnerability",
+                        "description": "User input in query",
+                    },
+                ],
+                "Agent B summary",
+            ),
         ]
 
         result = aggregate_findings(all_findings, "test/repo", 123)
@@ -204,23 +314,52 @@ class TestAggregateFindingsConsensus:
         """Full consensus when all agents find the same issue."""
         # Use identical text so all findings cluster together
         all_findings = [
-            ("agent-A", [
-                {"file_path": "auth.py", "line_start": 10, "category": "security",
-                 "severity": "critical", "title": "SQL Injection vulnerability", "description": "User input in query"},
-            ], "A"),
-            ("agent-B", [
-                {"file_path": "auth.py", "line_start": 10, "category": "security",
-                 "severity": "critical", "title": "SQL Injection vulnerability", "description": "User input in query"},
-            ], "B"),
-            ("agent-C", [
-                {"file_path": "auth.py", "line_start": 10, "category": "security",
-                 "severity": "critical", "title": "SQL Injection vulnerability", "description": "User input in query"},
-            ], "C"),
+            (
+                "agent-A",
+                [
+                    {
+                        "file_path": "auth.py",
+                        "line_start": 10,
+                        "category": "security",
+                        "severity": "critical",
+                        "title": "SQL Injection vulnerability",
+                        "description": "User input in query",
+                    },
+                ],
+                "A",
+            ),
+            (
+                "agent-B",
+                [
+                    {
+                        "file_path": "auth.py",
+                        "line_start": 10,
+                        "category": "security",
+                        "severity": "critical",
+                        "title": "SQL Injection vulnerability",
+                        "description": "User input in query",
+                    },
+                ],
+                "B",
+            ),
+            (
+                "agent-C",
+                [
+                    {
+                        "file_path": "auth.py",
+                        "line_start": 10,
+                        "category": "security",
+                        "severity": "critical",
+                        "title": "SQL Injection vulnerability",
+                        "description": "User input in query",
+                    },
+                ],
+                "C",
+            ),
         ]
 
         result = aggregate_findings(all_findings, "test/repo", 123)
 
         assert len(result.findings) == 1
-        assert result.findings[0].consensus_score == pytest.approx(
-            1.0, rel=0.01)
+        assert result.findings[0].consensus_score == pytest.approx(1.0, rel=0.01)
         assert len(result.findings[0].agreeing_agents) == 3

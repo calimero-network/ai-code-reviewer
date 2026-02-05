@@ -8,8 +8,7 @@ class PerformanceAgent(ReviewAgent):
 
     MODEL = "gpt-5.2"
     AGENT_TYPE = "gpt4-performance"
-    FOCUS_AREAS = ["performance", "complexity",
-                   "resource_management", "efficiency"]
+    FOCUS_AREAS = ["performance", "complexity", "resource_management", "efficiency"]
 
     SYSTEM_PROMPT = """You are an expert performance engineer reviewing code for efficiency issues.
 
