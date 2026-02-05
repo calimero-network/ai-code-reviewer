@@ -200,10 +200,10 @@ def _raw_lines_overlap(raw1: dict, raw2: dict, tolerance: int = 5) -> bool:
     """Check if two raw findings have overlapping or close line ranges."""
     start1 = int(raw1.get("line_start", 1))
     end1 = raw1.get("line_end")
-    end1 = int(end1) if end1 is not None else start1
+    end1 = int(end1) if end1 else start1
     start2 = int(raw2.get("line_start", 1))
     end2 = raw2.get("line_end")
-    end2 = int(end2) if end2 is not None else start2
+    end2 = int(end2) if end2 else start2
     return not (end1 + tolerance < start2 or end2 + tolerance < start1)
 
 
@@ -296,7 +296,8 @@ def aggregate_findings(
     for cluster in finding_clusters:
         # Use the first finding as base, but track all agreeing agents
         agent_name, raw = cluster[0]
-        agreeing_agents = [a for a, _ in cluster]
+        # Deduplicate agents - a single agent may have multiple similar findings clustered
+        agreeing_agents = list(dict.fromkeys(a for a, _ in cluster))
 
         try:
             severity = Severity(raw.get("severity", "suggestion").lower())
@@ -308,9 +309,9 @@ def aggregate_findings(
         except ValueError:
             category = Category.LOGIC
 
-        # Consensus score based on how many agents found this
+        # Consensus score based on unique agents that found this issue
         total_agents = len(all_findings)
-        consensus_score = len(cluster) / \
+        consensus_score = len(agreeing_agents) / \
             total_agents if total_agents > 0 else 1.0
 
         finding = ConsolidatedFinding(

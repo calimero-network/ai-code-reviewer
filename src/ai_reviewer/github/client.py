@@ -330,7 +330,6 @@ class GitHubClient:
     # Known AI reviewer bot usernames
     AI_REVIEWER_USERS = {
         "github-actions[bot]",
-        "cursor[bot]",
     }
 
     def get_previous_review_comments(self, pr: PullRequest) -> list[PreviousComment]:
@@ -353,11 +352,10 @@ class GitHubClient:
 
             user_login = comment.user.login
 
-            # Check if from known AI reviewer OR has AI reviewer format
-            is_ai_reviewer = user_login in allowed_users
-            has_ai_format = self._is_ai_reviewer_comment(comment.body)
-
-            if not (is_ai_reviewer or has_ai_format):
+            # Only process comments authored by our bot - never human or other bot comments.
+            # Using format-based matching (has_ai_format) caused false positives where we
+            # would reply "Resolved" to human comments that happened to use similar formatting.
+            if user_login not in allowed_users:
                 continue
 
             # Parse the comment to extract title and severity
@@ -367,19 +365,6 @@ class GitHubClient:
 
         logger.info(f"Found {len(comments)} previous AI review comments")
         return comments
-
-    def _is_ai_reviewer_comment(self, body: str) -> bool:
-        """Check if a comment looks like it came from an AI reviewer.
-
-        Args:
-            body: Comment body
-
-        Returns:
-            True if it matches AI reviewer format
-        """
-        # Check for severity emojis that we use
-        ai_markers = ["🔴", "🟡", "💡", "📝", "**Suggested fix:**", "AI Code Reviewer"]
-        return any(marker in body for marker in ai_markers)
 
     def _parse_review_comment(self, comment: PullRequestComment) -> PreviousComment | None:
         """Parse a review comment to extract structured data.
@@ -457,10 +442,38 @@ class GitHubClient:
                 # This is a NEW finding
                 delta.new_findings.append(finding)
 
-        # Any previous comments not matched are FIXED
+        # Determine which unmatched previous comments are likely fixed.
+        # We mark as fixed when:
+        # 1. The file is no longer in the diff (removed/renamed), OR
+        # 2. The commented line was modified AND the AI didn't find the issue again
+        #
+        # This avoids false "Resolved" on unmodified code while still detecting
+        # actual fixes when the relevant lines were changed.
+        pr_files = list(pr.get_files())
+        changed_files = {f.filename for f in pr_files}
+
+        # Build a mapping of file -> modified lines
+        file_modified_lines: dict[str, set[int]] = {}
+        for f in pr_files:
+            if f.patch:
+                file_modified_lines[f.filename] = self._parse_modified_lines(
+                    f.patch)
+
         for comment in previous_comments:
             if comment.id not in matched_previous:
-                delta.fixed_findings.append(comment)
+                file_path = comment.file_path
+
+                if file_path not in changed_files:
+                    # File was removed/renamed - definitely fixed
+                    delta.fixed_findings.append(comment)
+                elif file_path in file_modified_lines:
+                    # File is still in diff - check if the commented line was modified
+                    modified_lines = file_modified_lines[file_path]
+                    if self._is_line_in_modified_range(comment.line, modified_lines):
+                        # The line was modified AND the AI didn't find the issue again
+                        # → likely fixed
+                        delta.fixed_findings.append(comment)
+                # else: file in diff but line wasn't modified → don't mark as fixed
 
         logger.info(
             f"Review delta: {len(delta.new_findings)} new, "
@@ -480,6 +493,63 @@ class GitHubClient:
             Normalized title (lowercase, stripped)
         """
         return title.lower().strip()
+
+    def _parse_modified_lines(self, patch: str) -> set[int]:
+        """Parse a unified diff patch to extract modified line numbers.
+
+        Args:
+            patch: Unified diff patch string
+
+        Returns:
+            Set of line numbers that were added or modified in the new version
+        """
+        modified_lines: set[int] = set()
+        if not patch:
+            return modified_lines
+
+        current_line = 0
+        for line in patch.split("\n"):
+            # Parse hunk header: @@ -old_start,old_count +new_start,new_count @@
+            if line.startswith("@@"):
+                # Extract new file line number
+                match = re.search(r"\+(\d+)", line)
+                if match:
+                    current_line = int(match.group(1))
+                continue
+
+            if line.startswith("+") and not line.startswith("+++"):
+                # Added line - this is a modification
+                modified_lines.add(current_line)
+                current_line += 1
+            elif line.startswith("-") and not line.startswith("---"):
+                # Deleted line - don't increment (it's not in the new file)
+                # But mark the current position as "modified" since something changed here
+                modified_lines.add(current_line)
+            else:
+                # Context line or other - increment line counter
+                # Skip "\ No newline at end of file"
+                if not line.startswith("\\"):
+                    current_line += 1
+
+        return modified_lines
+
+    def _is_line_in_modified_range(
+        self, line: int, modified_lines: set[int], tolerance: int = 3
+    ) -> bool:
+        """Check if a line number falls within or near modified lines.
+
+        Args:
+            line: Line number to check
+            modified_lines: Set of modified line numbers
+            tolerance: How many lines away still counts as "near"
+
+        Returns:
+            True if the line is within tolerance of any modified line
+        """
+        for mod_line in modified_lines:
+            if abs(line - mod_line) <= tolerance:
+                return True
+        return False
 
     def _graphql_request(self, query: str, variables: dict | None = None) -> dict | None:
         """Make a GraphQL request to GitHub API.
@@ -719,11 +789,18 @@ class GitHubClient:
                     comment_id=fixed.id,
                     body="✅ **Resolved** - This issue has been addressed in the latest changes.",
                 )
+
+                # Hand-in-hand: also resolve the thread in GitHub UI (collapse the conversation).
+                # Without this, the reply would show but the thread would stay "open".
+                if not self._resolve_thread_for_comment(fixed.id, thread_mapping):
+                    logger.warning(
+                        f"Posted 'Resolved' reply on comment {fixed.id} but could not "
+                        "resolve the thread (GraphQL resolve failed or thread not found). "
+                        "Thread may still appear open in the PR."
+                    )
+
                 resolved_count += 1
                 logger.debug(f"Marked comment {fixed.id} as resolved")
-
-                # Resolve the thread via GraphQL (uses pre-fetched mapping)
-                self._resolve_thread_for_comment(fixed.id, thread_mapping)
             except Exception as e:
                 logger.warning(f"Could not resolve comment {fixed.id}: {e}")
 
