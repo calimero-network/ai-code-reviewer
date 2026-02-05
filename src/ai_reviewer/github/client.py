@@ -456,8 +456,7 @@ class GitHubClient:
         file_modified_lines: dict[str, set[int]] = {}
         for f in pr_files:
             if f.patch:
-                file_modified_lines[f.filename] = self._parse_modified_lines(
-                    f.patch)
+                file_modified_lines[f.filename] = self._parse_modified_lines(f.patch)
 
         for comment in previous_comments:
             if comment.id not in matched_previous:
@@ -566,7 +565,8 @@ class GitHubClient:
             # GitHub Enterprise: /api/v3 -> /api/graphql
             base = self._base_url.rstrip("/")
             if base.endswith("/api/v3"):
-                graphql_url = base[:-3] + "/graphql"  # Replace /v3 with /graphql
+                # Replace /v3 with /graphql
+                graphql_url = base[:-3] + "/graphql"
             else:
                 graphql_url = f"{base}/graphql"
         else:
@@ -598,9 +598,7 @@ class GitHubClient:
     # Maximum pages to fetch when paginating GraphQL results (prevents runaway loops)
     _MAX_GRAPHQL_PAGES = 20
 
-    def _fetch_thread_mapping(
-        self, repo_name: str, pr_number: int
-    ) -> dict[int, str]:
+    def _fetch_thread_mapping(self, repo_name: str, pr_number: int) -> dict[int, str]:
         """Fetch all review threads and build a mapping of comment_id to thread_id.
 
         This batches the GraphQL calls to avoid N+1 queries when resolving multiple
@@ -771,9 +769,12 @@ class GitHubClient:
         thread_mapping = self._fetch_thread_mapping(repo_name, pr.number)
 
         for fixed in delta.fixed_findings:
-            # Skip if we've already marked this as resolved
+            # Skip if we've already marked this as resolved (avoid duplicate "Resolved" on re-review)
             if fixed.id in existing_replies:
                 logger.debug(f"Comment {fixed.id} already has resolved reply, skipping")
+                continue
+            if self._comment_already_has_resolved_reply(fixed.id, raw_comments):
+                logger.debug(f"Comment {fixed.id} already has resolved reply (re-check), skipping")
                 continue
 
             try:
@@ -846,3 +847,31 @@ class GitHubClient:
             resolved_ids.add(reply_to)
 
         return resolved_ids
+
+    def _comment_already_has_resolved_reply(
+        self,
+        comment_id: int,
+        raw_comments: list,
+    ) -> bool:
+        """Check if a comment already has a 'Resolved' reply from us in the given list.
+
+        Used as a safeguard before posting to avoid duplicate Resolved replies
+        (e.g. when the same thread is marked fixed on every re-review).
+
+        Args:
+            comment_id: The original comment (finding) ID
+            raw_comments: Full list of PR review comments
+
+        Returns:
+            True if we already posted a Resolved reply to this comment
+        """
+        allowed_users = self._get_allowed_users()
+        for c in raw_comments:
+            reply_to = getattr(c, "in_reply_to_id", None)
+            if reply_to is None or not isinstance(reply_to, int) or reply_to != comment_id:
+                continue
+            if "✅ **Resolved**" not in (c.body or ""):
+                continue
+            if c.user and c.user.login and c.user.login in allowed_users:
+                return True
+        return False
