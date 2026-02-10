@@ -561,6 +561,37 @@ class TestResolveFixedComments:
         assert len(delta.fixed_findings) == 1
         assert delta.fixed_findings[0].file_path == "src/removed.py"
 
+    def test_compute_review_delta_fixes_when_deleted_file_has_no_patch(self):
+        """Test that we mark as fixed when the file was deleted but has no patch (binary/large)."""
+        from ai_reviewer.github.client import GitHubClient, PreviousComment
+
+        mock_pr = MagicMock()
+        # Deleted file in diff - no patch (binary or large file)
+        mock_file = MagicMock()
+        mock_file.filename = "src/deleted.bin"
+        mock_file.patch = None  # No patch for binary/large/deleted files
+        mock_file.status = "removed"
+        mock_pr.get_files.return_value = [mock_file]
+
+        prev_deleted = PreviousComment(
+            id=1,
+            file_path="src/deleted.bin",
+            line=5,
+            title="Issue in binary file",
+            severity="warning",
+            body="🟡 **Issue in binary file**\n\nIssue",
+        )
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client.get_previous_review_comments = MagicMock(return_value=[prev_deleted])
+
+            delta = client.compute_review_delta(mock_pr, [])
+
+        # File deleted (status=removed), no patch → fixed
+        assert len(delta.fixed_findings) == 1
+        assert delta.fixed_findings[0].file_path == "src/deleted.bin"
+
     def test_compute_review_delta_fixes_when_line_modified(self):
         """Test that we mark as fixed when the commented line was modified."""
         from ai_reviewer.github.client import GitHubClient, PreviousComment
@@ -669,31 +700,6 @@ class TestResolveFixedComments:
 
             # Line 20 is outside tolerance
             assert client._is_line_in_modified_range(20, modified_lines, tolerance=3) is False
-
-    def test_comment_already_has_resolved_reply_true_when_reply_exists(self):
-        """_comment_already_has_resolved_reply returns True when we already replied."""
-        from ai_reviewer.github.client import GitHubClient
-
-        with patch("ai_reviewer.github.client.Github"):
-            client = GitHubClient(token="test-token")
-
-            # Original finding comment
-            original = MagicMock()
-            original.id = 100
-            original.body = "🔴 **Bug**"
-            original.in_reply_to_id = None
-
-            # Our Resolved reply to 100
-            reply = MagicMock()
-            reply.id = 101
-            reply.body = "✅ **Resolved** - This issue has been addressed"
-            reply.in_reply_to_id = 100
-            reply.user.login = "github-actions[bot]"
-
-            raw_comments = [original, reply]
-
-            assert client._comment_already_has_resolved_reply(100, raw_comments) is True
-            assert client._comment_already_has_resolved_reply(999, raw_comments) is False
 
     def test_resolve_fixed_comments_skips_when_already_replied(self):
         """resolve_fixed_comments does not post a second Resolved reply."""
