@@ -445,14 +445,16 @@ class GitHubClient:
         # Determine which unmatched previous comments are likely fixed.
         # We mark as fixed when:
         # 1. The file is no longer in the diff (removed/renamed), OR
-        # 2. The commented line was modified AND the AI didn't find the issue again
+        # 2. The file was deleted (status=removed) - no patch for binary/large files, OR
+        # 3. The commented line was modified AND the AI didn't find the issue again
         #
         # This avoids false "Resolved" on unmodified code while still detecting
         # actual fixes when the relevant lines were changed.
         pr_files = list(pr.get_files())
         changed_files = {f.filename for f in pr_files}
+        removed_files = {f.filename for f in pr_files if getattr(f, "status", None) == "removed"}
 
-        # Build a mapping of file -> modified lines
+        # Build a mapping of file -> modified lines (only for files with patches)
         file_modified_lines: dict[str, set[int]] = {}
         for f in pr_files:
             if f.patch:
@@ -464,6 +466,9 @@ class GitHubClient:
 
                 if file_path not in changed_files:
                     # File was removed/renamed - definitely fixed
+                    delta.fixed_findings.append(comment)
+                elif file_path in removed_files:
+                    # File was deleted (no patch for binary/large files) - definitely fixed
                     delta.fixed_findings.append(comment)
                 elif file_path in file_modified_lines:
                     # File is still in diff - check if the commented line was modified
@@ -773,9 +778,6 @@ class GitHubClient:
             if fixed.id in existing_replies:
                 logger.debug(f"Comment {fixed.id} already has resolved reply, skipping")
                 continue
-            if self._comment_already_has_resolved_reply(fixed.id, raw_comments):
-                logger.debug(f"Comment {fixed.id} already has resolved reply (re-check), skipping")
-                continue
 
             try:
                 # Find the comment and reply to it
@@ -847,31 +849,3 @@ class GitHubClient:
             resolved_ids.add(reply_to)
 
         return resolved_ids
-
-    def _comment_already_has_resolved_reply(
-        self,
-        comment_id: int,
-        raw_comments: list,
-    ) -> bool:
-        """Check if a comment already has a 'Resolved' reply from us in the given list.
-
-        Used as a safeguard before posting to avoid duplicate Resolved replies
-        (e.g. when the same thread is marked fixed on every re-review).
-
-        Args:
-            comment_id: The original comment (finding) ID
-            raw_comments: Full list of PR review comments
-
-        Returns:
-            True if we already posted a Resolved reply to this comment
-        """
-        allowed_users = self._get_allowed_users()
-        for c in raw_comments:
-            reply_to = getattr(c, "in_reply_to_id", None)
-            if reply_to is None or not isinstance(reply_to, int) or reply_to != comment_id:
-                continue
-            if "✅ **Resolved**" not in (c.body or ""):
-                continue
-            if c.user and c.user.login and c.user.login in allowed_users:
-                return True
-        return False
