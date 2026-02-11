@@ -1,4 +1,19 @@
-"""Main review flow using Cursor Background Agent API with multi-agent support."""
+"""Main review flow using Cursor Background Agent API with multi-agent support.
+
+Review standard (embedded in prompts):
+- Favor approving when the CL improves overall code health; no perfectionism.
+- Use severity nitpick and prefix "Nit: " for optional/style points.
+- Comment on the code not the author; be courteous; explain why when asking for a change.
+
+What to look for (order of impact): Design → Functionality → Complexity → Tests
+→ Naming, comments (why not what), style, consistency, documentation.
+
+Design principles considered (when relevant): SOLID, DRY, KISS, YAGNI,
+Composition over Inheritance, Law of Demeter, Convention over Configuration.
+Only flag violations that meaningfully hurt maintainability or clarity.
+
+Severity semantics: see ai_reviewer.models.findings.Severity.
+"""
 
 import asyncio
 import json
@@ -55,15 +70,8 @@ Ignore security and style issues unless they cause bugs.
         "name": "quality-agent",
         "focus": "quality",
         "prompt_addition": """
-**YOUR FOCUS: CODE QUALITY & PATTERNS**
-You are a code quality reviewer. Focus ONLY on:
-- API design and consistency
-- Error handling patterns
-- Code organization and maintainability
-- Missing tests for critical paths
-- Documentation accuracy
-
-Ignore security vulnerabilities and performance unless severe.
+**YOUR FOCUS: CODE QUALITY & DESIGN PRINCIPLES**
+You are a code quality reviewer. Focus on the design principles listed above (SOLID, DRY, KISS, YAGNI, Composition over Inheritance, Law of Demeter) and on: API design, error handling patterns, maintainability, tests for critical paths, documentation. Ignore security and performance unless they affect maintainability or correctness.
 """,
     },
 ]
@@ -106,7 +114,19 @@ def get_base_prompt(
         for path, content in list(file_contents.items())[:5]:
             files_context += f"\n### {path}\n```\n{content[:5000]}\n```\n"
 
+    review_standard = """
+**Review standard:** Favor approving when the CL improves overall code health, even if it isn't perfect. There is no "perfect" code—only better code. Do not block on minor polish. For optional or style-only points, use severity "nitpick" and prefix the title with "Nit: " so the author knows it's optional. Comment on the code, not the author; be courteous and explain *why* when asking for a change.
+"""
+    what_to_look_for = """
+**What to look for (in order of impact):** Design (does the change make sense and integrate well?) → Functionality (edge cases, concurrency, correct behavior) → Complexity (no over-engineering) → Tests (present and meaningful) → Naming, comments (explain why, not what), style, consistency with existing code, documentation if behavior/build/test changes.
+"""
+    design_principles = """
+**Design principles to consider (when relevant):** SOLID (single responsibility, open/closed, Liskov substitution, interface segregation, dependency inversion); DRY (no duplicate logic—extract and reuse); KISS (keep it simple; avoid over-engineering); YAGNI (don't add code for hypothetical future needs); Composition over Inheritance (prefer composing over deep hierarchies); Law of Demeter (talk to immediate collaborators only, avoid long chains); Convention over Configuration where it fits. Only flag violations that meaningfully hurt maintainability or clarity—use "Nit:" for minor style preferences.
+"""
     return f"""You are performing a **code review** of a pull request.
+{review_standard}
+{what_to_look_for}
+{design_principles}
 {pr_type_instruction}
 ## Pull Request Information
 - **Repository**: {context.repo_name}
@@ -132,9 +152,10 @@ def get_output_format(pr_type: str = "code") -> str:
     concise_rules = [
         "- Be concise: one short sentence per finding description. Do not repeat the same point.",
         "- Only report issues on changed lines; do not suggest pre-existing improvements.",
-        "- Use \"critical\" only for security bugs or data corruption risks.",
+        "- **Severity semantics:** critical = must fix (security bugs or data corruption risks only); warning = should fix (other serious correctness or maintainability issues); suggestion = consider; nitpick = optional polish—always prefix title with \"Nit: \" for nitpicks.",
         "- If the code looks good for your focus area, return empty findings array.",
         "- Maximum 5 findings per agent.",
+        "- If something is done well (e.g. clear naming, good tests), mention it briefly in the summary.",
     ]
     if pr_type == "docs":
         concise_rules.append(
@@ -157,13 +178,13 @@ You MUST respond with a single valid JSON object (no markdown fences around it):
     "line_end": 45,
     "severity": "critical|warning|suggestion|nitpick",
     "category": "security|performance|logic|style|architecture|testing|documentation",
-    "title": "Short descriptive title",
-    "description": "One concise sentence describing the issue",
+    "title": "Short descriptive title (use \\"Nit: \\" prefix for nitpick severity)",
+    "description": "One concise sentence; explain why it matters when helpful",
     "suggested_fix": "How to fix it (optional)",
     "confidence": 0.95
   }}
 ],
-"summary": "One brief sentence overall."
+"summary": "One brief sentence. Include one positive if something is done well."
 }}
 
 **Rules**:
