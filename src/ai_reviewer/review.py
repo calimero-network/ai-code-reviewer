@@ -194,6 +194,153 @@ Analyze the PR and output your JSON review.
 """
 
 
+# --- Cross-review round (agents validate and rank each other's findings) ---
+
+# Max findings to send in cross-review (avoid huge prompts)
+_CROSS_REVIEW_MAX_FINDINGS = 20
+# Max diff chars in cross-review prompt
+_CROSS_REVIEW_DIFF_MAX_CHARS = 15000
+
+
+def get_cross_review_prompt(
+    context: ReviewContext,
+    review: ConsolidatedReview,
+    diff: str,
+) -> str:
+    """Build prompt for cross-review round: validate findings and rank by importance."""
+    findings_blob = []
+    for i, f in enumerate(review.findings[: _CROSS_REVIEW_MAX_FINDINGS], 1):
+        line_ref = f"{f.line_start}" + (f"-{f.line_end}" if f.line_end else "")
+        findings_blob.append(
+            f"{i}. [id={f.id}] {f.file_path}:{line_ref} [{f.severity.value}] {f.title}\n   {f.description}"
+        )
+    findings_text = "\n".join(findings_blob)
+
+    return f"""You are in a **cross-review round**. Multiple agents already produced the findings below for this PR. Your job is to validate them and rank by importance.
+
+## PR
+- **Repo**: {context.repo_name} | **PR #{context.pr_number}**: {context.pr_title}
+- **Changes**: +{context.additions}/-{context.deletions} in {context.changed_files_count} files
+
+## Code diff (excerpt)
+```diff
+{diff[:_CROSS_REVIEW_DIFF_MAX_CHARS]}
+```
+
+## Findings to validate and rank
+{findings_text}
+
+For each finding, decide:
+1. **Valid** (true/false): Does it make sense? Does it follow review best practices (concrete, actionable, not nitpicky)? Would you keep it in the final report?
+2. **Rank** (integer): Importance for the author, 1 = most important. Ties allowed.
+
+Output the list of assessments in the exact JSON format below (use the finding `id` from the list, e.g. finding-1, finding-2).
+"""
+
+
+def get_cross_review_output_format() -> str:
+    """JSON schema for cross-review round response."""
+    return '''
+## Output format (valid JSON only, no markdown fences)
+{"assessments": [{"id": "finding-1", "valid": true, "rank": 1}, {"id": "finding-2", "valid": false, "rank": 5}, ...], "summary": "One sentence on overall quality of the findings."}
+
+- "id" must match the finding id from the list (e.g. finding-1, finding-2).
+- "valid": true if the finding should stay in the report, false if it should be dropped or is not actionable.
+- "rank": integer, 1 = most important. Lower rank = higher priority.
+- Include every finding id from the list in assessments.
+'''
+
+
+def parse_cross_review_response(content: str) -> tuple[list[dict[str, Any]], str]:
+    """Parse cross-review JSON into list of {id, valid, rank} and summary."""
+    content = content.strip()
+    if "```json" in content:
+        match = re.search(r"```json\s*([\s\S]*?)```", content)
+        if match:
+            content = match.group(1).strip()
+    elif "```" in content:
+        match = re.search(r"```\s*([\s\S]*?)```", content)
+        if match:
+            content = match.group(1).strip()
+    json_match = re.search(r'\{[\s\S]*"assessments"[\s\S]*\}', content)
+    if json_match:
+        content = json_match.group(0)
+    try:
+        data = json.loads(content)
+        assessments = data.get("assessments", [])
+        summary = data.get("summary", "")
+        return assessments, summary
+    except json.JSONDecodeError as e:
+        logger.warning(f"Failed to parse cross-review JSON: {e}")
+        return [], ""
+
+
+def apply_cross_review(
+    review: ConsolidatedReview,
+    all_assessments: list[tuple[str, list[dict[str, Any]]]],
+    min_validation_agreement: float = 0.5,
+) -> ConsolidatedReview:
+    """Filter and re-rank findings using cross-review assessments.
+
+    - Drops findings where the fraction of agents that said valid is < min_validation_agreement.
+    - Re-orders by average rank (1 = first), then by severity.
+    """
+    if not all_assessments:
+        return review
+
+    finding_ids = [f.id for f in review.findings]
+    id_to_finding = {f.id: f for f in review.findings}
+
+    # Per finding: list of (valid, rank) from each agent
+    id_to_votes: dict[str, list[tuple[bool, int]]] = {fid: [] for fid in finding_ids}
+
+    for _agent_name, assessments in all_assessments:
+        for a in assessments:
+            fid = a.get("id") or a.get("finding_id")
+            if not fid or fid not in id_to_finding:
+                continue
+            valid = a.get("valid", True)
+            rank = a.get("rank", 99)
+            if isinstance(rank, (int, float)):
+                rank = max(1, int(rank))
+            else:
+                rank = 99
+            id_to_votes[fid].append((valid, rank))
+
+    n_agents = len(all_assessments)
+    kept: list[tuple[ConsolidatedFinding, float, float]] = []  # (finding, valid_ratio, avg_rank)
+
+    for fid in finding_ids:
+        votes = id_to_votes.get(fid, [])
+        if not votes:
+            kept.append((id_to_finding[fid], 1.0, 99.0))
+            continue
+        valid_count = sum(1 for v, _ in votes if v)
+        valid_ratio = valid_count / n_agents if n_agents else 1.0
+        if valid_ratio < min_validation_agreement:
+            continue  # Drop finding
+        avg_rank = sum(r for _, r in votes) / len(votes) if votes else 99.0
+        kept.append((id_to_finding[fid], valid_ratio, avg_rank))
+
+    # Sort by avg_rank ascending, then by severity (critical first)
+    severity_order = {Severity.CRITICAL: 0, Severity.WARNING: 1, Severity.SUGGESTION: 2, Severity.NITPICK: 3}
+    kept.sort(key=lambda x: (x[2], severity_order.get(x[0].severity, 4)))
+
+    new_findings = [x[0] for x in kept]
+    return ConsolidatedReview(
+        id=review.id,
+        created_at=review.created_at,
+        repo=review.repo,
+        pr_number=review.pr_number,
+        findings=new_findings,
+        summary=review.summary + "\n\nCross-validated and re-ranked by all agents.",
+        agent_count=review.agent_count,
+        review_quality_score=review.review_quality_score,
+        total_review_time_ms=review.total_review_time_ms,
+        failed_agents=review.failed_agents,
+    )
+
+
 def parse_review_response(content: str) -> tuple[list[dict], str]:
     """Parse the agent's response into findings and summary."""
     content = content.strip()
@@ -421,6 +568,42 @@ def aggregate_findings(
     )
 
 
+async def run_cross_review_round(
+    client: CursorClient,
+    repo_url: str,
+    ref: str,
+    review: ConsolidatedReview,
+    context: ReviewContext,
+    diff: str,
+    agents_to_run: list[dict],
+    on_status: Callable[..., Any] | None = None,
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Run cross-review: each agent validates and ranks the consolidated findings."""
+    if not review.findings:
+        return []
+
+    cross_prompt = get_cross_review_prompt(context, review, diff) + get_cross_review_output_format()
+    results: list[tuple[str, list[dict[str, Any]]]] = []
+
+    for agent_config in agents_to_run:
+        name = agent_config["name"]
+        try:
+            if on_status:
+                on_status(f"Cross-review: {name}")
+            result = await client.run_review_agent(
+                repo_url=repo_url,
+                ref=ref,
+                prompt=cross_prompt,
+                on_status=on_status,
+            )
+            assessments, _ = parse_cross_review_response(result.content)
+            results.append((name, assessments))
+        except Exception as e:
+            logger.warning(f"Cross-review agent {name} failed: {e}")
+
+    return results
+
+
 async def review_pr_with_cursor_agent(
     repo: str,
     pr_number: int,
@@ -428,6 +611,8 @@ async def review_pr_with_cursor_agent(
     github_token: str,
     on_status: Callable[..., Any] | None = None,
     num_agents: int = 1,
+    enable_cross_review: bool = True,
+    min_validation_agreement: float = 0.5,
 ) -> ConsolidatedReview:
     """Review a PR using Cursor Background Agent(s).
 
@@ -438,6 +623,9 @@ async def review_pr_with_cursor_agent(
         github_token: GitHub token for PR access
         on_status: Optional callback for status updates
         num_agents: Number of agents to run (1-3)
+        enable_cross_review: If True (default) and num_agents > 1, run a second round where
+            agents validate and rank findings; drop low-agreement and re-order by rank.
+        min_validation_agreement: Fraction of agents that must mark a finding valid to keep it (0-1).
 
     Returns:
         ConsolidatedReview with findings
@@ -526,6 +714,34 @@ async def review_pr_with_cursor_agent(
 
     # Aggregate findings
     review = aggregate_findings(list(all_findings), repo, pr_number)
+
+    # Optional: cross-review round (agents validate and rank findings)
+    if (
+        enable_cross_review
+        and num_agents > 1
+        and review.findings
+        and not review.all_agents_failed
+    ):
+        logger.info("Running cross-review round (validate and rank findings)...")
+        async with CursorClient(cursor_config) as client:
+            cross_results = await run_cross_review_round(
+                client=client,
+                repo_url=repo_url,
+                ref=pr.base.ref,
+                review=review,
+                context=context,
+                diff=diff,
+                agents_to_run=agents_to_run,
+                on_status=on_status,
+            )
+        if cross_results:
+            review = apply_cross_review(
+                review, cross_results, min_validation_agreement
+            )
+            logger.info(
+                f"Cross-review done: {len(review.findings)} findings after validation"
+            )
+
     review.total_review_time_ms = int((time.time() - start_time) * 1000)
 
     logger.info(

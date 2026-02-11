@@ -57,6 +57,12 @@ def cli(verbose: bool) -> None:
     "--reviewer-name", default="AI Code Reviewer", help="Custom name to display in review header"
 )
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
+@click.option(
+    "--no-cross-review",
+    "no_cross_review",
+    is_flag=True,
+    help="Disable second round where agents validate and rank findings (default: cross-review on when --agents>=2)",
+)
 def review_pr(
     repo: str,
     pr_number: int,
@@ -66,12 +72,14 @@ def review_pr(
     no_approve: bool,
     reviewer_name: str,
     config_path: str | None,
+    no_cross_review: bool,
 ) -> None:
     """Review a GitHub pull request using Cursor AI agent(s).
 
     With --agents=1 (default): Single comprehensive review
-    With --agents=2: Security + Performance agents
-    With --agents=3: Security + Performance + Quality agents
+    With --agents=2: Security + Performance agents (cross-review on by default)
+    With --agents=3: Security + Performance + Quality agents (cross-review on by default)
+    Use --no-cross-review to skip the second round (validate & rank findings).
     """
     asyncio.run(
         review_pr_async(
@@ -83,6 +91,7 @@ def review_pr(
             no_approve=no_approve,
             reviewer_name=reviewer_name,
             config_path=Path(config_path) if config_path else None,
+            enable_cross_review=not no_cross_review,
         )
     )
 
@@ -96,6 +105,7 @@ async def review_pr_async(
     no_approve: bool = False,
     reviewer_name: str = "AI Code Reviewer",
     config_path: Path | None = None,
+    enable_cross_review: bool = True,
 ) -> None:
     """Async implementation of PR review using Cursor Background Agent(s)."""
     # Auto-detect GitHub Actions environment - never allow APPROVE there
@@ -120,6 +130,11 @@ async def review_pr_async(
         console.print(
             f"[yellow]Using {num_agents} specialized agents: {', '.join(agent_types)} (3-8 min)[/yellow]"
         )
+    if num_agents > 1:
+        if enable_cross_review:
+            console.print("[dim]Cross-review enabled: agents will validate and rank findings[/dim]")
+        else:
+            console.print("[dim]Cross-review disabled[/dim]")
 
     # Status callback
     last_status = [None]
@@ -144,6 +159,8 @@ async def review_pr_async(
             github_token=config.github.token,
             on_status=on_status,
             num_agents=num_agents,
+            enable_cross_review=enable_cross_review,
+            min_validation_agreement=0.5,
         )
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
