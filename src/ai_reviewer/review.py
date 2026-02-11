@@ -55,15 +55,17 @@ Ignore security and style issues unless they cause bugs.
         "name": "quality-agent",
         "focus": "quality",
         "prompt_addition": """
-**YOUR FOCUS: CODE QUALITY & PATTERNS**
+**YOUR FOCUS: CODE QUALITY & DESIGN PRINCIPLES**
 You are a code quality reviewer. Focus ONLY on:
-- API design and consistency
-- Error handling patterns
-- Code organization and maintainability
-- Missing tests for critical paths
-- Documentation accuracy
+- SOLID: single responsibility, open/closed, Liskov, interface segregation, dependency inversion
+- DRY: duplicate logic that should be extracted; unnecessary repetition
+- KISS: over-engineering, unnecessary complexity or abstraction
+- YAGNI: code added for hypothetical future needs
+- Composition over Inheritance: rigid inheritance where composition would be clearer
+- Law of Demeter: long chains of calls (a.b.c.d); coupling to distant objects
+- API design, error handling patterns, maintainability, tests for critical paths, documentation
 
-Ignore security vulnerabilities and performance unless severe.
+Ignore security and performance unless they affect maintainability or correctness.
 """,
     },
 ]
@@ -106,7 +108,19 @@ def get_base_prompt(
         for path, content in list(file_contents.items())[:5]:
             files_context += f"\n### {path}\n```\n{content[:5000]}\n```\n"
 
+    review_standard = """
+**Review standard:** Favor approving when the CL improves overall code health, even if it isn't perfect. There is no "perfect" code—only better code. Do not block on minor polish. For optional or style-only points, use severity "nitpick" and prefix the title with "Nit: " so the author knows it's optional. Comment on the code, not the author; be courteous and explain *why* when asking for a change.
+"""
+    what_to_look_for = """
+**What to look for (in order of impact):** Design (does the change make sense and integrate well?) → Functionality (edge cases, concurrency, correct behavior) → Complexity (no over-engineering) → Tests (present and meaningful) → Naming, comments (explain why, not what), style, consistency with existing code, documentation if behavior/build/test changes.
+"""
+    design_principles = """
+**Design principles to consider (when relevant):** SOLID (single responsibility, open/closed, Liskov substitution, interface segregation, dependency inversion); DRY (no duplicate logic—extract and reuse); KISS (keep it simple; avoid over-engineering); YAGNI (don't add code for hypothetical future needs); Composition over Inheritance (prefer composing over deep hierarchies); Law of Demeter (talk to immediate collaborators only, avoid long chains); Convention over Configuration where it fits. Only flag violations that meaningfully hurt maintainability or clarity—use "Nit:" for minor style preferences.
+"""
     return f"""You are performing a **code review** of a pull request.
+{review_standard}
+{what_to_look_for}
+{design_principles}
 {pr_type_instruction}
 ## Pull Request Information
 - **Repository**: {context.repo_name}
@@ -132,9 +146,11 @@ def get_output_format(pr_type: str = "code") -> str:
     concise_rules = [
         "- Be concise: one short sentence per finding description. Do not repeat the same point.",
         "- Only report issues on changed lines; do not suggest pre-existing improvements.",
+        "- **Severity semantics:** critical = must fix (security/correctness); warning = should fix; suggestion = consider; nitpick = optional polish—always prefix title with \"Nit: \" for nitpicks.",
         "- Use \"critical\" only for security bugs or data corruption risks.",
         "- If the code looks good for your focus area, return empty findings array.",
         "- Maximum 5 findings per agent.",
+        "- If something is done well (e.g. clear naming, good tests), mention it briefly in the summary.",
     ]
     if pr_type == "docs":
         concise_rules.append(
@@ -157,13 +173,13 @@ You MUST respond with a single valid JSON object (no markdown fences around it):
     "line_end": 45,
     "severity": "critical|warning|suggestion|nitpick",
     "category": "security|performance|logic|style|architecture|testing|documentation",
-    "title": "Short descriptive title",
-    "description": "One concise sentence describing the issue",
+    "title": "Short descriptive title (use \\"Nit: \\" prefix for nitpick severity)",
+    "description": "One concise sentence; explain why it matters when helpful",
     "suggested_fix": "How to fix it (optional)",
     "confidence": 0.95
   }}
 ],
-"summary": "One brief sentence overall."
+"summary": "One brief sentence. Include one positive if something is done well."
 }}
 
 **Rules**:
