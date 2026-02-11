@@ -4,9 +4,27 @@ import pytest
 
 from ai_reviewer.review import (
     _cluster_raw_findings,
+    _detect_pr_type,
     _raw_findings_similar,
     aggregate_findings,
 )
+
+
+class TestDetectPrType:
+    """Tests for _detect_pr_type."""
+
+    def test_docs_only_markdown(self):
+        assert _detect_pr_type(["README.md"]) == "docs"
+        assert _detect_pr_type(["docs/a.md", "docs/b.mdx"]) == "docs"
+
+    def test_ci_only_workflows(self):
+        assert _detect_pr_type([".github/workflows/ci.yml"]) == "ci"
+        assert _detect_pr_type([".github/dependabot.yaml"]) == "ci"
+
+    def test_code_mixed_or_rust(self):
+        assert _detect_pr_type(["src/lib.rs"]) == "code"
+        assert _detect_pr_type(["README.md", "src/main.py"]) == "code"
+        assert _detect_pr_type([]) == "code"
 
 
 class TestRawFindingsSimilar:

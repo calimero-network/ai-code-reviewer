@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -164,12 +165,22 @@ def _setup_default_review_handler() -> None:
             formatter = GitHubFormatter("AI Code Reviewer")
 
             delta = gh.compute_review_delta(pr, review.findings)
+            new_findings = delta.new_findings if delta.previous_comments else review.findings
+            use_compact_body = len(new_findings) > 0
 
             if delta.previous_comments:
-                body = formatter.format_review_with_delta(review, delta)
+                body = (
+                    formatter.format_review_with_delta_compact(review, delta)
+                    if use_compact_body
+                    else formatter.format_review_with_delta(review, delta)
+                )
                 action = formatter.get_review_action_with_delta(review, delta, allow_approve=False)
             else:
-                body = formatter.format_review(review)
+                body = (
+                    formatter.format_review_compact(review)
+                    if use_compact_body
+                    else formatter.format_review(review)
+                )
                 action = formatter.get_review_action(review, allow_approve=False)
 
             gh.post_review(pr, review, body, action)
@@ -180,8 +191,6 @@ def _setup_default_review_handler() -> None:
                 resolved = gh.resolve_fixed_comments(pr, delta)
                 logger.info(f"Resolved {resolved} comments")
 
-            # Post inline comments for new findings
-            new_findings = delta.new_findings if delta.previous_comments else review.findings
             if new_findings:
                 from ai_reviewer.models.review import ConsolidatedReview as CR
 
@@ -265,17 +274,20 @@ def create_webhook_app(webhook_secret: str | None = None) -> FastAPI:
     @app.post("/webhook")
     async def github_webhook(request: Request):
         """Handle GitHub webhook events."""
-        # Verify signature if secret is configured
+        # Read body once (required for signature verification and parsing)
+        body = await request.body()
+
         if webhook_secret:
             signature = request.headers.get("X-Hub-Signature-256", "")
-            body = await request.body()
-
             if not verify_signature(body, signature, webhook_secret):
                 raise HTTPException(status_code=401, detail="Invalid signature")
 
-        # Parse event
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError as e:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {e}") from e
+
         event_type = request.headers.get("X-GitHub-Event", "")
-        payload = await request.json()
 
         if event_type == "pull_request":
             pr_event = PREvent(

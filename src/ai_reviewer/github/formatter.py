@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
+from ai_reviewer.github.client import ReviewDelta
 from ai_reviewer.models.findings import Severity
 from ai_reviewer.models.review import ConsolidatedReview
-
-if TYPE_CHECKING:
-    from ai_reviewer.github.client import ReviewDelta
 
 
 class GitHubFormatter:
@@ -89,6 +85,67 @@ class GitHubFormatter:
         )
 
         return "\n".join(lines)
+
+    def format_review_compact(self, review: ConsolidatedReview) -> str:
+        """Format a minimal top-level body when inline comments are posted.
+
+        Use this when posting findings as inline comments so the PR-level
+        comment stays short; details live on the code.
+        """
+        header = self._format_header(review)
+        if not review.findings:
+            body = "✅ No issues found. LGTM!"
+        else:
+            by_sev = review.findings_by_severity
+            parts = []
+            if by_sev.get(Severity.CRITICAL, 0) > 0:
+                parts.append(f"🔴 {by_sev[Severity.CRITICAL]} critical")
+            if by_sev.get(Severity.WARNING, 0) > 0:
+                parts.append(f"🟡 {by_sev[Severity.WARNING]} warnings")
+            if by_sev.get(Severity.SUGGESTION, 0) > 0:
+                parts.append(f"💡 {by_sev[Severity.SUGGESTION]} suggestions")
+            if by_sev.get(Severity.NITPICK, 0) > 0:
+                parts.append(f"📝 {by_sev[Severity.NITPICK]} nitpicks")
+            body = (", ".join(parts) + ". See inline comments.") if parts else "See inline comments."
+        return "\n".join([
+            f"## 🤖 {self.reviewer_name}",
+            "",
+            header,
+            "",
+            body,
+            "",
+            "---",
+            "",
+            self._format_footer(review),
+        ])
+
+    def format_review_with_delta_compact(
+        self, review: ConsolidatedReview, delta: ReviewDelta
+    ) -> str:
+        """Format a minimal top-level body when inline comments are posted (with delta)."""
+        header = self._format_header(review)
+        if delta.all_issues_resolved:
+            body = "✅ All issues resolved. Ready to merge!"
+        else:
+            parts = []
+            if delta.fixed_findings:
+                parts.append(f"✅ {len(delta.fixed_findings)} fixed")
+            if delta.new_findings:
+                parts.append(f"🆕 {len(delta.new_findings)} new")
+            if delta.open_findings:
+                parts.append(f"⏳ {len(delta.open_findings)} open")
+            body = (" | ".join(parts) + ". See inline comments.") if parts else "See inline comments."
+        return "\n".join([
+            f"## 🤖 {self.reviewer_name}",
+            "",
+            header,
+            "",
+            body,
+            "",
+            "---",
+            "",
+            self._format_footer(review),
+        ])
 
     def _format_header(self, review: ConsolidatedReview) -> str:
         """Format the review header."""
