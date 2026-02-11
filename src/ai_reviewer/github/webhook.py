@@ -140,10 +140,32 @@ def _setup_default_review_handler() -> None:
             logger.error("GITHUB_TOKEN not set")
             return
 
+        try:
+            cursor_timeout = int(os.environ.get("CURSOR_TIMEOUT", "300"))
+        except ValueError:
+            cursor_timeout = 300
+            logger.warning("CURSOR_TIMEOUT invalid, using default 300")
+
+        try:
+            num_agents = int(os.environ.get("NUM_AGENTS", "3"))
+        except ValueError:
+            num_agents = 3
+            logger.warning("NUM_AGENTS invalid, using default 3")
+
+        try:
+            min_agreement = float(os.environ.get("MIN_VALIDATION_AGREEMENT", str(2 / 3)))
+        except ValueError:
+            min_agreement = 2 / 3
+            logger.warning("MIN_VALIDATION_AGREEMENT invalid, using default 2/3")
+
         cursor_config = CursorConfig(
             api_key=cursor_api_key,
             base_url=os.environ.get("CURSOR_BASE_URL", "https://api.cursor.com/v0"),
-            timeout=int(os.environ.get("CURSOR_TIMEOUT", "300")),
+            timeout=cursor_timeout,
+        )
+
+        enable_cross_review = (
+            os.environ.get("ENABLE_CROSS_REVIEW", "true").lower() != "false"
         )
 
         try:
@@ -152,12 +174,9 @@ def _setup_default_review_handler() -> None:
                 pr_number=pr_number,
                 cursor_config=cursor_config,
                 github_token=github_token,
-                num_agents=int(os.environ.get("NUM_AGENTS", "3")),
-                enable_cross_review=os.environ.get("ENABLE_CROSS_REVIEW", "true").lower()
-                != "false",
-                min_validation_agreement=float(
-                    os.environ.get("MIN_VALIDATION_AGREEMENT", str(2 / 3))
-                ),
+                num_agents=num_agents,
+                enable_cross_review=enable_cross_review,
+                min_validation_agreement=min_agreement,
             )
 
             if review.all_agents_failed:

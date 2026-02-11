@@ -333,9 +333,10 @@ def apply_cross_review(
 
     new_findings = [x[0] for x in kept]
     n_dropped = len(review.findings) - len(new_findings)
-    original_ids = [f.id for f in review.findings]
     new_ids = [f.id for f in new_findings]
-    order_changed = original_ids != new_ids
+    # Compare only relative order of retained findings (avoid false positive when findings dropped)
+    remaining_original_order = [f.id for f in review.findings if f.id in set(new_ids)]
+    order_changed = remaining_original_order != new_ids
 
     summary = review.summary
     if n_dropped > 0 or order_changed:

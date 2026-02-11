@@ -410,6 +410,9 @@ class GitHubFormatter:
     ) -> str:
         """Determine GitHub review action considering the delta.
 
+        LGTM-with-comments: REQUEST_CHANGES only for critical findings. When there are
+        only warnings, suggestions, or nitpicks, returns COMMENT so the author isn't blocked.
+
         Args:
             review: Consolidated review
             delta: Review delta
@@ -418,24 +421,24 @@ class GitHubFormatter:
         Returns:
             GitHub review action
         """
-        # If all issues are resolved, approve (if allowed)
         if delta.all_issues_resolved and allow_approve:
             return "APPROVE"
 
-        # If there are critical issues (new or open), request changes
-        # But only if allow_approve is True (i.e., not in GitHub Actions)
-        # GitHub Actions can't approve, and REQUEST_CHANGES blocks merging
+        # Block merge only when there are critical findings (not warnings/suggestions/nitpicks)
         has_critical = any(
             f.severity.value == "critical" for f in delta.new_findings + delta.open_findings
         )
         if has_critical and allow_approve:
             return "REQUEST_CHANGES"
 
-        # In GitHub Actions or no critical issues, just comment
+        # No critical: COMMENT (includes only nits/suggestions/warnings — don't block author)
         return "COMMENT"
 
     def get_review_action(self, review: ConsolidatedReview, allow_approve: bool = True) -> str:
         """Determine the GitHub review action based on findings.
+
+        LGTM-with-comments: REQUEST_CHANGES only for critical findings. When there are
+        only warnings, suggestions, or nitpicks, returns COMMENT so the author isn't blocked.
 
         Args:
             review: Consolidated review
@@ -445,14 +448,12 @@ class GitHubFormatter:
         Returns:
             GitHub review action: "APPROVE", "REQUEST_CHANGES", or "COMMENT"
         """
-        # REQUEST_CHANGES blocks merging - only use when allow_approve is True
-        # (i.e., running locally with proper permissions)
+        if not review.findings and allow_approve:
+            return "APPROVE"
+        # Block merge only on critical; warnings/suggestions/nitpicks → COMMENT
         if review.has_critical_issues and allow_approve:
             return "REQUEST_CHANGES"
-        elif not review.findings and allow_approve:
-            return "APPROVE"
-        else:
-            return "COMMENT"
+        return "COMMENT"
 
 
 def format_review_as_json(review: ConsolidatedReview) -> dict:

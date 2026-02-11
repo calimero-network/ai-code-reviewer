@@ -304,6 +304,79 @@ class TestReviewFormatter:
         # This is intentional - REQUEST_CHANGES blocks merging and Actions can't approve to unblock
         assert formatter.get_review_action(critical_review, allow_approve=False) == "COMMENT"
 
+        # LGTM-with-comments: only nits/suggestions (no critical/warning) → COMMENT (don't block author)
+        nits_only_review = ConsolidatedReview(
+            id="review-nits",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[
+                ConsolidatedFinding(
+                    id="f1",
+                    file_path="test.py",
+                    line_start=1,
+                    line_end=2,
+                    severity=Severity.SUGGESTION,
+                    category=Category.STYLE,
+                    title="Consider renaming",
+                    description="Optional",
+                    suggested_fix=None,
+                    consensus_score=0.5,
+                    agreeing_agents=["a1"],
+                    confidence=0.8,
+                ),
+                ConsolidatedFinding(
+                    id="f2",
+                    file_path="test.py",
+                    line_start=3,
+                    line_end=3,
+                    severity=Severity.NITPICK,
+                    category=Category.STYLE,
+                    title="Nit: trailing space",
+                    description="Style",
+                    suggested_fix=None,
+                    consensus_score=0.3,
+                    agreeing_agents=["a1"],
+                    confidence=0.7,
+                ),
+            ],
+            summary="Minor suggestions",
+            agent_count=2,
+            review_quality_score=0.9,
+            total_review_time_ms=1500,
+        )
+        assert formatter.get_review_action(nits_only_review) == "COMMENT"
+        assert formatter.get_review_action(nits_only_review, allow_approve=True) == "COMMENT"
+
+        # Only warnings (no critical) → COMMENT (we don't block on warnings)
+        warnings_only_review = ConsolidatedReview(
+            id="review-warn",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[
+                ConsolidatedFinding(
+                    id="f1",
+                    file_path="test.py",
+                    line_start=1,
+                    line_end=1,
+                    severity=Severity.WARNING,
+                    category=Category.LOGIC,
+                    title="Edge case",
+                    description="Consider handling",
+                    suggested_fix=None,
+                    consensus_score=1.0,
+                    agreeing_agents=["a1"],
+                    confidence=0.85,
+                ),
+            ],
+            summary="One warning",
+            agent_count=1,
+            review_quality_score=0.85,
+            total_review_time_ms=1000,
+        )
+        assert formatter.get_review_action(warnings_only_review) == "COMMENT"
+
 
 class TestResolveFixedComments:
     """Tests for duplicate detection and resolved comment handling."""
