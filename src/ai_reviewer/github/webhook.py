@@ -5,12 +5,31 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from fastapi import FastAPI, HTTPException, Request
 
 logger = logging.getLogger(__name__)
+
+
+def _get_env_int(key: str, default: int) -> int:
+    """Parse env var as int; on ValueError log and return default."""
+    try:
+        return int(os.environ.get(key, str(default)))
+    except ValueError:
+        logger.warning("%s invalid, using default %s", key, default)
+        return default
+
+
+def _get_env_float(key: str, default: float) -> float:
+    """Parse env var as float; on ValueError log and return default."""
+    try:
+        return float(os.environ.get(key, str(default)))
+    except ValueError:
+        logger.warning("%s invalid, using default %s", key, default)
+        return default
 
 
 @dataclass
@@ -109,8 +128,6 @@ def _setup_default_review_handler() -> None:
     This is used when running as a standalone server (e.g., Cloud Run)
     without the CLI's explicit handler setup.
     """
-    import os
-
     from ai_reviewer.review import review_pr_with_cursor_agent
     from ai_reviewer.agents.cursor_client import CursorConfig
     from ai_reviewer.github.client import GitHubClient
@@ -140,10 +157,18 @@ def _setup_default_review_handler() -> None:
             logger.error("GITHUB_TOKEN not set")
             return
 
+        cursor_timeout = _get_env_int("CURSOR_TIMEOUT", 300)
+        num_agents = _get_env_int("NUM_AGENTS", 3)
+        min_agreement = _get_env_float("MIN_VALIDATION_AGREEMENT", 2 / 3)
+
         cursor_config = CursorConfig(
             api_key=cursor_api_key,
             base_url=os.environ.get("CURSOR_BASE_URL", "https://api.cursor.com/v0"),
-            timeout=int(os.environ.get("CURSOR_TIMEOUT", "300")),
+            timeout=cursor_timeout,
+        )
+
+        enable_cross_review = (
+            os.environ.get("ENABLE_CROSS_REVIEW", "true").lower() != "false"
         )
 
         try:
@@ -152,7 +177,9 @@ def _setup_default_review_handler() -> None:
                 pr_number=pr_number,
                 cursor_config=cursor_config,
                 github_token=github_token,
-                num_agents=int(os.environ.get("NUM_AGENTS", "1")),
+                num_agents=num_agents,
+                enable_cross_review=enable_cross_review,
+                min_validation_agreement=min_agreement,
             )
 
             if review.all_agents_failed:

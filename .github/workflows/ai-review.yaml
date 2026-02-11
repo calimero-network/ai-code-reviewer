@@ -16,7 +16,7 @@ on:
       agents:
         description: 'Number of agents (1-3)'
         required: false
-        default: '2'
+        default: '3'
         type: choice
         options:
           - '1'
@@ -63,7 +63,7 @@ jobs:
             echo "agents=${{ github.event.inputs.agents }}" >> $GITHUB_OUTPUT
           else
             echo "number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
-            echo "agents=2" >> $GITHUB_OUTPUT
+            echo "agents=3" >> $GITHUB_OUTPUT
           fi
 
       - name: Run AI Code Review
