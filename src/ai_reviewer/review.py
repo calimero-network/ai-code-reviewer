@@ -71,16 +71,7 @@ Ignore security and style issues unless they cause bugs.
         "focus": "quality",
         "prompt_addition": """
 **YOUR FOCUS: CODE QUALITY & DESIGN PRINCIPLES**
-You are a code quality reviewer. Focus ONLY on:
-- SOLID: single responsibility, open/closed, Liskov, interface segregation, dependency inversion
-- DRY: duplicate logic that should be extracted; unnecessary repetition
-- KISS: over-engineering, unnecessary complexity or abstraction
-- YAGNI: code added for hypothetical future needs
-- Composition over Inheritance: rigid inheritance where composition would be clearer
-- Law of Demeter: long chains of calls (a.b.c.d); coupling to distant objects
-- API design, error handling patterns, maintainability, tests for critical paths, documentation
-
-Ignore security and performance unless they affect maintainability or correctness.
+You are a code quality reviewer. Focus on the design principles listed above (SOLID, DRY, KISS, YAGNI, Composition over Inheritance, Law of Demeter) and on: API design, error handling patterns, maintainability, tests for critical paths, documentation. Ignore security and performance unless they affect maintainability or correctness.
 """,
     },
 ]
@@ -161,8 +152,7 @@ def get_output_format(pr_type: str = "code") -> str:
     concise_rules = [
         "- Be concise: one short sentence per finding description. Do not repeat the same point.",
         "- Only report issues on changed lines; do not suggest pre-existing improvements.",
-        "- **Severity semantics:** critical = must fix (security/correctness); warning = should fix; suggestion = consider; nitpick = optional polish—always prefix title with \"Nit: \" for nitpicks.",
-        "- Use \"critical\" only for security bugs or data corruption risks.",
+        "- **Severity semantics:** critical = must fix (security bugs or data corruption risks only); warning = should fix (other serious correctness or maintainability issues); suggestion = consider; nitpick = optional polish—always prefix title with \"Nit: \" for nitpicks.",
         "- If the code looks good for your focus area, return empty findings array.",
         "- Maximum 5 findings per agent.",
         "- If something is done well (e.g. clear naming, good tests), mention it briefly in the summary.",

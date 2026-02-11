@@ -7,13 +7,13 @@ from enum import Enum
 class Severity(Enum):
     """Severity levels for findings. Canonical semantics for prompts and formatting.
 
-    - CRITICAL: Must fix before merge (security, correctness). Required.
-    - WARNING: Should fix; real risk or maintainability. Expected to fix.
+    - CRITICAL: Must fix before merge (security bugs or data corruption risks only).
+    - WARNING: Should fix; other serious correctness or maintainability issues.
     - SUGGESTION: Consider; improves code health. Optional but recommended.
     - NITPICK: Optional polish or style; prompt instructs to prefix title with "Nit: ".
     """
 
-    CRITICAL = "critical"  # Must fix before merge
+    CRITICAL = "critical"  # Security or data corruption only
     WARNING = "warning"  # Should fix, potential issues
     SUGGESTION = "suggestion"  # Nice to have improvements
     NITPICK = "nitpick"  # Style/formatting only; use "Nit: " prefix in title
