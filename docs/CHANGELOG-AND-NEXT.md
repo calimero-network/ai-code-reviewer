@@ -18,7 +18,7 @@
 - **Quality agent:** Explicit focus on SOLID, DRY, KISS, YAGNI, Composition over Inheritance, Law of Demeter, plus API design, error handling, maintainability, tests, documentation.
 
 ### Docs
-- **REVIEW-STANDARD-ENHANCEMENTS.md:** Documents Google mapping, severity semantics, design principles table, and what’s implemented.
+- **review.py** module docstring and **models/findings.Severity** docstring document the review standard, design principles, and severity semantics (single source of truth in code).
 
 ---
 

@@ -1,4 +1,19 @@
-"""Main review flow using Cursor Background Agent API with multi-agent support."""
+"""Main review flow using Cursor Background Agent API with multi-agent support.
+
+Review standard (embedded in prompts):
+- Favor approving when the CL improves overall code health; no perfectionism.
+- Use severity nitpick and prefix "Nit: " for optional/style points.
+- Comment on the code not the author; be courteous; explain why when asking for a change.
+
+What to look for (order of impact): Design → Functionality → Complexity → Tests
+→ Naming, comments (why not what), style, consistency, documentation.
+
+Design principles considered (when relevant): SOLID, DRY, KISS, YAGNI,
+Composition over Inheritance, Law of Demeter, Convention over Configuration.
+Only flag violations that meaningfully hurt maintainability or clarity.
+
+Severity semantics: see ai_reviewer.models.findings.Severity.
+"""
 
 import asyncio
 import json
