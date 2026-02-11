@@ -208,6 +208,12 @@ def get_cross_review_prompt(
     diff: str,
 ) -> str:
     """Build prompt for cross-review round: validate findings and rank by importance."""
+    if len(review.findings) > _CROSS_REVIEW_MAX_FINDINGS:
+        logger.info(
+            "Cross-review limited to first %s of %s findings",
+            _CROSS_REVIEW_MAX_FINDINGS,
+            len(review.findings),
+        )
     findings_blob = []
     for i, f in enumerate(review.findings[: _CROSS_REVIEW_MAX_FINDINGS], 1):
         line_ref = f"{f.line_start}" + (f"-{f.line_end}" if f.line_end else "")

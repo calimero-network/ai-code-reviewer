@@ -5,12 +5,31 @@ import hashlib
 import hmac
 import json
 import logging
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from fastapi import FastAPI, HTTPException, Request
 
 logger = logging.getLogger(__name__)
+
+
+def _get_env_int(key: str, default: int) -> int:
+    """Parse env var as int; on ValueError log and return default."""
+    try:
+        return int(os.environ.get(key, str(default)))
+    except ValueError:
+        logger.warning("%s invalid, using default %s", key, default)
+        return default
+
+
+def _get_env_float(key: str, default: float) -> float:
+    """Parse env var as float; on ValueError log and return default."""
+    try:
+        return float(os.environ.get(key, str(default)))
+    except ValueError:
+        logger.warning("%s invalid, using default %s", key, default)
+        return default
 
 
 @dataclass
@@ -109,8 +128,6 @@ def _setup_default_review_handler() -> None:
     This is used when running as a standalone server (e.g., Cloud Run)
     without the CLI's explicit handler setup.
     """
-    import os
-
     from ai_reviewer.review import review_pr_with_cursor_agent
     from ai_reviewer.agents.cursor_client import CursorConfig
     from ai_reviewer.github.client import GitHubClient
@@ -140,23 +157,9 @@ def _setup_default_review_handler() -> None:
             logger.error("GITHUB_TOKEN not set")
             return
 
-        try:
-            cursor_timeout = int(os.environ.get("CURSOR_TIMEOUT", "300"))
-        except ValueError:
-            cursor_timeout = 300
-            logger.warning("CURSOR_TIMEOUT invalid, using default 300")
-
-        try:
-            num_agents = int(os.environ.get("NUM_AGENTS", "3"))
-        except ValueError:
-            num_agents = 3
-            logger.warning("NUM_AGENTS invalid, using default 3")
-
-        try:
-            min_agreement = float(os.environ.get("MIN_VALIDATION_AGREEMENT", str(2 / 3)))
-        except ValueError:
-            min_agreement = 2 / 3
-            logger.warning("MIN_VALIDATION_AGREEMENT invalid, using default 2/3")
+        cursor_timeout = _get_env_int("CURSOR_TIMEOUT", 300)
+        num_agents = _get_env_int("NUM_AGENTS", 3)
+        min_agreement = _get_env_float("MIN_VALIDATION_AGREEMENT", 2 / 3)
 
         cursor_config = CursorConfig(
             api_key=cursor_api_key,
