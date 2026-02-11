@@ -152,7 +152,7 @@ def _setup_default_review_handler() -> None:
                 pr_number=pr_number,
                 cursor_config=cursor_config,
                 github_token=github_token,
-                num_agents=int(os.environ.get("NUM_AGENTS", "1")),
+                num_agents=int(os.environ.get("NUM_AGENTS", "3")),
             )
 
             if review.all_agents_failed:

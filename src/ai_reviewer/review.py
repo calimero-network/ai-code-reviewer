@@ -327,13 +327,27 @@ def apply_cross_review(
     kept.sort(key=lambda x: (x[2], severity_order.get(x[0].severity, 4)))
 
     new_findings = [x[0] for x in kept]
+    n_dropped = len(review.findings) - len(new_findings)
+    original_ids = [f.id for f in review.findings]
+    new_ids = [f.id for f in new_findings]
+    order_changed = original_ids != new_ids
+
+    summary = review.summary
+    if n_dropped > 0 or order_changed:
+        parts = []
+        if n_dropped > 0:
+            parts.append(f"{n_dropped} finding(s) dropped by cross-review")
+        if order_changed:
+            parts.append("re-ranked by agent consensus")
+        summary = review.summary + "\n\nCross-review: " + "; ".join(parts) + "."
+
     return ConsolidatedReview(
         id=review.id,
         created_at=review.created_at,
         repo=review.repo,
         pr_number=review.pr_number,
         findings=new_findings,
-        summary=review.summary + "\n\nCross-validated and re-ranked by all agents.",
+        summary=summary,
         agent_count=review.agent_count,
         review_quality_score=review.review_quality_score,
         total_review_time_ms=review.total_review_time_ms,
@@ -568,6 +582,31 @@ def aggregate_findings(
     )
 
 
+async def _run_single_cross_review_agent(
+    client: CursorClient,
+    repo_url: str,
+    ref: str,
+    cross_prompt: str,
+    agent_name: str,
+    on_status: Callable[..., Any] | None,
+) -> tuple[str, list[dict[str, Any]] | None]:
+    """Run one agent's cross-review; returns (name, assessments) or (name, None) on failure."""
+    try:
+        if on_status:
+            on_status(f"Cross-review: {agent_name}")
+        result = await client.run_review_agent(
+            repo_url=repo_url,
+            ref=ref,
+            prompt=cross_prompt,
+            on_status=on_status,
+        )
+        assessments, _ = parse_cross_review_response(result.content)
+        return (agent_name, assessments)
+    except Exception as e:
+        logger.warning(f"Cross-review agent {agent_name} failed: {e}")
+        return (agent_name, None)
+
+
 async def run_cross_review_round(
     client: CursorClient,
     repo_url: str,
@@ -578,30 +617,24 @@ async def run_cross_review_round(
     agents_to_run: list[dict],
     on_status: Callable[..., Any] | None = None,
 ) -> list[tuple[str, list[dict[str, Any]]]]:
-    """Run cross-review: each agent validates and ranks the consolidated findings."""
+    """Run cross-review: each agent validates and ranks the consolidated findings (in parallel)."""
     if not review.findings:
         return []
 
     cross_prompt = get_cross_review_prompt(context, review, diff) + get_cross_review_output_format()
-    results: list[tuple[str, list[dict[str, Any]]]] = []
-
-    for agent_config in agents_to_run:
-        name = agent_config["name"]
-        try:
-            if on_status:
-                on_status(f"Cross-review: {name}")
-            result = await client.run_review_agent(
-                repo_url=repo_url,
-                ref=ref,
-                prompt=cross_prompt,
-                on_status=on_status,
-            )
-            assessments, _ = parse_cross_review_response(result.content)
-            results.append((name, assessments))
-        except Exception as e:
-            logger.warning(f"Cross-review agent {name} failed: {e}")
-
-    return results
+    tasks = [
+        _run_single_cross_review_agent(
+            client=client,
+            repo_url=repo_url,
+            ref=ref,
+            cross_prompt=cross_prompt,
+            agent_name=agent_config["name"],
+            on_status=on_status,
+        )
+        for agent_config in agents_to_run
+    ]
+    gathered = await asyncio.gather(*tasks)
+    return [(name, assessments) for name, assessments in gathered if assessments is not None]
 
 
 async def review_pr_with_cursor_agent(
@@ -610,7 +643,7 @@ async def review_pr_with_cursor_agent(
     cursor_config: CursorConfig,
     github_token: str,
     on_status: Callable[..., Any] | None = None,
-    num_agents: int = 1,
+    num_agents: int = 3,
     enable_cross_review: bool = True,
     min_validation_agreement: float = 0.5,
 ) -> ConsolidatedReview:

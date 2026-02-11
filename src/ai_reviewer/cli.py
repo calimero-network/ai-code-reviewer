@@ -48,7 +48,7 @@ def cli(verbose: bool) -> None:
 @click.option("--output", type=click.Choice(["github", "json", "markdown"]), default="github")
 @click.option("--dry-run", is_flag=True, help="Don't post to GitHub")
 @click.option(
-    "--agents", type=int, default=1, help="Number of agents (1-3): 1=comprehensive, 2+=specialized"
+    "--agents", type=int, default=3, help="Number of agents (1-3): 1=comprehensive, 2+=specialized (default: 3)"
 )
 @click.option(
     "--no-approve", is_flag=True, help="Don't use APPROVE action (auto-enabled in GitHub Actions)"
@@ -63,6 +63,13 @@ def cli(verbose: bool) -> None:
     is_flag=True,
     help="Disable second round where agents validate and rank findings (default: cross-review on when --agents>=2)",
 )
+@click.option(
+    "--min-agreement",
+    "min_agreement",
+    type=click.FloatRange(0.0, 1.0),
+    default=0.5,
+    help="Fraction of cross-review agents that must mark a finding valid to keep it (default: 0.5)",
+)
 def review_pr(
     repo: str,
     pr_number: int,
@@ -73,13 +80,15 @@ def review_pr(
     reviewer_name: str,
     config_path: str | None,
     no_cross_review: bool,
+    min_agreement: float,
 ) -> None:
     """Review a GitHub pull request using Cursor AI agent(s).
 
-    With --agents=1 (default): Single comprehensive review
+    With --agents=1: Single comprehensive review
     With --agents=2: Security + Performance agents (cross-review on by default)
-    With --agents=3: Security + Performance + Quality agents (cross-review on by default)
+    With --agents=3 (default): Security + Performance + Quality agents (cross-review on by default)
     Use --no-cross-review to skip the second round (validate & rank findings).
+    Use --min-agreement to tune how many agents must validate a finding to keep it (0-1).
     """
     asyncio.run(
         review_pr_async(
@@ -92,6 +101,7 @@ def review_pr(
             reviewer_name=reviewer_name,
             config_path=Path(config_path) if config_path else None,
             enable_cross_review=not no_cross_review,
+            min_validation_agreement=min_agreement,
         )
     )
 
@@ -101,11 +111,12 @@ async def review_pr_async(
     pr_number: int,
     output: str = "github",
     dry_run: bool = False,
-    num_agents: int = 1,
+    num_agents: int = 3,
     no_approve: bool = False,
     reviewer_name: str = "AI Code Reviewer",
     config_path: Path | None = None,
     enable_cross_review: bool = True,
+    min_validation_agreement: float = 0.5,
 ) -> None:
     """Async implementation of PR review using Cursor Background Agent(s)."""
     # Auto-detect GitHub Actions environment - never allow APPROVE there
@@ -160,7 +171,7 @@ async def review_pr_async(
             on_status=on_status,
             num_agents=num_agents,
             enable_cross_review=enable_cross_review,
-            min_validation_agreement=0.5,
+            min_validation_agreement=min_validation_agreement,
         )
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
