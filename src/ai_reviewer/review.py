@@ -262,8 +262,8 @@ def get_cross_review_output_format() -> str:
 '''
 
 
-def parse_cross_review_response(content: str) -> tuple[list[dict[str, Any]], str]:
-    """Parse cross-review JSON into list of {id, valid, rank} and summary."""
+def _extract_json_block(content: str, json_key: str) -> str:
+    """Extract JSON block from LLM response: strip, unwrap markdown fences, find object containing json_key (non-greedy)."""
     content = content.strip()
     if "```json" in content:
         match = re.search(r"```json\s*([\s\S]*?)```", content)
@@ -273,15 +273,17 @@ def parse_cross_review_response(content: str) -> tuple[list[dict[str, Any]], str
         match = re.search(r"```\s*([\s\S]*?)```", content)
         if match:
             content = match.group(1).strip()
-    # Greedy match; trailing content after JSON may be included—json.loads will fail and we return []
-    json_match = re.search(r'\{[\s\S]*"assessments"[\s\S]*\}', content)
-    if json_match:
-        content = json_match.group(0)
+    # Greedy match: one JSON object containing json_key (trailing content may be included; json.loads will fail and callers return []).
+    json_match = re.search(r'\{[\s\S]*' + re.escape(json_key) + r'[\s\S]*\}', content)
+    return json_match.group(0) if json_match else content
+
+
+def parse_cross_review_response(content: str) -> tuple[list[dict[str, Any]], str]:
+    """Parse cross-review JSON into list of {id, valid, rank} and summary."""
+    content = _extract_json_block(content, "assessments")
     try:
         data = json.loads(content)
-        assessments = data.get("assessments", [])
-        summary = data.get("summary", "")
-        return assessments, summary
+        return data.get("assessments", []), data.get("summary", "")
     except json.JSONDecodeError as e:
         logger.warning(f"Failed to parse cross-review JSON: {e}")
         return [], ""
@@ -386,28 +388,10 @@ def apply_cross_review(
 
 def parse_review_response(content: str) -> tuple[list[dict], str]:
     """Parse the agent's response into findings and summary."""
-    content = content.strip()
-
-    # Try to extract JSON from response
-    if "```json" in content:
-        match = re.search(r"```json\s*([\s\S]*?)```", content)
-        if match:
-            content = match.group(1).strip()
-    elif "```" in content:
-        match = re.search(r"```\s*([\s\S]*?)```", content)
-        if match:
-            content = match.group(1).strip()
-
-    # Try to find JSON object
-    json_match = re.search(r'\{[\s\S]*"findings"[\s\S]*\}', content)
-    if json_match:
-        content = json_match.group(0)
-
+    content = _extract_json_block(content, "findings")
     try:
         data = json.loads(content)
-        findings = data.get("findings", [])
-        summary = data.get("summary", "Review completed")
-        return findings, summary
+        return data.get("findings", []), data.get("summary", "Review completed")
     except json.JSONDecodeError as e:
         logger.warning(f"Failed to parse review JSON: {e}")
         return [], "Failed to parse review response"
@@ -782,7 +766,8 @@ async def review_pr_with_cursor_agent(
     # Aggregate findings
     review = aggregate_findings(list(all_findings), repo, pr_number)
 
-    # Optional: cross-review round (agents validate and rank findings)
+    # Optional: cross-review round (agents validate and rank findings).
+    # Note: cross-review doubles API calls; disable with --no-cross-review for cost-sensitive use.
     if (
         enable_cross_review
         and num_agents > 1

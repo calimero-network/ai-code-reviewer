@@ -580,8 +580,10 @@ class TestApplyCrossReview:
 class TestGetCrossReviewPrompt:
     """Tests for get_cross_review_prompt."""
 
-    def test_diff_truncated_at_newline(self):
+    def test_diff_truncated_at_newline(self, monkeypatch):
         """Diff excerpt does not cut mid-line."""
+        import ai_reviewer.review as review_mod
+
         context = ReviewContext(
             repo_name="test/repo",
             pr_number=1,
@@ -598,16 +600,10 @@ class TestGetCrossReviewPrompt:
         # Create diff that would be cut at 50 chars (mid-line)
         line = "a" * 30 + "\n" + "b" * 30
         diff = line + "\nlast"
-        import ai_reviewer.review as review_mod
-
-        old_max = review_mod._CROSS_REVIEW_DIFF_MAX_CHARS
-        try:
-            review_mod._CROSS_REVIEW_DIFF_MAX_CHARS = 50
-            prompt = get_cross_review_prompt(context, review, diff)
-            # Excerpt should end at newline, not mid "b"
-            assert "```diff" in prompt
-            excerpt = prompt.split("```diff")[1].split("```")[0].strip()
-            assert excerpt.endswith("a" * 30)
-            assert not excerpt.endswith("b")
-        finally:
-            review_mod._CROSS_REVIEW_DIFF_MAX_CHARS = old_max
+        monkeypatch.setattr(review_mod, "_CROSS_REVIEW_DIFF_MAX_CHARS", 50)
+        prompt = get_cross_review_prompt(context, review, diff)
+        # Excerpt should end at newline, not mid "b"
+        assert "```diff" in prompt
+        excerpt = prompt.split("```diff")[1].split("```")[0].strip()
+        assert excerpt.endswith("a" * 30)
+        assert not excerpt.endswith("b")
