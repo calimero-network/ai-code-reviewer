@@ -313,7 +313,13 @@ def apply_cross_review(
             fid = a.get("id") or a.get("finding_id")
             if not fid or fid not in id_to_finding:
                 continue
-            valid = a.get("valid", True)
+            raw_valid = a.get("valid", True)
+            if isinstance(raw_valid, bool):
+                valid = raw_valid
+            elif isinstance(raw_valid, str):
+                valid = raw_valid.lower() in ("true", "1", "yes")
+            else:
+                valid = bool(raw_valid)
             rank = a.get("rank", 99)
             if isinstance(rank, (int, float)):
                 rank = max(1, int(rank))
@@ -347,6 +353,14 @@ def apply_cross_review(
     remaining_original_order = [f.id for f in review.findings if f.id in set(new_ids)]
     order_changed = remaining_original_order != new_ids
 
+    # Recompute quality score from cross-review valid_ratio (findings filtered/reordered)
+    agent_factor = min(1.0, review.agent_count / 3)
+    if not new_findings:
+        quality_score = round(min(0.95, 0.7 + review.agent_count * 0.1), 2)
+    else:
+        avg_valid_ratio = sum(x[1] for x in kept) / len(kept)
+        quality_score = round(avg_valid_ratio * agent_factor, 2)
+
     summary = review.summary
     if n_dropped > 0 or order_changed:
         parts = []
@@ -364,7 +378,7 @@ def apply_cross_review(
         findings=new_findings,
         summary=summary,
         agent_count=review.agent_count,
-        review_quality_score=review.review_quality_score,
+        review_quality_score=quality_score,
         total_review_time_ms=review.total_review_time_ms,
         failed_agents=review.failed_agents,
     )

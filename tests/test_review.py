@@ -552,6 +552,30 @@ class TestApplyCrossReview:
         assert "1 finding(s) dropped" in result.summary
         assert "re-ranked" not in result.summary
 
+    def test_quality_score_recalculated_after_cross_review(self):
+        """Quality score is recomputed from cross-review valid_ratio, not copied unchanged."""
+        review = _make_review([_make_finding("f1"), _make_finding("f2")])
+        assert review.review_quality_score == 0.9
+        # All agents say valid for both -> avg valid_ratio 1.0, agent_factor 1.0 -> score 1.0
+        all_assessments = [
+            ("a1", [{"id": "f1", "valid": True, "rank": 1}, {"id": "f2", "valid": True, "rank": 2}]),
+            ("a2", [{"id": "f1", "valid": True, "rank": 1}, {"id": "f2", "valid": True, "rank": 2}]),
+            ("a3", [{"id": "f1", "valid": True, "rank": 1}, {"id": "f2", "valid": True, "rank": 2}]),
+        ]
+        result = apply_cross_review(review, all_assessments)
+        assert result.review_quality_score == 1.0
+
+    def test_valid_field_string_coerced_to_bool(self):
+        """LLM may return valid as string 'false'; must be coerced so finding is dropped when appropriate."""
+        review = _make_review([_make_finding("f1")])
+        # One agent says valid True, one says "valid": "false" (string). Without coercion, "false" is truthy.
+        all_assessments = [
+            ("a1", [{"id": "f1", "valid": True, "rank": 1}]),
+            ("a2", [{"id": "f1", "valid": "false", "rank": 2}]),
+        ]
+        result = apply_cross_review(review, all_assessments, min_validation_agreement=0.6)
+        assert len(result.findings) == 0
+
 
 class TestGetCrossReviewPrompt:
     """Tests for get_cross_review_prompt."""
