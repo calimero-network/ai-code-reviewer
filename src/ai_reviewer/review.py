@@ -216,9 +216,9 @@ def get_cross_review_prompt(
         )
     findings_text = "\n".join(findings_blob)
 
-    # Truncate at newline boundary to avoid cutting mid-line or mid-hunk
+    # Truncate at newline boundary only when we actually truncated (avoid dropping last line when diff fits)
     diff_excerpt = diff[:_CROSS_REVIEW_DIFF_MAX_CHARS]
-    if "\n" in diff_excerpt:
+    if len(diff) > _CROSS_REVIEW_DIFF_MAX_CHARS and "\n" in diff_excerpt:
         diff_excerpt = diff_excerpt.rsplit("\n", 1)[0]
 
     return f"""You are in a **cross-review round**. Multiple agents already produced the findings below for this PR. Your job is to validate them and rank by importance.
@@ -267,6 +267,7 @@ def parse_cross_review_response(content: str) -> tuple[list[dict[str, Any]], str
         match = re.search(r"```\s*([\s\S]*?)```", content)
         if match:
             content = match.group(1).strip()
+    # Greedy match; trailing content after JSON may be included—json.loads will fail and we return []
     json_match = re.search(r'\{[\s\S]*"assessments"[\s\S]*\}', content)
     if json_match:
         content = json_match.group(0)
@@ -642,7 +643,12 @@ async def run_cross_review_round(
         for agent_config in agents_to_run
     ]
     gathered = await asyncio.gather(*tasks)
-    return [(name, assessments) for name, assessments in gathered if assessments is not None]
+    # Exclude agents that returned None (failed) or [] (unparseable); avoid apply_cross_review with no real votes
+    return [
+        (name, assessments)
+        for name, assessments in gathered
+        if assessments is not None and len(assessments) > 0
+    ]
 
 
 async def review_pr_with_cursor_agent(
