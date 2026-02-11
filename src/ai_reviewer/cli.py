@@ -67,8 +67,8 @@ def cli(verbose: bool) -> None:
     "--min-agreement",
     "min_agreement",
     type=click.FloatRange(0.0, 1.0),
-    default=0.5,
-    help="Fraction of cross-review agents that must mark a finding valid to keep it (default: 0.5)",
+    default=2 / 3,
+    help="Fraction of assessing agents that must mark a finding valid to keep it (default: 2/3)",
 )
 def review_pr(
     repo: str,
@@ -116,7 +116,7 @@ async def review_pr_async(
     reviewer_name: str = "AI Code Reviewer",
     config_path: Path | None = None,
     enable_cross_review: bool = True,
-    min_validation_agreement: float = 0.5,
+    min_validation_agreement: float = 2 / 3,
 ) -> None:
     """Async implementation of PR review using Cursor Background Agent(s)."""
     # Auto-detect GitHub Actions environment - never allow APPROVE there

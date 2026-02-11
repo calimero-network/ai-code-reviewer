@@ -278,7 +278,7 @@ def parse_cross_review_response(content: str) -> tuple[list[dict[str, Any]], str
 def apply_cross_review(
     review: ConsolidatedReview,
     all_assessments: list[tuple[str, list[dict[str, Any]]]],
-    min_validation_agreement: float = 0.5,
+    min_validation_agreement: float = 2 / 3,
 ) -> ConsolidatedReview:
     """Filter and re-rank findings using cross-review assessments.
 
@@ -307,7 +307,6 @@ def apply_cross_review(
                 rank = 99
             id_to_votes[fid].append((valid, rank))
 
-    n_agents = len(all_assessments)
     kept: list[tuple[ConsolidatedFinding, float, float]] = []  # (finding, valid_ratio, avg_rank)
 
     for fid in finding_ids:
@@ -316,7 +315,8 @@ def apply_cross_review(
             kept.append((id_to_finding[fid], 1.0, 99.0))
             continue
         valid_count = sum(1 for v, _ in votes if v)
-        valid_ratio = valid_count / n_agents if n_agents else 1.0
+        # Use len(votes) not n_agents: only agents that assessed this finding count (omit = no vote)
+        valid_ratio = valid_count / len(votes) if votes else 1.0
         if valid_ratio < min_validation_agreement:
             continue  # Drop finding
         avg_rank = sum(r for _, r in votes) / len(votes) if votes else 99.0
@@ -645,7 +645,7 @@ async def review_pr_with_cursor_agent(
     on_status: Callable[..., Any] | None = None,
     num_agents: int = 3,
     enable_cross_review: bool = True,
-    min_validation_agreement: float = 0.5,
+    min_validation_agreement: float = 2 / 3,
 ) -> ConsolidatedReview:
     """Review a PR using Cursor Background Agent(s).
 
@@ -658,7 +658,7 @@ async def review_pr_with_cursor_agent(
         num_agents: Number of agents to run (1-3)
         enable_cross_review: If True (default) and num_agents > 1, run a second round where
             agents validate and rank findings; drop low-agreement and re-order by rank.
-        min_validation_agreement: Fraction of agents that must mark a finding valid to keep it (0-1).
+        min_validation_agreement: Fraction of assessing agents that must mark a finding valid (0-1, default 2/3).
 
     Returns:
         ConsolidatedReview with findings
