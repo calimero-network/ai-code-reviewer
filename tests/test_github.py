@@ -174,6 +174,72 @@ class TestReviewFormatter:
         # Should indicate clean review
         assert "No issues" in comment or "LGTM" in comment or "✅" in comment
 
+    def test_format_review_compact_is_short_with_inline_hint(self):
+        """Compact format used when posting inline comments: short body + 'See inline'."""
+        from datetime import datetime
+
+        from ai_reviewer.github.formatter import GitHubFormatter
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        review = ConsolidatedReview(
+            id="review-123",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[
+                ConsolidatedFinding(
+                    id="f1",
+                    file_path="auth.py",
+                    line_start=10,
+                    line_end=12,
+                    severity=Severity.WARNING,
+                    category=Category.SECURITY,
+                    title="Missing validation",
+                    description="Add input check",
+                    suggested_fix=None,
+                    consensus_score=0.66,
+                    agreeing_agents=["agent-1", "agent-2"],
+                    confidence=0.8,
+                ),
+            ],
+            summary="One warning",
+            agent_count=3,
+            review_quality_score=0.7,
+            total_review_time_ms=2000,
+        )
+
+        formatter = GitHubFormatter()
+        compact = formatter.format_review_compact(review)
+
+        assert "See inline comments" in compact
+        assert "🟡" in compact or "warnings" in compact
+        # No full finding description in body (lives inline only)
+        assert "Add input check" not in compact
+
+    def test_format_review_compact_empty_is_one_line_lgtm(self):
+        """Compact format with no findings is one-line LGTM."""
+        from datetime import datetime
+
+        from ai_reviewer.github.formatter import GitHubFormatter
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        review = ConsolidatedReview(
+            id="review-123",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[],
+            summary="No issues",
+            agent_count=1,
+            review_quality_score=0.95,
+            total_review_time_ms=1000,
+        )
+        formatter = GitHubFormatter()
+        compact = formatter.format_review_compact(review)
+        assert "LGTM" in compact
+        assert "No issues" in compact or "✅" in compact
+
     def test_determines_review_action(self):
         """Test determining GitHub review action based on findings."""
         from datetime import datetime

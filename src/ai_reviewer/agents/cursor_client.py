@@ -164,10 +164,11 @@ class CursorClient:
         Returns:
             Final agent state
         """
-        start = asyncio.get_event_loop().time()
+        loop = asyncio.get_running_loop()
+        start = loop.time()
         max_wait = self.config.max_wait_seconds
 
-        while (asyncio.get_event_loop().time() - start) < max_wait:
+        while (loop.time() - start) < max_wait:
             agent = await self.get_agent(agent_id)
             status = agent.get("status", "UNKNOWN")
 
@@ -314,12 +315,12 @@ Respond with the requested format."""
     ) -> dict[str, Any]:
         """Legacy JSON completion method."""
         content = await self.complete(
-            _model=model,
+            model=model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
-            _max_tokens=max_tokens,
-            _temperature=temperature,
-            _response_format="json",
+            max_tokens=max_tokens,
+            temperature=temperature,
+            response_format="json",
         )
         return self._parse_json_response(content)
 

@@ -205,12 +205,26 @@ async def review_pr_async(
             else:
                 print(formatter.format_review(review))
         else:
-            # Format review with delta info if we have previous comments
+            # Post inline comments only for NEW findings (compute first to choose body format)
+            new_findings_to_post = (
+                delta.new_findings if delta.previous_comments else review.findings
+            )
+            use_compact_body = len(new_findings_to_post) > 0
+
+            # Use minimal top-level body when posting inline comments (P0: inline-first)
             if delta.previous_comments:
-                body = formatter.format_review_with_delta(review, delta)
+                body = (
+                    formatter.format_review_with_delta_compact(review, delta)
+                    if use_compact_body
+                    else formatter.format_review_with_delta(review, delta)
+                )
                 action = formatter.get_review_action_with_delta(review, delta, allow_approve)
             else:
-                body = formatter.format_review(review)
+                body = (
+                    formatter.format_review_compact(review)
+                    if use_compact_body
+                    else formatter.format_review(review)
+                )
                 action = formatter.get_review_action(review, allow_approve=allow_approve)
 
             gh.post_review(pr, review, body, action)
@@ -222,10 +236,6 @@ async def review_pr_async(
                 resolved = gh.resolve_fixed_comments(pr, delta)
                 console.print(f"   Resolved {resolved} comments")
 
-            # Post inline comments only for NEW findings
-            new_findings_to_post = (
-                delta.new_findings if delta.previous_comments else review.findings
-            )
             if new_findings_to_post:
                 # Create a temporary review with only new findings for inline comments
                 from ai_reviewer.models.review import ConsolidatedReview as CR

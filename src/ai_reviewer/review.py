@@ -69,8 +69,36 @@ Ignore security vulnerabilities and performance unless severe.
 ]
 
 
-def get_base_prompt(context: ReviewContext, diff: str, file_contents: dict[str, str]) -> str:
+def _detect_pr_type(changed_paths: list[str]) -> str:
+    """Detect PR type from changed file paths for context-aware review instructions."""
+    if not changed_paths:
+        return "code"
+    if all(
+        p.endswith(".md") or p.endswith(".mdx") for p in changed_paths
+    ):
+        return "docs"
+    if all(
+        p.startswith(".github/") or p.endswith(".yml") or p.endswith(".yaml")
+        for p in changed_paths
+    ):
+        return "ci"
+    return "code"
+
+
+def get_base_prompt(
+    context: ReviewContext,
+    diff: str,
+    file_contents: dict[str, str],
+    changed_paths: list[str] | None = None,
+) -> str:
     """Build the base review prompt."""
+    pr_type = _detect_pr_type(changed_paths or list(file_contents.keys()))
+
+    pr_type_instruction = ""
+    if pr_type == "docs":
+        pr_type_instruction = "\n**This PR is docs-only (markdown).** Only report factual errors, broken links, or security-sensitive content. Do not suggest code style, tests, or nitpicks.\n"
+    elif pr_type == "ci":
+        pr_type_instruction = "\n**This PR is CI/workflow-only.** Focus on workflow correctness (paths, steps, secrets). Do not report code style or nitpicks.\n"
 
     files_context = ""
     if file_contents:
@@ -79,7 +107,7 @@ def get_base_prompt(context: ReviewContext, diff: str, file_contents: dict[str, 
             files_context += f"\n### {path}\n```\n{content[:5000]}\n```\n"
 
     return f"""You are performing a **code review** of a pull request.
-
+{pr_type_instruction}
 ## Pull Request Information
 - **Repository**: {context.repo_name}
 - **PR #{context.pr_number}**: {context.pr_title}
@@ -99,35 +127,47 @@ def get_base_prompt(context: ReviewContext, diff: str, file_contents: dict[str, 
 """
 
 
-def get_output_format() -> str:
+def get_output_format(pr_type: str = "code") -> str:
     """Get the JSON output format instructions."""
-    return """
+    concise_rules = [
+        "- Be concise: one short sentence per finding description. Do not repeat the same point.",
+        "- Only report issues on changed lines; do not suggest pre-existing improvements.",
+        "- Use \"critical\" only for security bugs or data corruption risks.",
+        "- If the code looks good for your focus area, return empty findings array.",
+        "- Maximum 5 findings per agent.",
+    ]
+    if pr_type == "docs":
+        concise_rules.append(
+            "- Do not report style, nitpicks, or \"add tests\". Only factual errors or security."
+        )
+    elif pr_type == "ci":
+        concise_rules.append(
+            "- Do not report code style or nitpicks. Focus on workflow correctness only."
+        )
+
+    return f"""
 ## Output Format
 
 You MUST respond with a single valid JSON object (no markdown fences around it):
 
-{"findings": [
-  {
+{{"findings": [
+  {{
     "file_path": "path/to/file.rs",
     "line_start": 42,
     "line_end": 45,
     "severity": "critical|warning|suggestion|nitpick",
     "category": "security|performance|logic|style|architecture|testing|documentation",
     "title": "Short descriptive title",
-    "description": "Detailed description of the issue and why it matters",
+    "description": "One concise sentence describing the issue",
     "suggested_fix": "How to fix it (optional)",
     "confidence": 0.95
-  }
+  }}
 ],
-"summary": "Brief overall summary of the review"
-}
+"summary": "One brief sentence overall."
+}}
 
 **Rules**:
-- Only report issues you can clearly identify in the diff
-- Be specific about file paths and line numbers
-- Use "critical" only for security bugs or data corruption risks
-- If the code looks good for your focus area, return empty findings array
-- Maximum 5 findings per agent
+{chr(10).join(concise_rules)}
 
 Analyze the PR and output your JSON review.
 """
@@ -399,9 +439,13 @@ async def review_pr_with_cursor_agent(
         f"Files changed: {context.changed_files_count} (+{context.additions}/-{context.deletions})"
     )
 
-    # Build base prompt
-    base_prompt = get_base_prompt(context, diff, files)
-    output_format = get_output_format()
+    changed_paths = list(files.keys())
+    pr_type = _detect_pr_type(changed_paths)
+    if pr_type != "code":
+        logger.info(f"PR type: {pr_type} – using context-aware review rules")
+
+    base_prompt = get_base_prompt(context, diff, files, changed_paths=changed_paths)
+    output_format = get_output_format(pr_type)
     repo_url = f"https://github.com/{repo}"
 
     # Select agents to run
