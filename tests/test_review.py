@@ -482,6 +482,16 @@ class TestApplyCrossReview:
         ids = [f.id for f in result.findings]
         assert "f1" in ids and "f2" in ids
 
+    def test_finding_id_alias_accepted(self):
+        """Assessments can use 'finding_id' instead of 'id' (alias)."""
+        review = _make_review([_make_finding("f1")])
+        all_assessments = [
+            ("a1", [{"finding_id": "f1", "valid": True, "rank": 1}]),
+        ]
+        result = apply_cross_review(review, all_assessments)
+        assert len(result.findings) == 1
+        assert result.findings[0].id == "f1"
+
     def test_partial_votes_uses_len_votes_not_n_agents(self):
         """Valid ratio is over assessing agents, not total agents."""
         review = _make_review([_make_finding("f1")])
@@ -531,6 +541,7 @@ class TestApplyCrossReview:
         assert result.summary == review.summary
 
     def test_summary_appends_when_dropped(self):
+        """When only dropping (no reorder), summary should not claim 're-ranked'."""
         review = _make_review([_make_finding("f1"), _make_finding("f2")])
         all_assessments = [
             ("a1", [{"id": "f1", "valid": True, "rank": 1}, {"id": "f2", "valid": False, "rank": 2}]),
@@ -539,6 +550,7 @@ class TestApplyCrossReview:
         result = apply_cross_review(review, all_assessments, min_validation_agreement=1.0)
         assert len(result.findings) == 1
         assert "1 finding(s) dropped" in result.summary
+        assert "re-ranked" not in result.summary
 
 
 class TestGetCrossReviewPrompt:

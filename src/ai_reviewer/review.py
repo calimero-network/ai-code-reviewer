@@ -289,6 +289,8 @@ def apply_cross_review(
 
     - Drops findings where the fraction of agents that said valid is < min_validation_agreement.
     - Re-orders by average rank (1 = first), then by severity.
+    - Findings with no votes (e.g. omitted by all agents) are kept but assigned rank 99
+      and appear at the end; assessments may use "id" or "finding_id" for the finding key.
     """
     if not all_assessments:
         return review
@@ -761,25 +763,32 @@ async def review_pr_with_cursor_agent(
         and review.findings
         and not review.all_agents_failed
     ):
-        logger.info("Running cross-review round (validate and rank findings)...")
-        async with CursorClient(cursor_config) as client:
-            cross_results = await run_cross_review_round(
-                client=client,
-                repo_url=repo_url,
-                ref=pr.base.ref,
-                review=review,
-                context=context,
-                diff=diff,
-                agents_to_run=agents_to_run,
-                on_status=on_status,
-            )
-        if cross_results:
-            review = apply_cross_review(
-                review, cross_results, min_validation_agreement
-            )
-            logger.info(
-                f"Cross-review done: {len(review.findings)} findings after validation"
-            )
+        # Only run cross-review with agents that succeeded in round 1
+        agents_for_cross = [
+            c for c in agents_to_run if c["name"] not in review.failed_agents
+        ]
+        if not agents_for_cross:
+            logger.info("Skipping cross-review: no round-1 agents succeeded")
+        else:
+            logger.info("Running cross-review round (validate and rank findings)...")
+            async with CursorClient(cursor_config) as client:
+                cross_results = await run_cross_review_round(
+                    client=client,
+                    repo_url=repo_url,
+                    ref=pr.base.ref,
+                    review=review,
+                    context=context,
+                    diff=diff,
+                    agents_to_run=agents_for_cross,
+                    on_status=on_status,
+                )
+            if cross_results:
+                review = apply_cross_review(
+                    review, cross_results, min_validation_agreement
+                )
+                logger.info(
+                    f"Cross-review done: {len(review.findings)} findings after validation"
+                )
 
     review.total_review_time_ms = int((time.time() - start_time) * 1000)
 
