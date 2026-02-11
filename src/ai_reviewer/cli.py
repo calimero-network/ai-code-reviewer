@@ -68,7 +68,7 @@ def cli(verbose: bool) -> None:
     "min_agreement",
     type=click.FloatRange(0.0, 1.0),
     default=2 / 3,
-    help="Fraction of assessing agents that must mark a finding valid to keep it (default: 2/3)",
+    help="Fraction of assessing agents that must mark a finding valid (default: 2/3; with 2 agents, both must agree)",
 )
 def review_pr(
     repo: str,

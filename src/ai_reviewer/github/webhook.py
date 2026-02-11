@@ -153,6 +153,11 @@ def _setup_default_review_handler() -> None:
                 cursor_config=cursor_config,
                 github_token=github_token,
                 num_agents=int(os.environ.get("NUM_AGENTS", "3")),
+                enable_cross_review=os.environ.get("ENABLE_CROSS_REVIEW", "true").lower()
+                != "false",
+                min_validation_agreement=float(
+                    os.environ.get("MIN_VALIDATION_AGREEMENT", str(2 / 3))
+                ),
             )
 
             if review.all_agents_failed:

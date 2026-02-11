@@ -216,6 +216,11 @@ def get_cross_review_prompt(
         )
     findings_text = "\n".join(findings_blob)
 
+    # Truncate at newline boundary to avoid cutting mid-line or mid-hunk
+    diff_excerpt = diff[:_CROSS_REVIEW_DIFF_MAX_CHARS]
+    if "\n" in diff_excerpt:
+        diff_excerpt = diff_excerpt.rsplit("\n", 1)[0]
+
     return f"""You are in a **cross-review round**. Multiple agents already produced the findings below for this PR. Your job is to validate them and rank by importance.
 
 ## PR
@@ -224,7 +229,7 @@ def get_cross_review_prompt(
 
 ## Code diff (excerpt)
 ```diff
-{diff[:_CROSS_REVIEW_DIFF_MAX_CHARS]}
+{diff_excerpt}
 ```
 
 ## Findings to validate and rank
