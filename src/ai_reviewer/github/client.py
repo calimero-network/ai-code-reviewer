@@ -25,9 +25,17 @@ _USER_FETCH_FAILED = "__FETCH_FAILED__"
 
 
 def _raise_if_forbidden(exc: Exception) -> None:
-    """Re-raise 403 Forbidden immediately — it won't resolve on retry."""
+    """Re-raise 403 Forbidden immediately — it won't resolve on retry.
+
+    Handles both PyGithub GithubException (REST calls via PyGithub) and
+    requests.HTTPError (direct requests.post calls, e.g. GraphQL endpoint).
+    """
     if isinstance(exc, GithubException) and exc.status == 403:
         raise PermissionError(f"GitHub 403 Forbidden: {exc.data}") from exc
+    if isinstance(exc, requests.exceptions.HTTPError):
+        resp = getattr(exc, "response", None)
+        if resp is not None and resp.status_code == 403:
+            raise PermissionError("GitHub GraphQL 403 Forbidden") from exc
 
 
 _RESOLVE_COMMENT_DELAY_S: float = float(os.environ.get("AI_REVIEWER_RESOLVE_DELAY", "0.2"))
@@ -53,6 +61,7 @@ class PreviousComment:
     severity: str  # Extracted from emoji
     body: str
     is_resolved: bool = False
+    finding_hash: str | None = None  # Embedded hash for stable cross-run matching
 
 
 @dataclass
@@ -100,7 +109,9 @@ class GitHubClient:
             try:
                 self._current_user_login = self._gh.get_user().login
             except Exception as e:
-                _raise_if_forbidden(e)
+                # Do NOT raise here — this method is used by callers that swallow
+                # exceptions (e.g. _dismiss_pending_reviews). Cache the failure so
+                # we don't retry a 403 or other permanent error on every call.
                 logger.warning(f"Could not fetch current user: {e}")
                 self._current_user_login = _USER_FETCH_FAILED
 
@@ -324,6 +335,7 @@ class GitHubClient:
                 comment_body = f"{severity_emoji} **{finding.title}**\n\n{finding.description}"
                 if finding.suggested_fix:
                     comment_body += f"\n\n**Suggested fix:**\n```\n{finding.suggested_fix}\n```"
+                comment_body += f"\n\n<!-- ai-reviewer-id: {finding.finding_hash} -->"
 
                 # Use create_review_comment for inline comments on the diff
                 pr.create_review_comment(
@@ -411,6 +423,10 @@ class GitHubClient:
         title_match = re.search(r"\*\*([^*]+)\*\*", body)
         title = title_match.group(1) if title_match else "Unknown Issue"
 
+        # Extract embedded hash for stable cross-run matching
+        hash_match = re.search(r"<!-- ai-reviewer-id: ([a-f0-9]{12}) -->", body)
+        finding_hash = hash_match.group(1) if hash_match else None
+
         return PreviousComment(
             id=comment.id,
             file_path=comment.path,
@@ -419,6 +435,7 @@ class GitHubClient:
             severity=severity,
             body=body,
             is_resolved=False,  # GitHub API doesn't expose this directly
+            finding_hash=finding_hash,
         )
 
     def compute_review_delta(
@@ -438,22 +455,29 @@ class GitHubClient:
         previous_comments = self.get_previous_review_comments(pr)
         delta = ReviewDelta(previous_comments=previous_comments)
 
-        # Create a lookup for previous comments by (file, line, title_normalized)
-        previous_lookup: dict[tuple[str, int, str], PreviousComment] = {}
+        # Build two lookups: hash-based (preferred) and title-based (fallback for old comments)
+        hash_lookup: dict[str, PreviousComment] = {}
+        title_lookup: dict[tuple[str, int, str], PreviousComment] = {}
         for comment in previous_comments:
+            if comment.finding_hash:
+                hash_lookup[comment.finding_hash] = comment
             key = (comment.file_path, comment.line, self._normalize_title(comment.title))
-            previous_lookup[key] = comment
+            title_lookup[key] = comment
 
         # Track which previous comments are still open
         matched_previous: set[int] = set()
 
         for finding in current_findings:
-            key = (finding.file_path, finding.line_start, self._normalize_title(finding.title))
+            # Prefer hash match (stable across title/line drift) then fall back to title match
+            matched_comment = hash_lookup.get(finding.finding_hash)
+            if matched_comment is None:
+                key = (finding.file_path, finding.line_start, self._normalize_title(finding.title))
+                matched_comment = title_lookup.get(key)
 
-            if key in previous_lookup:
+            if matched_comment is not None:
                 # This finding was already reported - it's still OPEN
                 delta.open_findings.append(finding)
-                matched_previous.add(previous_lookup[key].id)
+                matched_previous.add(matched_comment.id)
             else:
                 # This is a NEW finding
                 delta.new_findings.append(finding)
