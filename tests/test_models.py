@@ -142,3 +142,76 @@ class TestConsolidatedReview:
         assert len(review.findings) == 2
         # First finding has full consensus
         assert review.findings[0].consensus_score == 1.0
+
+
+def test_finding_hash_is_stable_and_deterministic():
+    """finding_hash must be stable across calls and determined by content."""
+    from ai_reviewer.models.findings import ConsolidatedFinding, Severity, Category
+    f = ConsolidatedFinding(
+        id="f1",
+        file_path="auth.py",
+        line_start=42,
+        line_end=None,
+        severity=Severity.CRITICAL,
+        category=Category.SECURITY,
+        title="SQL injection",
+        description="User input used in query",
+        suggested_fix=None,
+        consensus_score=1.0,
+        agreeing_agents=["security-agent"],
+        confidence=1.0,
+    )
+    # Stable across calls
+    assert f.finding_hash == f.finding_hash
+    # 12 chars
+    assert len(f.finding_hash) == 12
+    # Deterministic — same key fields (file_path, line_start, title, severity), same hash
+    f2 = ConsolidatedFinding(
+        id="f2",
+        file_path="auth.py",
+        line_start=42,
+        line_end=None,
+        severity=Severity.CRITICAL,
+        category=Category.SECURITY,
+        title="SQL injection",
+        description="Different description",
+        suggested_fix=None,
+        consensus_score=0.5,
+        agreeing_agents=[],
+        confidence=0.5,
+    )
+    assert f.finding_hash == f2.finding_hash  # same key fields = same hash
+
+
+def test_finding_hash_differs_for_different_content():
+    """Different file/line/title/severity should produce different hashes."""
+    from ai_reviewer.models.findings import ConsolidatedFinding, Severity, Category
+    f1 = ConsolidatedFinding(
+        id="f1",
+        file_path="a.py",
+        line_start=1,
+        line_end=None,
+        severity=Severity.CRITICAL,
+        category=Category.SECURITY,
+        title="Issue A",
+        description="",
+        suggested_fix=None,
+        consensus_score=1.0,
+        agreeing_agents=[],
+        confidence=1.0,
+    )
+    f2 = ConsolidatedFinding(
+        id="f2",
+        file_path="b.py",
+        line_start=2,
+        line_end=None,
+        severity=Severity.WARNING,
+        category=Category.PERFORMANCE,
+        title="Issue B",
+        description="",
+        suggested_fix=None,
+        consensus_score=1.0,
+        agreeing_agents=[],
+        confidence=1.0,
+    )
+    assert f1.finding_hash != f2.finding_hash

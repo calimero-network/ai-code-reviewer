@@ -80,6 +80,13 @@ class ConsolidatedFinding:
     original_findings: list[ReviewFinding] = field(default_factory=list)
 
     @property
+    def finding_hash(self) -> str:
+        """Deterministic 12-char hash for deduplication across review runs."""
+        import hashlib
+        key = f"{self.file_path or ''}:{self.line_start or 0}:{self.title}:{self.severity.value}"
+        return hashlib.sha256(key.encode()).hexdigest()[:12]
+
+    @property
     def priority_score(self) -> float:
         """Compute priority based on severity and consensus."""
         severity_weights = {
