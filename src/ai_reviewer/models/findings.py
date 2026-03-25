@@ -81,9 +81,16 @@ class ConsolidatedFinding:
 
     @property
     def finding_hash(self) -> str:
-        """Deterministic 12-char hash for deduplication across review runs."""
+        """Deterministic 12-char hash for deduplication across review runs.
+
+        Key uses normalized title (lowercase+strip) and excludes severity so the
+        hash stays stable when AI-generated titles vary in casing/whitespace or
+        when severity is re-assessed between runs — matching the existing delta
+        tracking logic in compute_review_delta().
+        """
         import hashlib
-        key = f"{self.file_path or ''}:{self.line_start or 0}:{self.title}:{self.severity.value}"
+        normalized_title = self.title.lower().strip()
+        key = f"{self.file_path or ''}:{self.line_start or 0}:{normalized_title}"
         return hashlib.sha256(key.encode()).hexdigest()[:12]
 
     @property

@@ -165,22 +165,22 @@ def test_finding_hash_is_stable_and_deterministic():
     assert f.finding_hash == f.finding_hash
     # 12 chars
     assert len(f.finding_hash) == 12
-    # Deterministic — same key fields (file_path, line_start, title, severity), same hash
+    # Deterministic — same file_path/line_start/title (normalized) = same hash regardless of severity
     f2 = ConsolidatedFinding(
         id="f2",
         file_path="auth.py",
         line_start=42,
         line_end=None,
-        severity=Severity.CRITICAL,
-        category=Category.SECURITY,
-        title="SQL injection",
+        severity=Severity.WARNING,  # different severity — hash must still match
+        category=Category.PERFORMANCE,
+        title="SQL INJECTION",  # different casing — hash must still match after normalize
         description="Different description",
         suggested_fix=None,
         consensus_score=0.5,
         agreeing_agents=[],
         confidence=0.5,
     )
-    assert f.finding_hash == f2.finding_hash  # same key fields = same hash
+    assert f.finding_hash == f2.finding_hash  # title normalized, severity excluded
 
 
 def test_finding_hash_differs_for_different_content():
