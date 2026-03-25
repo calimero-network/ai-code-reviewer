@@ -2,7 +2,9 @@
 
 import contextlib
 import logging
+import os
 import re
+import time
 from dataclasses import dataclass, field
 
 import requests
@@ -20,6 +22,16 @@ logger = logging.getLogger(__name__)
 
 # Sentinel for failed user login fetch (distinct from empty string)
 _USER_FETCH_FAILED = "__FETCH_FAILED__"
+
+
+def _raise_if_forbidden(exc: Exception) -> None:
+    """Re-raise 403 Forbidden immediately — it won't resolve on retry."""
+    if isinstance(exc, GithubException) and exc.status == 403:
+        raise PermissionError(f"GitHub 403 Forbidden: {exc.data}") from exc
+
+
+_RESOLVE_COMMENT_DELAY_S: float = float(os.environ.get("AI_REVIEWER_RESOLVE_DELAY", "0.2"))
+_MAX_RESOLVE_COMMENTS: int = int(os.environ.get("AI_REVIEWER_MAX_RESOLVE", "100"))
 
 
 @dataclass
@@ -88,6 +100,7 @@ class GitHubClient:
             try:
                 self._current_user_login = self._gh.get_user().login
             except Exception as e:
+                _raise_if_forbidden(e)
                 logger.warning(f"Could not fetch current user: {e}")
                 self._current_user_login = _USER_FETCH_FAILED
 
@@ -176,6 +189,7 @@ class GitHubClient:
                 if hasattr(content, "decoded_content"):
                     files[file.filename] = content.decoded_content.decode("utf-8")
             except Exception as e:
+                _raise_if_forbidden(e)
                 logger.warning(f"Could not fetch {file.filename}: {e}")
 
         return files
@@ -233,6 +247,7 @@ class GitHubClient:
                     review.dismiss("Superseded by new AI review")
                     return True
         except Exception as e:
+            _raise_if_forbidden(e)
             logger.warning(f"Could not dismiss pending reviews: {e}")
 
         return False
@@ -320,6 +335,7 @@ class GitHubClient:
                 posted_count += 1
                 logger.debug(f"Posted inline comment on {finding.file_path}:{finding.line_start}")
             except Exception as e:
+                _raise_if_forbidden(e)
                 # Inline comments can fail if the line isn't in the diff
                 logger.warning(
                     f"Could not post inline comment on {finding.file_path}:{finding.line_start}: {e}"
@@ -479,6 +495,12 @@ class GitHubClient:
                         delta.fixed_findings.append(comment)
                 # else: file in diff but line wasn't modified → don't mark as fixed
 
+        # Deduplicate by comment ID to prevent exponential growth on re-reviews
+        seen: set[int] = set()
+        delta.fixed_findings = [
+            f for f in delta.fixed_findings if f.id not in seen and not seen.add(f.id)  # type: ignore[func-returns-value]
+        ]
+
         logger.info(
             f"Review delta: {len(delta.new_findings)} new, "
             f"{len(delta.fixed_findings)} fixed, "
@@ -592,11 +614,13 @@ class GitHubClient:
             result = response.json()
 
             if "errors" in result:
-                logger.warning(f"GraphQL errors: {result['errors']}")
+                logger.warning("GraphQL request returned errors (use DEBUG for details)")
+                logger.debug("GraphQL errors: %s", result["errors"])
                 return None
 
             return result.get("data")
         except Exception as e:
+            _raise_if_forbidden(e)
             logger.warning(f"GraphQL request failed: {e}")
             return None
 
@@ -773,7 +797,15 @@ class GitHubClient:
         # Batch-fetch all thread mappings once (avoids N+1 GraphQL calls)
         thread_mapping = self._fetch_thread_mapping(repo_name, pr.number)
 
-        for fixed in delta.fixed_findings:
+        findings_to_process = delta.fixed_findings[:_MAX_RESOLVE_COMMENTS]
+        if len(delta.fixed_findings) > _MAX_RESOLVE_COMMENTS:
+            logger.warning(
+                "Capping resolved comment processing at %d (have %d)",
+                _MAX_RESOLVE_COMMENTS,
+                len(delta.fixed_findings),
+            )
+
+        for fixed in findings_to_process:
             # Skip if we've already marked this as resolved (avoid duplicate "Resolved" on re-review)
             if fixed.id in existing_replies:
                 logger.debug(f"Comment {fixed.id} already has resolved reply, skipping")
@@ -804,7 +836,9 @@ class GitHubClient:
 
                 resolved_count += 1
                 logger.debug(f"Marked comment {fixed.id} as resolved")
+                time.sleep(_RESOLVE_COMMENT_DELAY_S)
             except Exception as e:
+                _raise_if_forbidden(e)
                 logger.warning(f"Could not resolve comment {fixed.id}: {e}")
 
         return resolved_count

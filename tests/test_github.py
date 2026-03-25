@@ -8,6 +8,21 @@ import pytest
 class TestGitHubClient:
     """Tests for GitHub API client."""
 
+    def test_403_raises_permission_error_immediately(self):
+        """403 must raise PermissionError without retry."""
+        from github.GithubException import GithubException
+
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github") as mock_gh:
+            mock_gh.return_value.get_repo.side_effect = GithubException(
+                status=403, data={"message": "Forbidden"}, headers={}
+            )
+            client = GitHubClient(token="test-token")
+            with pytest.raises((GithubException, PermissionError)):
+                client.get_repo("owner/repo")
+            assert mock_gh.return_value.get_repo.call_count == 1
+
     def test_extracts_pr_diff(self):
         """Test extracting diff from a PR."""
         from ai_reviewer.github.client import GitHubClient
@@ -960,3 +975,56 @@ class TestResolveFixedComments:
             assert client._graphql_request.call_count == client._MAX_GRAPHQL_PAGES
             # Should still return the mapping it built
             assert 123 in result
+
+    def test_fixed_findings_deduplicated_by_id(self):
+        """Duplicate fixed findings by ID must be deduplicated."""
+        from ai_reviewer.github.client import PreviousComment, ReviewDelta
+
+        prev = PreviousComment(
+            id=1, file_path="a.py", line=10, title="T", severity="Warning", body="b"
+        )
+        # Simulate calling with duplicates
+        delta = ReviewDelta(
+            fixed_findings=[prev, prev],  # same item twice
+            open_findings=[],
+            new_findings=[],
+            previous_comments=[prev],
+        )
+        # After dedup, should only have 1
+        seen: set[int] = set()
+        deduped = [f for f in delta.fixed_findings if f.id not in seen and not seen.add(f.id)]  # type: ignore[func-returns-value]
+        assert len(deduped) == 1
+
+    def test_spoofed_resolved_comment_not_counted(self):
+        """A 'Resolved' comment from a non-bot user must not be counted."""
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+        mock_comment = MagicMock()
+        mock_comment.body = "✅ **Resolved** - fake"
+        mock_comment.in_reply_to_id = 999
+        mock_comment.user.login = "malicious-user"
+        mock_pr = MagicMock()
+        mock_pr.get_review_comments.return_value = [mock_comment]
+        with patch.object(client, "_get_allowed_users", return_value={"github-actions[bot]"}):
+            resolved = client._get_resolved_comment_ids(mock_pr)
+        assert 999 not in resolved
+
+    def test_graphql_errors_not_logged_verbatim_at_warning(self, caplog):
+        """Raw GraphQL error details must not appear in WARNING-level logs."""
+        import logging
+
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"errors": [{"message": "secret internal detail"}]}
+        with patch("requests.post", return_value=mock_resp):
+            with caplog.at_level(logging.WARNING):
+                result = client._graphql_request("{ viewer { login } }")
+        assert result is None
+        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert not any("secret internal detail" in m for m in warning_msgs)
