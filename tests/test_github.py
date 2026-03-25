@@ -977,23 +977,40 @@ class TestResolveFixedComments:
             assert 123 in result
 
     def test_fixed_findings_deduplicated_by_id(self):
-        """Duplicate fixed findings by ID must be deduplicated."""
-        from ai_reviewer.github.client import PreviousComment, ReviewDelta
+        """compute_review_delta must deduplicate fixed_findings by comment ID."""
+        from ai_reviewer.github.client import GitHubClient, PreviousComment
 
-        prev = PreviousComment(
-            id=1, file_path="a.py", line=10, title="T", severity="Warning", body="b"
+        # Build a comment that appears in a file NOT in the PR diff —
+        # that path marks it as fixed in compute_review_delta.
+        stale_comment = PreviousComment(
+            id=42, file_path="deleted.py", line=5, title="Old issue", severity="Warning", body="b"
         )
-        # Simulate calling with duplicates
-        delta = ReviewDelta(
-            fixed_findings=[prev, prev],  # same item twice
-            open_findings=[],
-            new_findings=[],
-            previous_comments=[prev],
-        )
-        # After dedup, should only have 1
-        seen: set[int] = set()
-        deduped = [f for f in delta.fixed_findings if f.id not in seen and not seen.add(f.id)]  # type: ignore[func-returns-value]
-        assert len(deduped) == 1
+
+        mock_pr = MagicMock()
+        mock_pr.get_review_comments.return_value = []
+
+        # get_previous_review_comments returns the same comment twice (simulating
+        # a scenario where the same comment was stored/retrieved twice)
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+
+        with patch.object(
+            client,
+            "get_previous_review_comments",
+            return_value=[stale_comment, stale_comment],  # duplicate
+        ):
+            mock_file = MagicMock()
+            mock_file.filename = "other.py"  # deleted.py is NOT in the diff → triggers fixed
+            mock_file.status = "modified"
+            mock_file.patch = "@@ -1,3 +1,3 @@\n-old\n+new"
+            mock_pr.get_files.return_value = [mock_file]
+
+            delta = client.compute_review_delta(mock_pr, current_findings=[])
+
+        # Even though the same comment appeared twice in previous_comments,
+        # fixed_findings must be deduplicated to exactly 1 entry
+        assert len(delta.fixed_findings) == 1
+        assert delta.fixed_findings[0].id == 42
 
     def test_spoofed_resolved_comment_not_counted(self):
         """A 'Resolved' comment from a non-bot user must not be counted."""
