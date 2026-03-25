@@ -61,17 +61,24 @@ class ReviewDelta:
 class GitHubClient:
     """Client for GitHub API operations."""
 
-    def __init__(self, token: str, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        base_url: str | None = None,
+        extra_reviewer_users: list[str] | None = None,
+    ) -> None:
         """Initialize the GitHub client.
 
         Args:
             token: GitHub personal access token or app token
             base_url: Optional base URL for GitHub Enterprise
+            extra_reviewer_users: Additional bot/user logins to treat as AI reviewer accounts
         """
         self._token = token
         self._base_url = base_url
         self._current_user_login: str | None = None
         self._allowed_users: set[str] | None = None
+        self._extra_reviewer_users: set[str] = set(extra_reviewer_users or [])
 
         if base_url:
             self._gh = Github(token, base_url=base_url)
@@ -104,9 +111,9 @@ class GitHubClient:
         if self._allowed_users is None:
             current_user = self._get_current_user_login()
             if current_user:
-                self._allowed_users = self.AI_REVIEWER_USERS | {current_user}
+                self._allowed_users = self.AI_REVIEWER_USERS | {current_user} | self._extra_reviewer_users
             else:
-                self._allowed_users = self.AI_REVIEWER_USERS.copy()
+                self._allowed_users = self.AI_REVIEWER_USERS | self._extra_reviewer_users
         return self._allowed_users
 
     def get_repo(self, repo_name: str) -> Repository:

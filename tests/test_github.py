@@ -30,6 +30,28 @@ class TestGitHubClient:
             assert "auth/login.py" in diff
             assert "+new code" in diff
 
+    def test_extra_reviewer_users_included_in_allowed_users(self):
+        """extra_reviewer_users passed to GitHubClient are included in allowed set."""
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github") as mock_gh:
+            mock_gh.return_value.get_user.return_value.login = "my-bot"
+            client = GitHubClient(token="t", extra_reviewer_users=["custom-bot[bot]", "ci-reviewer"])
+            allowed = client._get_allowed_users()
+        assert "custom-bot[bot]" in allowed
+        assert "ci-reviewer" in allowed
+        assert "github-actions[bot]" in allowed  # default still present
+
+    def test_default_allowlist_unchanged_without_extra_users(self):
+        """Default allowlist is unchanged when no extra_reviewer_users provided."""
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github") as mock_gh:
+            mock_gh.return_value.get_user.return_value.login = "bot"
+            client = GitHubClient(token="t")
+            allowed = client._get_allowed_users()
+        assert "github-actions[bot]" in allowed
+
     def test_builds_review_context(self):
         """Test building review context from PR."""
         from ai_reviewer.github.client import GitHubClient
