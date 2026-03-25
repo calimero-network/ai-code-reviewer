@@ -66,20 +66,18 @@ class TestGitHubPRHandler:
     @pytest.mark.asyncio
     async def test_handles_pr_opened_event(self):
         """Test handling PR opened webhook event."""
+        from ai_reviewer.github import webhook
         from ai_reviewer.github.webhook import PREvent, handle_pr_event
 
-        event = PREvent(
-            repo="test-org/test-repo",
-            pr_number=42,
-            action="opened",
-        )
+        mock_handler = AsyncMock()
+        webhook.set_review_handler(mock_handler)
 
-        with patch("ai_reviewer.github.webhook.review_pr", new_callable=AsyncMock) as mock_review:
+        try:
+            event = PREvent(repo="test-org/test-repo", pr_number=42, action="opened")
             await handle_pr_event(event)
-            mock_review.assert_called_once_with(
-                repo="test-org/test-repo",
-                pr_number=42,
-            )
+            mock_handler.assert_called_once_with(repo="test-org/test-repo", pr_number=42)
+        finally:
+            webhook._review_handler = None  # restore global state
 
     @pytest.mark.asyncio
     async def test_ignores_irrelevant_actions(self):
