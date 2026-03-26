@@ -576,6 +576,57 @@ class TestApplyCrossReview:
         result = apply_cross_review(review, all_assessments, min_validation_agreement=0.6)
         assert len(result.findings) == 0
 
+    def test_critical_security_finding_survives_unanimous_rejection(self):
+        """Critical security findings must never be dropped by cross-review, even if all agents mark them invalid."""
+        critical_sec = ConsolidatedFinding(
+            id="sec1",
+            file_path="src/auth.py",
+            line_start=10,
+            line_end=12,
+            severity=Severity.CRITICAL,
+            category=Category.SECURITY,
+            title="SQL injection",
+            description="User input interpolated into SQL",
+            suggested_fix="Use parameterized queries",
+            consensus_score=1.0,
+            agreeing_agents=["agent-1"],
+            confidence=0.95,
+        )
+        normal = _make_finding("f2")
+        review = _make_review([critical_sec, normal])
+        all_assessments = [
+            ("a1", [{"id": "sec1", "valid": False, "rank": 5}, {"id": "f2", "valid": True, "rank": 1}]),
+            ("a2", [{"id": "sec1", "valid": False, "rank": 5}, {"id": "f2", "valid": True, "rank": 2}]),
+        ]
+        result = apply_cross_review(review, all_assessments, min_validation_agreement=0.5)
+        result_ids = [f.id for f in result.findings]
+        assert "sec1" in result_ids, "Critical security finding must survive cross-review rejection"
+        assert result.findings[0].id == "sec1", "Critical security finding should be ranked first"
+
+    def test_critical_nonsecurity_finding_can_be_dropped(self):
+        """Critical findings that are NOT security-category follow normal cross-review rules."""
+        critical_logic = ConsolidatedFinding(
+            id="logic1",
+            file_path="src/calc.py",
+            line_start=10,
+            line_end=12,
+            severity=Severity.CRITICAL,
+            category=Category.LOGIC,
+            title="Off-by-one error",
+            description="Loop bound is wrong",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["agent-1"],
+            confidence=0.9,
+        )
+        review = _make_review([critical_logic])
+        all_assessments = [
+            ("a1", [{"id": "logic1", "valid": False, "rank": 5}]),
+            ("a2", [{"id": "logic1", "valid": False, "rank": 5}]),
+        ]
+        result = apply_cross_review(review, all_assessments, min_validation_agreement=0.5)
+        assert len(result.findings) == 0, "Non-security critical finding should be droppable"
+
 
 class TestGetCrossReviewPrompt:
     """Tests for get_cross_review_prompt."""

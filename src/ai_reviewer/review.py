@@ -360,9 +360,13 @@ def apply_cross_review(
     kept: list[tuple[ConsolidatedFinding, float, float]] = []  # (finding, valid_ratio, avg_rank)
 
     for fid in finding_ids:
+        finding = id_to_finding[fid]
+        if finding.severity == Severity.CRITICAL and finding.category == Category.SECURITY:
+            kept.append((finding, 1.0, 0))
+            continue
         votes = id_to_votes.get(fid, [])
         if not votes:
-            kept.append((id_to_finding[fid], 1.0, 99.0))
+            kept.append((finding, 1.0, 99.0))
             continue
         valid_count = sum(1 for v, _ in votes if v)
         # Use len(votes) not n_agents: only agents that assessed this finding count (omit = no vote)
@@ -370,7 +374,7 @@ def apply_cross_review(
         if valid_ratio < min_validation_agreement:
             continue  # Drop finding
         avg_rank = sum(r for _, r in votes) / len(votes) if votes else 99.0
-        kept.append((id_to_finding[fid], valid_ratio, avg_rank))
+        kept.append((finding, valid_ratio, avg_rank))
 
     # Sort by avg_rank ascending, then by severity (critical first)
     severity_order = {Severity.CRITICAL: 0, Severity.WARNING: 1, Severity.SUGGESTION: 2, Severity.NITPICK: 3}
