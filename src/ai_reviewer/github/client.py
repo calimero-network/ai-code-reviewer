@@ -21,6 +21,8 @@ from ai_reviewer.models.review import ConsolidatedReview
 
 logger = logging.getLogger(__name__)
 
+_FUZZY_WORD_RE = re.compile(r"\b\w{4,}\b")
+
 # Sentinel for failed user login fetch (distinct from empty string)
 _USER_FETCH_FAILED = "__FETCH_FAILED__"
 
@@ -102,8 +104,9 @@ class PreviousComment:
             return None
         import hashlib
 
-        words = sorted(set(re.findall(r"\b\w{4,}\b", self.title.lower())))
-        key = f"{self.file_path}:{':'.join(words[:5])}"
+        words = sorted(set(_FUZZY_WORD_RE.findall(self.title.lower())))
+        word_key = ":".join(words[:5]) if words else self.title.lower().strip()
+        key = f"{self.file_path}:{word_key}"
         return hashlib.sha256(key.encode()).hexdigest()[:12]
 
 

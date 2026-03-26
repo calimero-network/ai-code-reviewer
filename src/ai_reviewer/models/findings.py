@@ -1,7 +1,10 @@
 """Finding models for code review results."""
 
+import re
 from dataclasses import dataclass, field
 from enum import Enum
+
+_FUZZY_WORD_RE = re.compile(r"\b\w{4,}\b")
 
 
 class Severity(Enum):
@@ -94,17 +97,20 @@ class ConsolidatedFinding:
         return hashlib.sha256(key.encode()).hexdigest()[:12]
 
     @property
-    def finding_hash_fuzzy(self) -> str:
+    def finding_hash_fuzzy(self) -> str | None:
         """Fuzzy hash ignoring line number and category for cross-run matching.
 
         Uses file_path + sorted title keywords (4+ chars) so the hash stays
         stable when a finding drifts lines or gets recategorized between runs.
+        Returns None when file_path or title is empty (mirrors PreviousComment).
         """
         import hashlib
-        import re
 
-        words = sorted(set(re.findall(r"\b\w{4,}\b", self.title.lower())))
-        key = f"{self.file_path or ''}:{':'.join(words[:5])}"
+        if not self.file_path or not self.title:
+            return None
+        words = sorted(set(_FUZZY_WORD_RE.findall(self.title.lower())))
+        word_key = ":".join(words[:5]) if words else self.title.lower().strip()
+        key = f"{self.file_path}:{word_key}"
         return hashlib.sha256(key.encode()).hexdigest()[:12]
 
     @property

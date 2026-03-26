@@ -1354,7 +1354,11 @@ class TestComputeReviewDeltaFuzzyMatching:
         assert len(delta.new_findings) == 0
 
     def test_title_fallback_still_works(self):
-        """Legacy title+line matching still works when no hashes match."""
+        """Legacy title+line matching still works when neither hash tier matches.
+
+        The PreviousComment has no embedded strict hash and its fuzzy hash is
+        patched to None, so only the title+line fallback (tier 3) can match.
+        """
         from ai_reviewer.github.client import GitHubClient, PreviousComment
 
         prev_comment = PreviousComment(
@@ -1380,7 +1384,14 @@ class TestComputeReviewDeltaFuzzyMatching:
         mock_file.status = "modified"
         mock_pr.get_files.return_value = [mock_file]
 
-        with patch("ai_reviewer.github.client.Github"):
+        with (
+            patch("ai_reviewer.github.client.Github"),
+            patch.object(
+                PreviousComment,
+                "finding_hash_fuzzy",
+                new_callable=lambda: property(lambda _self: None),
+            ),
+        ):
             client = GitHubClient(token="test-token")
             client.get_previous_review_comments = MagicMock(return_value=[prev_comment])
 
