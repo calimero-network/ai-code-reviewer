@@ -308,6 +308,9 @@ class GitHubClient:
         repo = self._gh.get_repo(repo_name)
         try:
             content = repo.get_contents(".ai-reviewer.yaml", ref=ref)
+            if isinstance(content, list):
+                logger.warning(".ai-reviewer.yaml resolved to multiple entries; ignoring")
+                return None
             parsed = yaml.safe_load(content.decoded_content)
             if isinstance(parsed, dict):
                 return parsed
@@ -332,6 +335,9 @@ class GitHubClient:
         for path in self._CONVENTION_FILES:
             try:
                 content = repo.get_contents(path, ref=ref)
+                if isinstance(content, list):
+                    logger.debug("Convention path %s resolved to multiple entries; skipping", path)
+                    continue
                 text = content.decoded_content.decode("utf-8", errors="replace")
                 if len(text) > self._CONVENTION_PER_FILE_LIMIT:
                     text = text[: self._CONVENTION_PER_FILE_LIMIT] + "\n…(truncated)"
@@ -594,7 +600,9 @@ class GitHubClient:
             # Three-tier matching: strict hash → fuzzy hash → title+line
             matched_comment = hash_lookup.get(finding.finding_hash)
             if matched_comment is None:
-                matched_comment = fuzzy_lookup.get(finding.finding_hash_fuzzy)
+                fuzzy_hash = finding.finding_hash_fuzzy
+                if fuzzy_hash is not None:
+                    matched_comment = fuzzy_lookup.get(fuzzy_hash)
             if matched_comment is None:
                 key = (finding.file_path, finding.line_start, self._normalize_title(finding.title))
                 matched_comment = title_lookup.get(key)
