@@ -1,6 +1,6 @@
 """Tests for review agents."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -25,28 +25,18 @@ class TestCursorClient:
 
     @pytest.mark.asyncio
     async def test_client_complete_request(self):
-        """Test sending completion request."""
+        """Test that complete() raises NotImplementedError."""
         from ai_reviewer.agents.cursor_client import CursorClient, CursorConfig
 
         config = CursorConfig(api_key="test-key")
         client = CursorClient(config)
 
-        # Mock the HTTP client
-        mock_response = MagicMock()
-        mock_response.json.return_value = {"choices": [{"message": {"content": "Review response"}}]}
-        mock_response.raise_for_status = MagicMock()
-
-        with patch.object(client._client, "post", new_callable=AsyncMock) as mock_post:
-            mock_post.return_value = mock_response
-
-            result = await client.complete(
+        with pytest.raises(NotImplementedError):
+            await client.complete(
                 model="claude-4.5-opus-high-thinking",
                 system_prompt="You are a code reviewer",
                 user_prompt="Review this code",
             )
-
-            assert result == "Review response"
-            mock_post.assert_called_once()
 
 
 class TestSecurityAgent:

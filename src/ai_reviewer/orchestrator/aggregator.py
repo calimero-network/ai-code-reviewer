@@ -245,7 +245,7 @@ class ReviewAggregator:
         if not findings:
             return f"✅ No issues found by {agent_count} agents."
 
-        by_severity = {}
+        by_severity: dict[Severity, int] = {}
         for f in findings:
             by_severity[f.severity] = by_severity.get(f.severity, 0) + 1
 
@@ -270,7 +270,7 @@ class ReviewAggregator:
 
         if not findings:
             # Clean review with multiple agents = high confidence
-            return min(0.95, 0.7 + (len(reviews) * 0.1))
+            return round(min(0.95, 0.7 + (len(reviews) * 0.1)), 2)
 
         # Average consensus across findings
         avg_consensus = sum(f.consensus_score for f in findings) / len(findings)
@@ -307,7 +307,7 @@ class ReviewAggregator:
             findings=[],
             summary=f"✅ No issues found by {len(reviews)} agents. LGTM!",
             agent_count=len(reviews),
-            review_quality_score=min(0.95, 0.7 + (len(reviews) * 0.1)),
+            review_quality_score=round(min(0.95, 0.7 + (len(reviews) * 0.1)), 2),
             total_review_time_ms=total_time,
             agent_reviews=reviews,
         )

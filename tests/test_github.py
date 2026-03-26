@@ -58,7 +58,9 @@ class TestGitHubClient:
 
         with patch("ai_reviewer.github.client.Github") as mock_gh:
             mock_gh.return_value.get_user.return_value.login = "my-bot"
-            client = GitHubClient(token="t", extra_reviewer_users=["custom-bot[bot]", "ci-reviewer"])
+            client = GitHubClient(
+                token="t", extra_reviewer_users=["custom-bot[bot]", "ci-reviewer"]
+            )
             allowed = client._get_allowed_users()
         assert "custom-bot[bot]" in allowed
         assert "ci-reviewer" in allowed
@@ -1006,7 +1008,7 @@ class TestResolveFixedComments:
             client = GitHubClient(token="test-token")
 
             # Mock GraphQL to always return hasNextPage=True (infinite loop scenario)
-            def mock_graphql(query, variables=None):
+            def mock_graphql(_query, _variables=None):
                 return {
                     "repository": {
                         "pullRequest": {
@@ -1097,9 +1099,99 @@ class TestResolveFixedComments:
         mock_resp = MagicMock()
         mock_resp.raise_for_status.return_value = None
         mock_resp.json.return_value = {"errors": [{"message": "secret internal detail"}]}
-        with patch("requests.post", return_value=mock_resp):
-            with caplog.at_level(logging.WARNING):
-                result = client._graphql_request("{ viewer { login } }")
+        with patch("requests.post", return_value=mock_resp), caplog.at_level(logging.WARNING):
+            result = client._graphql_request("{ viewer { login } }")
         assert result is None
         warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         assert not any("secret internal detail" in m for m in warning_msgs)
+
+
+class TestApplyCommentLimits:
+    """Tests for the apply_comment_limits utility function."""
+
+    @staticmethod
+    def _make_finding(
+        file_path: str, severity: str, confidence: float = 0.9, consensus: float = 1.0
+    ):
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        sev = Severity(severity)
+        return ConsolidatedFinding(
+            id=f"{file_path}-{severity}-{confidence}",
+            file_path=file_path,
+            line_start=1,
+            line_end=None,
+            severity=sev,
+            category=Category.LOGIC,
+            title=f"Issue in {file_path}",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=consensus,
+            agreeing_agents=["a1"],
+            confidence=confidence,
+        )
+
+    def test_respects_max_total(self):
+        """apply_comment_limits caps total findings."""
+        from ai_reviewer.github.client import apply_comment_limits
+
+        findings = [self._make_finding(f"file{i}.py", "warning") for i in range(20)]
+        result = apply_comment_limits(findings, max_total=5, max_per_file=100)
+        assert len(result) == 5
+
+    def test_respects_max_per_file(self):
+        """apply_comment_limits caps findings per file."""
+        from ai_reviewer.github.client import apply_comment_limits
+
+        findings = [
+            self._make_finding("same.py", "warning", confidence=0.9 - i * 0.01) for i in range(10)
+        ]
+        result = apply_comment_limits(findings, max_total=100, max_per_file=3)
+        assert len(result) == 3
+        assert all(f.file_path == "same.py" for f in result)
+
+    def test_sorts_by_priority_descending(self):
+        """Higher-priority findings are kept over lower-priority ones."""
+        from ai_reviewer.github.client import apply_comment_limits
+
+        critical = self._make_finding("a.py", "critical", confidence=0.95)
+        nitpick = self._make_finding("b.py", "nitpick", confidence=0.5)
+        result = apply_comment_limits([nitpick, critical], max_total=1, max_per_file=10)
+        assert len(result) == 1
+        assert result[0].severity.value == "critical"
+
+    def test_per_file_limit_distributes_across_files(self):
+        """Per-file cap lets findings from other files through."""
+        from ai_reviewer.github.client import apply_comment_limits
+
+        findings = [
+            self._make_finding("a.py", "warning", confidence=0.9 - i * 0.01) for i in range(5)
+        ] + [self._make_finding("b.py", "warning", confidence=0.85)]
+        result = apply_comment_limits(findings, max_total=100, max_per_file=2)
+        a_count = sum(1 for f in result if f.file_path == "a.py")
+        b_count = sum(1 for f in result if f.file_path == "b.py")
+        assert a_count == 2
+        assert b_count == 1
+
+    def test_empty_input(self):
+        """Empty findings list returns empty."""
+        from ai_reviewer.github.client import apply_comment_limits
+
+        assert apply_comment_limits([], max_total=10, max_per_file=5) == []
+
+    def test_defaults_match_config_defaults(self):
+        """Default arguments match OutputSettings defaults (50 total, 10 per file)."""
+        from ai_reviewer.github.client import apply_comment_limits
+
+        findings = [self._make_finding(f"f{i}.py", "warning") for i in range(60)]
+        result = apply_comment_limits(findings)
+        assert len(result) == 50
+
+    def test_does_not_mutate_input(self):
+        """Input list is not modified."""
+        from ai_reviewer.github.client import apply_comment_limits
+
+        findings = [self._make_finding(f"f{i}.py", "warning") for i in range(5)]
+        original_order = [f.id for f in findings]
+        apply_comment_limits(findings, max_total=2, max_per_file=10)
+        assert [f.id for f in findings] == original_order

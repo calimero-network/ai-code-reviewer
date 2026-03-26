@@ -65,6 +65,7 @@ def _get_github_app_token(app_id: str, private_key: str, repo: str) -> str | Non
         Installation access token or None on failure
     """
     import time
+
     import jwt
     import requests
 
@@ -128,10 +129,11 @@ def _setup_default_review_handler() -> None:
     This is used when running as a standalone server (e.g., Cloud Run)
     without the CLI's explicit handler setup.
     """
-    from ai_reviewer.review import review_pr_with_cursor_agent
     from ai_reviewer.agents.cursor_client import CursorConfig
+    from ai_reviewer.config import load_config
     from ai_reviewer.github.client import GitHubClient
     from ai_reviewer.github.formatter import GitHubFormatter
+    from ai_reviewer.review import review_pr_with_cursor_agent
 
     async def default_review_handler(repo: str, pr_number: int) -> None:
         """Default review handler that reads config from environment."""
@@ -167,9 +169,13 @@ def _setup_default_review_handler() -> None:
             timeout=cursor_timeout,
         )
 
-        enable_cross_review = (
-            os.environ.get("ENABLE_CROSS_REVIEW", "true").lower() != "false"
-        )
+        enable_cross_review = os.environ.get("ENABLE_CROSS_REVIEW", "true").lower() != "false"
+
+        try:
+            webhook_config = load_config()
+        except Exception as e:
+            logger.warning("Failed to load config file, using defaults: %s", e)
+            webhook_config = None
 
         try:
             review = await review_pr_with_cursor_agent(
@@ -180,6 +186,7 @@ def _setup_default_review_handler() -> None:
                 num_agents=num_agents,
                 enable_cross_review=enable_cross_review,
                 min_validation_agreement=min_agreement,
+                config=webhook_config,
             )
 
             if review.all_agents_failed:
@@ -232,7 +239,11 @@ def _setup_default_review_handler() -> None:
                     review_quality_score=review.review_quality_score,
                     total_review_time_ms=review.total_review_time_ms,
                 )
-                posted = gh.post_inline_comments(pr, new_only_review)
+                max_total = _get_env_int("MAX_TOTAL_FINDINGS", 50)
+                max_per_file = _get_env_int("MAX_FINDINGS_PER_FILE", 10)
+                posted = gh.post_inline_comments(
+                    pr, new_only_review, max_total=max_total, max_per_file=max_per_file
+                )
                 logger.info(f"Posted {posted} inline comments")
 
         except Exception as e:

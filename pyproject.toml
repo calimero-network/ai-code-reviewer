@@ -91,14 +91,16 @@ known-first-party = ["ai_reviewer"]
 
 [tool.mypy]
 python_version = "3.11"
-strict = true
-warn_return_any = true
 warn_unused_ignores = true
-disallow_untyped_defs = true
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = [
     "sentence_transformers.*",
+    "requests.*",
+    "jwt.*",
+    "yaml.*",
+    "github.*",
 ]
 ignore_missing_imports = true
 

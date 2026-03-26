@@ -30,6 +30,7 @@ from ai_reviewer.github.client import GitHubClient
 from ai_reviewer.models.context import ReviewContext
 from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
 from ai_reviewer.models.review import ConsolidatedReview
+from ai_reviewer.security.scanner import scan_for_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +42,42 @@ AGENT_CONFIGS = [
         "focus": "security",
         "prompt_addition": """
 **YOUR FOCUS: SECURITY**
-You are a security expert. Focus ONLY on:
-- Injection vulnerabilities (SQL, command, XSS)
-- Authentication/authorization flaws
-- Cryptographic issues
-- Data exposure and validation
-- Trust boundary violations
+You are a security expert with deep knowledge of OWASP Top 10 vulnerabilities.
+Focus ONLY on security issues. Ignore performance, style, and other non-security concerns.
 
-Ignore performance, style, and other non-security issues.
+Review for these categories:
+
+1. **Injection Vulnerabilities**
+   - SQL injection (string interpolation in queries)
+   - Command injection (os.system, subprocess with user input)
+   - XSS (unescaped user input in HTML/JS)
+   - LDAP/XPath injection
+
+2. **Authentication & Authorization**
+   - Hardcoded credentials or secrets
+   - Weak password handling (MD5/SHA1 instead of bcrypt/argon2)
+   - Missing authentication or authorization checks
+   - Broken access control and privilege escalation
+
+3. **Cryptographic Issues**
+   - Weak algorithms (MD5, SHA1 for security purposes)
+   - Hardcoded keys or IVs
+   - Insecure random number generation
+   - Missing encryption for sensitive data
+
+4. **Data Exposure**
+   - Sensitive data in logs or error messages
+   - Insecure data transmission
+   - Missing input validation
+
+5. **Security Misconfigurations**
+   - Debug mode in production
+   - Permissive CORS policies
+   - Missing security headers
+   - Insecure defaults
+
+Provide specific line numbers and concrete evidence for each finding.
+Do not speculate about issues that might exist elsewhere in the codebase.
 """,
     },
     {
@@ -81,13 +110,10 @@ def _detect_pr_type(changed_paths: list[str]) -> str:
     """Detect PR type from changed file paths for context-aware review instructions."""
     if not changed_paths:
         return "code"
-    if all(
-        p.endswith(".md") or p.endswith(".mdx") for p in changed_paths
-    ):
+    if all(p.endswith(".md") or p.endswith(".mdx") for p in changed_paths):
         return "docs"
     if all(
-        p.startswith(".github/") or p.endswith(".yml") or p.endswith(".yaml")
-        for p in changed_paths
+        p.startswith(".github/") or p.endswith(".yml") or p.endswith(".yaml") for p in changed_paths
     ):
         return "ci"
     return "code"
@@ -147,19 +173,20 @@ def get_base_prompt(
 """
 
 
-def get_output_format(pr_type: str = "code") -> str:
+def get_output_format(pr_type: str = "code", total_lines: int = 0) -> str:
     """Get the JSON output format instructions."""
+    max_findings = max(3, min(10, total_lines // 100 + 3))
     concise_rules = [
         "- Be concise: one short sentence per finding description. Do not repeat the same point.",
         "- Only report issues on changed lines; do not suggest pre-existing improvements.",
-        "- **Severity semantics:** critical = must fix (security bugs or data corruption risks only); warning = should fix (other serious correctness or maintainability issues); suggestion = consider; nitpick = optional polish—always prefix title with \"Nit: \" for nitpicks.",
+        '- **Severity semantics:** critical = must fix (security bugs or data corruption risks only); warning = should fix (other serious correctness or maintainability issues); suggestion = consider; nitpick = optional polish—always prefix title with "Nit: " for nitpicks.',
         "- If the code looks good for your focus area, return empty findings array.",
-        "- Maximum 5 findings per agent.",
+        f"- Maximum {max_findings} findings per agent.",
         "- If something is done well (e.g. clear naming, good tests), mention it briefly in the summary.",
     ]
     if pr_type == "docs":
         concise_rules.append(
-            "- Do not report style, nitpicks, or \"add tests\". Only factual errors or security."
+            '- Do not report style, nitpicks, or "add tests". Only factual errors or security.'
         )
     elif pr_type == "ci":
         concise_rules.append(
@@ -190,6 +217,19 @@ You MUST respond with a single valid JSON object (no markdown fences around it):
 **Rules**:
 {chr(10).join(concise_rules)}
 
+## Example of a GOOD finding (specific, actionable):
+{{"file_path": "auth.py", "line_start": 45, "severity": "critical",
+ "category": "security", "title": "SQL injection via string interpolation",
+ "description": "User input interpolated directly into SQL query without parameterization.",
+ "suggested_fix": "Use parameterized query: cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))",
+ "confidence": 0.95}}
+
+## Example of a BAD finding (vague -- DO NOT produce these):
+{{"file_path": "utils.py", "line_start": 1, "severity": "suggestion",
+ "category": "testing", "title": "Consider adding more tests",
+ "description": "The code could benefit from additional test coverage.",
+ "confidence": 0.5}}
+
 Analyze the PR and output your JSON review.
 """
 
@@ -215,7 +255,7 @@ def get_cross_review_prompt(
             len(review.findings),
         )
     findings_blob = []
-    for i, f in enumerate(review.findings[: _CROSS_REVIEW_MAX_FINDINGS], 1):
+    for i, f in enumerate(review.findings[:_CROSS_REVIEW_MAX_FINDINGS], 1):
         line_ref = f"{f.line_start}" + (f"-{f.line_end}" if f.line_end else "")
         findings_blob.append(
             f"{i}. [id={f.id}] {f.file_path}:{line_ref} [{f.severity.value}] {f.title}\n   {f.description}"
@@ -251,7 +291,7 @@ Output the list of assessments in the exact JSON format below (use the finding `
 
 def get_cross_review_output_format() -> str:
     """JSON schema for cross-review round response."""
-    return '''
+    return """
 ## Output format (valid JSON only, no markdown fences)
 {"assessments": [{"id": "finding-1", "valid": true, "rank": 1}, {"id": "finding-2", "valid": false, "rank": 5}, ...], "summary": "One sentence on overall quality of the findings."}
 
@@ -259,7 +299,7 @@ def get_cross_review_output_format() -> str:
 - "valid": true if the finding should stay in the report, false if it should be dropped or is not actionable.
 - "rank": integer, 1 = most important. Lower rank = higher priority.
 - Include every finding id from the list in assessments.
-'''
+"""
 
 
 def _extract_json_block(content: str, json_key: str) -> str:
@@ -274,7 +314,7 @@ def _extract_json_block(content: str, json_key: str) -> str:
         if match:
             content = match.group(1).strip()
     # Greedy match: one JSON object containing json_key (trailing content may be included; json.loads will fail and callers return []).
-    json_match = re.search(r'\{[\s\S]*' + re.escape(json_key) + r'[\s\S]*\}', content)
+    json_match = re.search(r"\{[\s\S]*" + re.escape(json_key) + r"[\s\S]*\}", content)
     return json_match.group(0) if json_match else content
 
 
@@ -323,18 +363,19 @@ def apply_cross_review(
             else:
                 valid = bool(raw_valid)
             rank = a.get("rank", 99)
-            if isinstance(rank, (int, float)):
-                rank = max(1, int(rank))
-            else:
-                rank = 99
+            rank = max(1, int(rank)) if isinstance(rank, (int, float)) else 99
             id_to_votes[fid].append((valid, rank))
 
     kept: list[tuple[ConsolidatedFinding, float, float]] = []  # (finding, valid_ratio, avg_rank)
 
     for fid in finding_ids:
+        finding = id_to_finding[fid]
+        if finding.severity == Severity.CRITICAL and finding.category == Category.SECURITY:
+            kept.append((finding, 1.0, 0))
+            continue
         votes = id_to_votes.get(fid, [])
         if not votes:
-            kept.append((id_to_finding[fid], 1.0, 99.0))
+            kept.append((finding, 1.0, 99.0))
             continue
         valid_count = sum(1 for v, _ in votes if v)
         # Use len(votes) not n_agents: only agents that assessed this finding count (omit = no vote)
@@ -342,10 +383,15 @@ def apply_cross_review(
         if valid_ratio < min_validation_agreement:
             continue  # Drop finding
         avg_rank = sum(r for _, r in votes) / len(votes) if votes else 99.0
-        kept.append((id_to_finding[fid], valid_ratio, avg_rank))
+        kept.append((finding, valid_ratio, avg_rank))
 
     # Sort by avg_rank ascending, then by severity (critical first)
-    severity_order = {Severity.CRITICAL: 0, Severity.WARNING: 1, Severity.SUGGESTION: 2, Severity.NITPICK: 3}
+    severity_order = {
+        Severity.CRITICAL: 0,
+        Severity.WARNING: 1,
+        Severity.SUGGESTION: 2,
+        Severity.NITPICK: 3,
+    }
     kept.sort(key=lambda x: (x[2], severity_order.get(x[0].severity, 4)))
 
     new_findings = [x[0] for x in kept]
@@ -502,14 +548,23 @@ def _cluster_raw_findings(
     return clusters
 
 
+CONFIDENCE_THRESHOLDS: dict[Severity, float] = {
+    Severity.CRITICAL: 0.5,
+    Severity.WARNING: 0.6,
+    Severity.SUGGESTION: 0.7,
+    Severity.NITPICK: 0.8,
+}
+
+
 def aggregate_findings(
     all_findings: list[tuple[str, list[dict], str]],
     repo: str,
     pr_number: int,
+    confidence_thresholds: dict[Severity, float] | None = None,
 ) -> ConsolidatedReview:
     """Aggregate findings from multiple agents."""
 
-    consolidated = []
+    consolidated: list[ConsolidatedFinding] = []
     summaries = []
     failed_agents = []
 
@@ -566,6 +621,16 @@ def aggregate_findings(
 
     # Sort by priority
     consolidated.sort(key=lambda f: f.priority_score, reverse=True)
+
+    # Filter out low-confidence findings per severity
+    thresholds = (
+        confidence_thresholds if confidence_thresholds is not None else CONFIDENCE_THRESHOLDS
+    )
+    pre_filter_count = len(consolidated)
+    consolidated = [f for f in consolidated if f.confidence >= thresholds.get(f.severity, 0.0)]
+    filtered_count = pre_filter_count - len(consolidated)
+    if filtered_count > 0:
+        logger.info("Confidence filter dropped %d finding(s)", filtered_count)
 
     # Build combined summary
     combined_summary = "\n".join(summaries) if summaries else "Review completed"
@@ -655,6 +720,18 @@ async def run_cross_review_round(
     ]
 
 
+def _effective_agent_count(
+    additions: int, deletions: int, changed_files: int, requested: int
+) -> int:
+    """Scale agent count with PR size to save cost and latency on small PRs."""
+    total = additions + deletions
+    if total < 150 and changed_files <= 3:
+        return min(1, requested)
+    elif total < 500:
+        return min(2, requested)
+    return requested
+
+
 async def review_pr_with_cursor_agent(
     repo: str,
     pr_number: int,
@@ -664,6 +741,7 @@ async def review_pr_with_cursor_agent(
     num_agents: int = 3,
     enable_cross_review: bool = True,
     min_validation_agreement: float = 2 / 3,
+    config: Any | None = None,
 ) -> ConsolidatedReview:
     """Review a PR using Cursor Background Agent(s).
 
@@ -677,6 +755,8 @@ async def review_pr_with_cursor_agent(
         enable_cross_review: If True (default) and num_agents > 1, run a second round where
             agents validate and rank findings; drop low-agreement and re-order by rank.
         min_validation_agreement: Fraction of assessing agents that must mark a finding valid (0-1, default 2/3).
+        config: Optional Config object; used to pass aggregator confidence thresholds and
+            review_policy.secret_scan_exclude into the pipeline.
 
     Returns:
         ConsolidatedReview with findings
@@ -694,10 +774,27 @@ async def review_pr_with_cursor_agent(
     files = gh.get_changed_files(pr)
     context = gh.build_review_context(pr, repo_obj)
 
+    secret_scan_exclude = config.review_policy.secret_scan_exclude if config else []
+    secret_findings = scan_for_secrets(diff, exclude_patterns=secret_scan_exclude)
+    if secret_findings:
+        logger.warning(
+            "Secret scanner detected %d potential secret(s) — these bypass aggregation/cross-review",
+            len(secret_findings),
+        )
+
     logger.info(f"Reviewing PR #{pr_number}: {context.pr_title}")
     logger.info(
         f"Files changed: {context.changed_files_count} (+{context.additions}/-{context.deletions})"
     )
+
+    effective = _effective_agent_count(
+        context.additions, context.deletions, context.changed_files_count, num_agents
+    )
+    if effective != num_agents:
+        logger.info(f"Effective agent count: {effective} (requested {num_agents})")
+    num_agents = effective
+    if num_agents <= 2:
+        enable_cross_review = False
 
     changed_paths = list(files.keys())
     pr_type = _detect_pr_type(changed_paths)
@@ -705,7 +802,7 @@ async def review_pr_with_cursor_agent(
         logger.info(f"PR type: {pr_type} – using context-aware review rules")
 
     base_prompt = get_base_prompt(context, diff, files, changed_paths=changed_paths)
-    output_format = get_output_format(pr_type)
+    output_format = get_output_format(pr_type, total_lines=context.additions + context.deletions)
     repo_url = f"https://github.com/{repo}"
 
     # Select agents to run
@@ -764,20 +861,23 @@ async def review_pr_with_cursor_agent(
             all_findings = await asyncio.gather(*tasks)
 
     # Aggregate findings
-    review = aggregate_findings(list(all_findings), repo, pr_number)
+    confidence_thresholds = None
+    if config:
+        confidence_thresholds = {
+            Severity.CRITICAL: config.aggregator.min_confidence_critical,
+            Severity.WARNING: config.aggregator.min_confidence_warning,
+            Severity.SUGGESTION: config.aggregator.min_confidence_suggestion,
+            Severity.NITPICK: config.aggregator.min_confidence_nitpick,
+        }
+    review = aggregate_findings(
+        list(all_findings), repo, pr_number, confidence_thresholds=confidence_thresholds
+    )
 
     # Optional: cross-review round (agents validate and rank findings).
     # Note: cross-review doubles API calls; disable with --no-cross-review for cost-sensitive use.
-    if (
-        enable_cross_review
-        and num_agents > 1
-        and review.findings
-        and not review.all_agents_failed
-    ):
+    if enable_cross_review and num_agents > 1 and review.findings and not review.all_agents_failed:
         # Only run cross-review with agents that succeeded in round 1
-        agents_for_cross = [
-            c for c in agents_to_run if c["name"] not in review.failed_agents
-        ]
+        agents_for_cross = [c for c in agents_to_run if c["name"] not in review.failed_agents]
         if not agents_for_cross:
             logger.info("Skipping cross-review: no round-1 agents succeeded")
         else:
@@ -794,12 +894,11 @@ async def review_pr_with_cursor_agent(
                     on_status=on_status,
                 )
             if cross_results:
-                review = apply_cross_review(
-                    review, cross_results, min_validation_agreement
-                )
-                logger.info(
-                    f"Cross-review done: {len(review.findings)} findings after validation"
-                )
+                review = apply_cross_review(review, cross_results, min_validation_agreement)
+                logger.info(f"Cross-review done: {len(review.findings)} findings after validation")
+
+    if secret_findings:
+        review.findings = secret_findings + review.findings
 
     review.total_review_time_ms = int((time.time() - start_time) * 1000)
 

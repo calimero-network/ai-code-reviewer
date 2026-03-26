@@ -48,7 +48,10 @@ def cli(verbose: bool) -> None:
 @click.option("--output", type=click.Choice(["github", "json", "markdown"]), default="github")
 @click.option("--dry-run", is_flag=True, help="Don't post to GitHub")
 @click.option(
-    "--agents", type=int, default=3, help="Number of agents (1-3): 1=comprehensive, 2+=specialized (default: 3)"
+    "--agents",
+    type=int,
+    default=3,
+    help="Number of agents (1-3): 1=comprehensive, 2+=specialized (default: 3)",
 )
 @click.option(
     "--no-approve", is_flag=True, help="Don't use APPROVE action (auto-enabled in GitHub Actions)"
@@ -133,22 +136,12 @@ async def review_pr_async(
         sys.exit(1)
 
     console.print(f"🔍 Reviewing PR #{pr_number} in [bold]{repo}[/bold]...")
-
-    if num_agents == 1:
-        console.print("[yellow]Using 1 comprehensive agent (2-5 min)[/yellow]")
-    else:
-        agent_types = ["security", "performance", "quality"][:num_agents]
-        console.print(
-            f"[yellow]Using {num_agents} specialized agents: {', '.join(agent_types)} (3-8 min)[/yellow]"
-        )
-    if num_agents > 1:
-        if enable_cross_review:
-            console.print("[dim]Cross-review enabled: agents will validate and rank findings[/dim]")
-        else:
-            console.print("[dim]Cross-review disabled[/dim]")
+    console.print(
+        f"[dim]Requested {num_agents} agent(s); actual count may be reduced for small PRs[/dim]"
+    )
 
     # Status callback
-    last_status = [None]
+    last_status: list[str | None] = [None]
 
     def on_status(status: str) -> None:
         if status != last_status[0]:
@@ -172,6 +165,7 @@ async def review_pr_async(
             num_agents=num_agents,
             enable_cross_review=enable_cross_review,
             min_validation_agreement=min_validation_agreement,
+            config=config,
         )
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -188,6 +182,26 @@ async def review_pr_async(
         console.print("  • Network connectivity issues")
         console.print("\nCheck your CURSOR_API_KEY and try again.")
         sys.exit(1)
+
+    effective_agents = review.agent_count
+    cross_review_ran = effective_agents > 1 and enable_cross_review
+    if effective_agents == 1:
+        msg = (
+            "[yellow]Used 1 comprehensive agent (PR too small for multi-agent)[/yellow]"
+            if num_agents > 1
+            else "[yellow]Used 1 comprehensive agent[/yellow]"
+        )
+        console.print(msg)
+    else:
+        agent_types = ["security", "performance", "quality"][:effective_agents]
+        console.print(
+            f"[yellow]Used {effective_agents} specialized agents: {', '.join(agent_types)}[/yellow]"
+        )
+    if effective_agents > 1:
+        if cross_review_ran:
+            console.print("[dim]Cross-review ran: findings validated and ranked[/dim]")
+        else:
+            console.print("[dim]Cross-review disabled[/dim]")
 
     console.print(f"✅ Review complete: {review.summary}")
     console.print(
@@ -279,10 +293,12 @@ async def review_pr_async(
                     review_quality_score=review.review_quality_score,
                     total_review_time_ms=review.total_review_time_ms,
                 )
-                console.print(
-                    f"💬 Posting inline comments for {min(len(new_findings_to_post), 10)} new findings..."
+                max_total = config.output.max_total_findings
+                max_per_file = config.output.max_findings_per_file
+                console.print(f"💬 Posting inline comments for up to {max_total} new findings...")
+                posted = gh.post_inline_comments(
+                    pr, new_only_review, max_total=max_total, max_per_file=max_per_file
                 )
-                posted = gh.post_inline_comments(pr, new_only_review)
                 console.print(f"   Posted {posted} inline comments")
 
             # Final status

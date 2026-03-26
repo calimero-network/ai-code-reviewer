@@ -61,6 +61,8 @@ review_policy:
   auto_approve_if_no_findings: false
   block_on_critical: true
   require_human_review_for: [security]
+  secret_scan_exclude:
+    - "tests/test_security_scanner.py"
 
 # Documentation sync rules
 documentation:
