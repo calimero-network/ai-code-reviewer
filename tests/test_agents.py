@@ -1,6 +1,6 @@
 """Tests for review agents."""
 
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 

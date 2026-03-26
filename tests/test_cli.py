@@ -72,8 +72,10 @@ class TestCLI:
 
         runner = CliRunner()
 
-        with patch("ai_reviewer.cli.load_config") as mock_load, \
-             patch("ai_reviewer.cli.validate_config", return_value=[]):
+        with (
+            patch("ai_reviewer.cli.load_config") as mock_load,
+            patch("ai_reviewer.cli.validate_config", return_value=[]),
+        ):
             mock_load.return_value = MagicMock()
 
             result = runner.invoke(cli, ["config", "validate"])
@@ -100,8 +102,12 @@ class TestCLI:
 
         runner = CliRunner()
 
-        with patch("ai_reviewer.cli.uvicorn") as mock_uvicorn:
-            # Don't actually start server, just verify it would be called
+        with (
+            patch("ai_reviewer.cli.uvicorn") as mock_uvicorn,
+            patch("ai_reviewer.cli.load_config") as mock_load,
+            patch("ai_reviewer.cli.validate_config", return_value=[]),
+        ):
+            mock_load.return_value = MagicMock()
             runner.invoke(
                 cli,
                 ["serve", "--port", "9000", "--host", "127.0.0.1"],
