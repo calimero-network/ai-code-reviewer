@@ -136,19 +136,9 @@ async def review_pr_async(
         sys.exit(1)
 
     console.print(f"🔍 Reviewing PR #{pr_number} in [bold]{repo}[/bold]...")
-
-    if num_agents == 1:
-        console.print("[yellow]Using 1 comprehensive agent (2-5 min)[/yellow]")
-    else:
-        agent_types = ["security", "performance", "quality"][:num_agents]
-        console.print(
-            f"[yellow]Using {num_agents} specialized agents: {', '.join(agent_types)} (3-8 min)[/yellow]"
-        )
-    if num_agents > 1:
-        if enable_cross_review:
-            console.print("[dim]Cross-review enabled: agents will validate and rank findings[/dim]")
-        else:
-            console.print("[dim]Cross-review disabled[/dim]")
+    console.print(
+        f"[dim]Requested {num_agents} agent(s); actual count may be reduced for small PRs[/dim]"
+    )
 
     # Status callback
     last_status: list[str | None] = [None]
@@ -192,6 +182,26 @@ async def review_pr_async(
         console.print("  • Network connectivity issues")
         console.print("\nCheck your CURSOR_API_KEY and try again.")
         sys.exit(1)
+
+    effective_agents = review.agent_count
+    cross_review_ran = effective_agents > 1 and enable_cross_review
+    if effective_agents == 1:
+        msg = (
+            "[yellow]Used 1 comprehensive agent (PR too small for multi-agent)[/yellow]"
+            if num_agents > 1
+            else "[yellow]Used 1 comprehensive agent[/yellow]"
+        )
+        console.print(msg)
+    else:
+        agent_types = ["security", "performance", "quality"][:effective_agents]
+        console.print(
+            f"[yellow]Used {effective_agents} specialized agents: {', '.join(agent_types)}[/yellow]"
+        )
+    if effective_agents > 1:
+        if cross_review_ran:
+            console.print("[dim]Cross-review ran: findings validated and ranked[/dim]")
+        else:
+            console.print("[dim]Cross-review disabled[/dim]")
 
     console.print(f"✅ Review complete: {review.summary}")
     console.print(

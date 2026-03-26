@@ -85,7 +85,7 @@ def _extract_high_entropy_tokens(line: str) -> list[str]:
     """Extract tokens from a line that look like potential secrets (alphanumeric runs)."""
     return [
         tok
-        for tok in re.findall(r"[A-Za-z0-9/+=_\-]{20,}", line)
+        for tok in re.findall(rf"[A-Za-z0-9/+=_\-]{{{_ENTROPY_MIN_LENGTH},}}", line)
         if _shannon_entropy(tok) > _ENTROPY_THRESHOLD
     ]
 
