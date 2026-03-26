@@ -556,6 +556,50 @@ CONFIDENCE_THRESHOLDS: dict[Severity, float] = {
 }
 
 
+_CROSS_FILE_ALSO_FOUND_CAP = 5
+
+
+def dedup_cross_file(
+    findings: list[ConsolidatedFinding],
+) -> list[ConsolidatedFinding]:
+    """Collapse repeated cross-file findings that share the same (category, title).
+
+    Groups of 1–2 are left unchanged.  Groups of 3+ are collapsed to a single
+    representative (the one with the highest ``priority_score``).  The
+    representative's description gets an appended "Also found in: …" note
+    listing the other file paths (capped to ``_CROSS_FILE_ALSO_FOUND_CAP``).
+    """
+    from collections import defaultdict
+    from copy import copy
+
+    groups: dict[tuple[str, str], list[ConsolidatedFinding]] = defaultdict(list)
+    for f in findings:
+        key = (f.category.value.lower().strip(), f.title.lower().strip())
+        groups[key].append(f)
+
+    result: list[ConsolidatedFinding] = []
+    for group in groups.values():
+        if len(group) < 3:
+            result.extend(group)
+            continue
+
+        group.sort(key=lambda f: f.priority_score, reverse=True)
+        representative = copy(group[0])
+
+        other_paths = [f.file_path for f in group[1:]]
+        if len(other_paths) > _CROSS_FILE_ALSO_FOUND_CAP:
+            shown = other_paths[:_CROSS_FILE_ALSO_FOUND_CAP]
+            note = ", ".join(shown) + f", and {len(other_paths) - _CROSS_FILE_ALSO_FOUND_CAP} more"
+        else:
+            note = ", ".join(other_paths)
+        representative.description = representative.description.rstrip()
+        representative.description += f"\n\nAlso found in: {note}"
+
+        result.append(representative)
+
+    return result
+
+
 def compute_quality_score(
     findings: list[ConsolidatedFinding],
     agent_count: int,
@@ -665,6 +709,12 @@ def aggregate_findings(
     filtered_count = pre_filter_count - len(consolidated)
     if filtered_count > 0:
         logger.info("Confidence filter dropped %d finding(s)", filtered_count)
+
+    pre_dedup_count = len(consolidated)
+    consolidated = dedup_cross_file(consolidated)
+    dedup_count = pre_dedup_count - len(consolidated)
+    if dedup_count > 0:
+        logger.info("Cross-file dedup collapsed %d finding(s)", dedup_count)
 
     # Build combined summary
     combined_summary = "\n".join(summaries) if summaries else "Review completed"

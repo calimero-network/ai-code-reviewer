@@ -15,6 +15,7 @@ from ai_reviewer.review import (
     _raw_findings_similar,
     aggregate_findings,
     apply_cross_review,
+    dedup_cross_file,
     get_cross_review_prompt,
     get_output_format,
     parse_cross_review_response,
@@ -954,3 +955,139 @@ class TestConfidenceFiltering:
         result = aggregate_findings(all_findings, "test/repo", 1)
         assert len(result.findings) == 1
         assert result.review_quality_score > 0
+
+
+def _make_consolidated(
+    file_path: str = "src/foo.py",
+    category: Category = Category.LOGIC,
+    title: str = "Test issue",
+    severity: Severity = Severity.WARNING,
+    confidence: float = 0.9,
+    consensus_score: float = 1.0,
+) -> ConsolidatedFinding:
+    """Factory for ConsolidatedFinding used in cross-file dedup tests."""
+    return ConsolidatedFinding(
+        id=f"finding-{id(object())}",
+        file_path=file_path,
+        line_start=10,
+        line_end=12,
+        severity=severity,
+        category=category,
+        title=title,
+        description="Description of the issue.",
+        suggested_fix=None,
+        consensus_score=consensus_score,
+        agreeing_agents=["agent-1"],
+        confidence=confidence,
+    )
+
+
+class TestDedupCrossFile:
+    """Tests for dedup_cross_file() cross-file deduplication."""
+
+    def test_two_same_title_different_files_kept(self):
+        """Two findings with the same (category, title) in different files stay separate."""
+        findings = [
+            _make_consolidated(file_path="src/a.py", title="Missing null check"),
+            _make_consolidated(file_path="src/b.py", title="Missing null check"),
+        ]
+        result = dedup_cross_file(findings)
+        assert len(result) == 2
+
+    def test_three_same_title_different_files_collapse(self):
+        """Three or more findings with the same (category, title) in different files collapse to one."""
+        findings = [
+            _make_consolidated(file_path="src/a.py", title="Missing null check"),
+            _make_consolidated(file_path="src/b.py", title="Missing null check"),
+            _make_consolidated(file_path="src/c.py", title="Missing null check"),
+        ]
+        result = dedup_cross_file(findings)
+        assert len(result) == 1
+        assert "Also found in:" in result[0].description
+
+    def test_different_titles_not_collapsed(self):
+        """Findings with different titles are never collapsed, even if category matches."""
+        findings = [
+            _make_consolidated(file_path="src/a.py", title="Missing null check"),
+            _make_consolidated(file_path="src/b.py", title="Missing null check"),
+            _make_consolidated(file_path="src/c.py", title="Unused import"),
+        ]
+        result = dedup_cross_file(findings)
+        titles = [f.title for f in result]
+        assert "Unused import" in titles
+        assert titles.count("Missing null check") == 2
+
+    def test_collapsed_group_keeps_highest_priority(self):
+        """The representative of a collapsed group is the finding with the highest priority_score."""
+        low = _make_consolidated(
+            file_path="src/a.py",
+            title="Missing null check",
+            severity=Severity.SUGGESTION,
+            confidence=0.7,
+        )
+        mid = _make_consolidated(
+            file_path="src/b.py",
+            title="Missing null check",
+            severity=Severity.WARNING,
+            confidence=0.8,
+        )
+        high = _make_consolidated(
+            file_path="src/c.py",
+            title="Missing null check",
+            severity=Severity.CRITICAL,
+            confidence=0.95,
+        )
+        findings = [low, mid, high]
+        result = dedup_cross_file(findings)
+        assert len(result) == 1
+        assert result[0].file_path == "src/c.py"
+        assert result[0].severity == Severity.CRITICAL
+
+    def test_also_found_in_note_caps_paths(self):
+        """The 'Also found in' note is capped to a readable subset of paths."""
+        findings = [
+            _make_consolidated(file_path=f"src/file_{i}.py", title="Repeated pattern")
+            for i in range(10)
+        ]
+        result = dedup_cross_file(findings)
+        assert len(result) == 1
+        note = result[0].description
+        assert "Also found in:" in note
+        assert "and" in note or note.count("src/") <= 6
+
+    def test_grouping_uses_normalized_category_and_title(self):
+        """Grouping normalizes category and title (case-insensitive, stripped)."""
+        findings = [
+            _make_consolidated(
+                file_path="src/a.py", category=Category.LOGIC, title="  Null Check "
+            ),
+            _make_consolidated(file_path="src/b.py", category=Category.LOGIC, title="null check"),
+            _make_consolidated(file_path="src/c.py", category=Category.LOGIC, title="NULL CHECK"),
+        ]
+        result = dedup_cross_file(findings)
+        assert len(result) == 1
+
+    def test_different_categories_same_title_not_collapsed(self):
+        """Same title but different categories should not be grouped together."""
+        findings = [
+            _make_consolidated(
+                file_path="src/a.py", category=Category.LOGIC, title="Missing check"
+            ),
+            _make_consolidated(
+                file_path="src/b.py", category=Category.SECURITY, title="Missing check"
+            ),
+            _make_consolidated(
+                file_path="src/c.py", category=Category.LOGIC, title="Missing check"
+            ),
+            _make_consolidated(
+                file_path="src/d.py", category=Category.SECURITY, title="Missing check"
+            ),
+            _make_consolidated(
+                file_path="src/e.py", category=Category.SECURITY, title="Missing check"
+            ),
+        ]
+        result = dedup_cross_file(findings)
+        logic_findings = [f for f in result if f.category == Category.LOGIC]
+        security_findings = [f for f in result if f.category == Category.SECURITY]
+        assert len(logic_findings) == 2
+        assert len(security_findings) == 1
