@@ -41,14 +41,42 @@ AGENT_CONFIGS = [
         "focus": "security",
         "prompt_addition": """
 **YOUR FOCUS: SECURITY**
-You are a security expert. Focus ONLY on:
-- Injection vulnerabilities (SQL, command, XSS)
-- Authentication/authorization flaws
-- Cryptographic issues
-- Data exposure and validation
-- Trust boundary violations
+You are a security expert with deep knowledge of OWASP Top 10 vulnerabilities.
+Focus ONLY on security issues. Ignore performance, style, and other non-security concerns.
 
-Ignore performance, style, and other non-security issues.
+Review for these categories:
+
+1. **Injection Vulnerabilities**
+   - SQL injection (string interpolation in queries)
+   - Command injection (os.system, subprocess with user input)
+   - XSS (unescaped user input in HTML/JS)
+   - LDAP/XPath injection
+
+2. **Authentication & Authorization**
+   - Hardcoded credentials or secrets
+   - Weak password handling (MD5/SHA1 instead of bcrypt/argon2)
+   - Missing authentication or authorization checks
+   - Broken access control and privilege escalation
+
+3. **Cryptographic Issues**
+   - Weak algorithms (MD5, SHA1 for security purposes)
+   - Hardcoded keys or IVs
+   - Insecure random number generation
+   - Missing encryption for sensitive data
+
+4. **Data Exposure**
+   - Sensitive data in logs or error messages
+   - Insecure data transmission
+   - Missing input validation
+
+5. **Security Misconfigurations**
+   - Debug mode in production
+   - Permissive CORS policies
+   - Missing security headers
+   - Insecure defaults
+
+Provide specific line numbers and concrete evidence for each finding.
+Do not speculate about issues that might exist elsewhere in the codebase.
 """,
     },
     {
