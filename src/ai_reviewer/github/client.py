@@ -162,7 +162,9 @@ class GitHubClient:
         if self._allowed_users is None:
             current_user = self._get_current_user_login()
             if current_user:
-                self._allowed_users = self.AI_REVIEWER_USERS | {current_user} | self._extra_reviewer_users
+                self._allowed_users = (
+                    self.AI_REVIEWER_USERS | {current_user} | self._extra_reviewer_users
+                )
             else:
                 self._allowed_users = self.AI_REVIEWER_USERS | self._extra_reviewer_users
         return self._allowed_users
@@ -560,7 +562,9 @@ class GitHubClient:
         # Deduplicate by comment ID to prevent exponential growth on re-reviews
         seen: set[int] = set()
         delta.fixed_findings = [
-            f for f in delta.fixed_findings if f.id not in seen and not seen.add(f.id)  # type: ignore[func-returns-value]
+            f
+            for f in delta.fixed_findings
+            if f.id not in seen and not seen.add(f.id)  # type: ignore[func-returns-value]
         ]
 
         logger.info(
@@ -634,10 +638,7 @@ class GitHubClient:
         Returns:
             True if the line is within tolerance of any modified line
         """
-        for mod_line in modified_lines:
-            if abs(line - mod_line) <= tolerance:
-                return True
-        return False
+        return any(abs(line - mod_line) <= tolerance for mod_line in modified_lines)
 
     def _graphql_request(self, query: str, variables: dict | None = None) -> dict | None:
         """Make a GraphQL request to GitHub API.
@@ -653,11 +654,7 @@ class GitHubClient:
         if self._base_url:
             # GitHub Enterprise: /api/v3 -> /api/graphql
             base = self._base_url.rstrip("/")
-            if base.endswith("/api/v3"):
-                # Replace /v3 with /graphql
-                graphql_url = base[:-3] + "/graphql"
-            else:
-                graphql_url = f"{base}/graphql"
+            graphql_url = base[:-3] + "/graphql" if base.endswith("/api/v3") else f"{base}/graphql"
         else:
             graphql_url = "https://api.github.com/graphql"
 

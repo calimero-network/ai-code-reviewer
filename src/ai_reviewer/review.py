@@ -110,13 +110,10 @@ def _detect_pr_type(changed_paths: list[str]) -> str:
     """Detect PR type from changed file paths for context-aware review instructions."""
     if not changed_paths:
         return "code"
-    if all(
-        p.endswith(".md") or p.endswith(".mdx") for p in changed_paths
-    ):
+    if all(p.endswith(".md") or p.endswith(".mdx") for p in changed_paths):
         return "docs"
     if all(
-        p.startswith(".github/") or p.endswith(".yml") or p.endswith(".yaml")
-        for p in changed_paths
+        p.startswith(".github/") or p.endswith(".yml") or p.endswith(".yaml") for p in changed_paths
     ):
         return "ci"
     return "code"
@@ -182,14 +179,14 @@ def get_output_format(pr_type: str = "code", total_lines: int = 0) -> str:
     concise_rules = [
         "- Be concise: one short sentence per finding description. Do not repeat the same point.",
         "- Only report issues on changed lines; do not suggest pre-existing improvements.",
-        "- **Severity semantics:** critical = must fix (security bugs or data corruption risks only); warning = should fix (other serious correctness or maintainability issues); suggestion = consider; nitpick = optional polish—always prefix title with \"Nit: \" for nitpicks.",
+        '- **Severity semantics:** critical = must fix (security bugs or data corruption risks only); warning = should fix (other serious correctness or maintainability issues); suggestion = consider; nitpick = optional polish—always prefix title with "Nit: " for nitpicks.',
         "- If the code looks good for your focus area, return empty findings array.",
         f"- Maximum {max_findings} findings per agent.",
         "- If something is done well (e.g. clear naming, good tests), mention it briefly in the summary.",
     ]
     if pr_type == "docs":
         concise_rules.append(
-            "- Do not report style, nitpicks, or \"add tests\". Only factual errors or security."
+            '- Do not report style, nitpicks, or "add tests". Only factual errors or security.'
         )
     elif pr_type == "ci":
         concise_rules.append(
@@ -258,7 +255,7 @@ def get_cross_review_prompt(
             len(review.findings),
         )
     findings_blob = []
-    for i, f in enumerate(review.findings[: _CROSS_REVIEW_MAX_FINDINGS], 1):
+    for i, f in enumerate(review.findings[:_CROSS_REVIEW_MAX_FINDINGS], 1):
         line_ref = f"{f.line_start}" + (f"-{f.line_end}" if f.line_end else "")
         findings_blob.append(
             f"{i}. [id={f.id}] {f.file_path}:{line_ref} [{f.severity.value}] {f.title}\n   {f.description}"
@@ -294,7 +291,7 @@ Output the list of assessments in the exact JSON format below (use the finding `
 
 def get_cross_review_output_format() -> str:
     """JSON schema for cross-review round response."""
-    return '''
+    return """
 ## Output format (valid JSON only, no markdown fences)
 {"assessments": [{"id": "finding-1", "valid": true, "rank": 1}, {"id": "finding-2", "valid": false, "rank": 5}, ...], "summary": "One sentence on overall quality of the findings."}
 
@@ -302,7 +299,7 @@ def get_cross_review_output_format() -> str:
 - "valid": true if the finding should stay in the report, false if it should be dropped or is not actionable.
 - "rank": integer, 1 = most important. Lower rank = higher priority.
 - Include every finding id from the list in assessments.
-'''
+"""
 
 
 def _extract_json_block(content: str, json_key: str) -> str:
@@ -317,7 +314,7 @@ def _extract_json_block(content: str, json_key: str) -> str:
         if match:
             content = match.group(1).strip()
     # Greedy match: one JSON object containing json_key (trailing content may be included; json.loads will fail and callers return []).
-    json_match = re.search(r'\{[\s\S]*' + re.escape(json_key) + r'[\s\S]*\}', content)
+    json_match = re.search(r"\{[\s\S]*" + re.escape(json_key) + r"[\s\S]*\}", content)
     return json_match.group(0) if json_match else content
 
 
@@ -366,10 +363,7 @@ def apply_cross_review(
             else:
                 valid = bool(raw_valid)
             rank = a.get("rank", 99)
-            if isinstance(rank, (int, float)):
-                rank = max(1, int(rank))
-            else:
-                rank = 99
+            rank = max(1, int(rank)) if isinstance(rank, (int, float)) else 99
             id_to_votes[fid].append((valid, rank))
 
     kept: list[tuple[ConsolidatedFinding, float, float]] = []  # (finding, valid_ratio, avg_rank)
@@ -392,7 +386,12 @@ def apply_cross_review(
         kept.append((finding, valid_ratio, avg_rank))
 
     # Sort by avg_rank ascending, then by severity (critical first)
-    severity_order = {Severity.CRITICAL: 0, Severity.WARNING: 1, Severity.SUGGESTION: 2, Severity.NITPICK: 3}
+    severity_order = {
+        Severity.CRITICAL: 0,
+        Severity.WARNING: 1,
+        Severity.SUGGESTION: 2,
+        Severity.NITPICK: 3,
+    }
     kept.sort(key=lambda x: (x[2], severity_order.get(x[0].severity, 4)))
 
     new_findings = [x[0] for x in kept]
@@ -624,12 +623,11 @@ def aggregate_findings(
     consolidated.sort(key=lambda f: f.priority_score, reverse=True)
 
     # Filter out low-confidence findings per severity
-    thresholds = confidence_thresholds if confidence_thresholds is not None else CONFIDENCE_THRESHOLDS
+    thresholds = (
+        confidence_thresholds if confidence_thresholds is not None else CONFIDENCE_THRESHOLDS
+    )
     pre_filter_count = len(consolidated)
-    consolidated = [
-        f for f in consolidated
-        if f.confidence >= thresholds.get(f.severity, 0.0)
-    ]
+    consolidated = [f for f in consolidated if f.confidence >= thresholds.get(f.severity, 0.0)]
     filtered_count = pre_filter_count - len(consolidated)
     if filtered_count > 0:
         logger.info("Confidence filter dropped %d finding(s)", filtered_count)
@@ -793,9 +791,7 @@ async def review_pr_with_cursor_agent(
         context.additions, context.deletions, context.changed_files_count, num_agents
     )
     if effective != num_agents:
-        logger.info(
-            f"Effective agent count: {effective} (requested {num_agents})"
-        )
+        logger.info(f"Effective agent count: {effective} (requested {num_agents})")
     num_agents = effective
     if num_agents <= 2:
         enable_cross_review = False
@@ -873,20 +869,15 @@ async def review_pr_with_cursor_agent(
             Severity.SUGGESTION: config.aggregator.min_confidence_suggestion,
             Severity.NITPICK: config.aggregator.min_confidence_nitpick,
         }
-    review = aggregate_findings(list(all_findings), repo, pr_number, confidence_thresholds=confidence_thresholds)
+    review = aggregate_findings(
+        list(all_findings), repo, pr_number, confidence_thresholds=confidence_thresholds
+    )
 
     # Optional: cross-review round (agents validate and rank findings).
     # Note: cross-review doubles API calls; disable with --no-cross-review for cost-sensitive use.
-    if (
-        enable_cross_review
-        and num_agents > 1
-        and review.findings
-        and not review.all_agents_failed
-    ):
+    if enable_cross_review and num_agents > 1 and review.findings and not review.all_agents_failed:
         # Only run cross-review with agents that succeeded in round 1
-        agents_for_cross = [
-            c for c in agents_to_run if c["name"] not in review.failed_agents
-        ]
+        agents_for_cross = [c for c in agents_to_run if c["name"] not in review.failed_agents]
         if not agents_for_cross:
             logger.info("Skipping cross-review: no round-1 agents succeeded")
         else:
@@ -903,12 +894,8 @@ async def review_pr_with_cursor_agent(
                     on_status=on_status,
                 )
             if cross_results:
-                review = apply_cross_review(
-                    review, cross_results, min_validation_agreement
-                )
-                logger.info(
-                    f"Cross-review done: {len(review.findings)} findings after validation"
-                )
+                review = apply_cross_review(review, cross_results, min_validation_agreement)
+                logger.info(f"Cross-review done: {len(review.findings)} findings after validation")
 
     if secret_findings:
         review.findings = secret_findings + review.findings

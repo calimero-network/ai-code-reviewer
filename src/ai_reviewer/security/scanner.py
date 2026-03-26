@@ -23,7 +23,9 @@ SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         "AWS Access Key ID",
     ),
     (
-        re.compile(r"(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY)\s*[=:]\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?"),
+        re.compile(
+            r"(?:aws_secret_access_key|AWS_SECRET_ACCESS_KEY)\s*[=:]\s*['\"]?([A-Za-z0-9/+=]{40})['\"]?"
+        ),
         "AWS Secret Access Key",
     ),
     (
@@ -76,10 +78,7 @@ def _shannon_entropy(s: str) -> float:
         return 0.0
     counts = Counter(s)
     length = len(s)
-    return -sum(
-        (count / length) * math.log2(count / length)
-        for count in counts.values()
-    )
+    return -sum((count / length) * math.log2(count / length) for count in counts.values())
 
 
 def _extract_high_entropy_tokens(line: str) -> list[str]:

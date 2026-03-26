@@ -48,7 +48,10 @@ def cli(verbose: bool) -> None:
 @click.option("--output", type=click.Choice(["github", "json", "markdown"]), default="github")
 @click.option("--dry-run", is_flag=True, help="Don't post to GitHub")
 @click.option(
-    "--agents", type=int, default=3, help="Number of agents (1-3): 1=comprehensive, 2+=specialized (default: 3)"
+    "--agents",
+    type=int,
+    default=3,
+    help="Number of agents (1-3): 1=comprehensive, 2+=specialized (default: 3)",
 )
 @click.option(
     "--no-approve", is_flag=True, help="Don't use APPROVE action (auto-enabled in GitHub Actions)"
@@ -282,9 +285,7 @@ async def review_pr_async(
                 )
                 max_total = config.output.max_total_findings
                 max_per_file = config.output.max_findings_per_file
-                console.print(
-                    f"💬 Posting inline comments for up to {max_total} new findings..."
-                )
+                console.print(f"💬 Posting inline comments for up to {max_total} new findings...")
                 posted = gh.post_inline_comments(
                     pr, new_only_review, max_total=max_total, max_per_file=max_per_file
                 )

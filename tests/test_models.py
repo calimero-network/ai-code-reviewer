@@ -146,7 +146,8 @@ class TestConsolidatedReview:
 
 def test_finding_hash_is_stable_and_deterministic():
     """finding_hash must be stable across calls and determined by content."""
-    from ai_reviewer.models.findings import ConsolidatedFinding, Severity, Category
+    from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
     f = ConsolidatedFinding(
         id="f1",
         file_path="auth.py",
@@ -185,7 +186,8 @@ def test_finding_hash_is_stable_and_deterministic():
 
 def test_finding_hash_differs_for_different_content():
     """Different file/line/title/severity should produce different hashes."""
-    from ai_reviewer.models.findings import ConsolidatedFinding, Severity, Category
+    from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
     f1 = ConsolidatedFinding(
         id="f1",
         file_path="a.py",

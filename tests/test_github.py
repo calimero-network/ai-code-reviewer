@@ -58,7 +58,9 @@ class TestGitHubClient:
 
         with patch("ai_reviewer.github.client.Github") as mock_gh:
             mock_gh.return_value.get_user.return_value.login = "my-bot"
-            client = GitHubClient(token="t", extra_reviewer_users=["custom-bot[bot]", "ci-reviewer"])
+            client = GitHubClient(
+                token="t", extra_reviewer_users=["custom-bot[bot]", "ci-reviewer"]
+            )
             allowed = client._get_allowed_users()
         assert "custom-bot[bot]" in allowed
         assert "ci-reviewer" in allowed
@@ -977,7 +979,7 @@ class TestResolveFixedComments:
             client = GitHubClient(token="test-token")
 
             # Mock GraphQL to always return hasNextPage=True (infinite loop scenario)
-            def mock_graphql(query, variables=None):
+            def mock_graphql(_query, _variables=None):
                 return {
                     "repository": {
                         "pullRequest": {
@@ -1068,9 +1070,8 @@ class TestResolveFixedComments:
         mock_resp = MagicMock()
         mock_resp.raise_for_status.return_value = None
         mock_resp.json.return_value = {"errors": [{"message": "secret internal detail"}]}
-        with patch("requests.post", return_value=mock_resp):
-            with caplog.at_level(logging.WARNING):
-                result = client._graphql_request("{ viewer { login } }")
+        with patch("requests.post", return_value=mock_resp), caplog.at_level(logging.WARNING):
+            result = client._graphql_request("{ viewer { login } }")
         assert result is None
         warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
         assert not any("secret internal detail" in m for m in warning_msgs)
@@ -1080,7 +1081,9 @@ class TestApplyCommentLimits:
     """Tests for the apply_comment_limits utility function."""
 
     @staticmethod
-    def _make_finding(file_path: str, severity: str, confidence: float = 0.9, consensus: float = 1.0):
+    def _make_finding(
+        file_path: str, severity: str, confidence: float = 0.9, consensus: float = 1.0
+    ):
         from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
 
         sev = Severity(severity)
@@ -1111,7 +1114,9 @@ class TestApplyCommentLimits:
         """apply_comment_limits caps findings per file."""
         from ai_reviewer.github.client import apply_comment_limits
 
-        findings = [self._make_finding("same.py", "warning", confidence=0.9 - i * 0.01) for i in range(10)]
+        findings = [
+            self._make_finding("same.py", "warning", confidence=0.9 - i * 0.01) for i in range(10)
+        ]
         result = apply_comment_limits(findings, max_total=100, max_per_file=3)
         assert len(result) == 3
         assert all(f.file_path == "same.py" for f in result)
@@ -1130,10 +1135,9 @@ class TestApplyCommentLimits:
         """Per-file cap lets findings from other files through."""
         from ai_reviewer.github.client import apply_comment_limits
 
-        findings = (
-            [self._make_finding("a.py", "warning", confidence=0.9 - i * 0.01) for i in range(5)]
-            + [self._make_finding("b.py", "warning", confidence=0.85)]
-        )
+        findings = [
+            self._make_finding("a.py", "warning", confidence=0.9 - i * 0.01) for i in range(5)
+        ] + [self._make_finding("b.py", "warning", confidence=0.85)]
         result = apply_comment_limits(findings, max_total=100, max_per_file=2)
         a_count = sum(1 for f in result if f.file_path == "a.py")
         b_count = sum(1 for f in result if f.file_path == "b.py")

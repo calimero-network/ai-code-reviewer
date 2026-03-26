@@ -432,7 +432,9 @@ class TestParseCrossReviewResponse:
     """Tests for parse_cross_review_response."""
 
     def test_valid_json(self):
-        content = '{"assessments": [{"id": "finding-1", "valid": true, "rank": 1}], "summary": "OK"}'
+        content = (
+            '{"assessments": [{"id": "finding-1", "valid": true, "rank": 1}], "summary": "OK"}'
+        )
         assessments, summary = parse_cross_review_response(content)
         assert len(assessments) == 1
         assert assessments[0]["id"] == "finding-1"
@@ -532,7 +534,14 @@ class TestApplyCrossReview:
         review = _make_review([f1, f2, f3])
         # f1 rank 3, f2 rank 1, f3 rank 2 -> order f2, f3, f1
         all_assessments = [
-            ("a1", [{"id": "f1", "valid": True, "rank": 3}, {"id": "f2", "valid": True, "rank": 1}, {"id": "f3", "valid": True, "rank": 2}]),
+            (
+                "a1",
+                [
+                    {"id": "f1", "valid": True, "rank": 3},
+                    {"id": "f2", "valid": True, "rank": 1},
+                    {"id": "f3", "valid": True, "rank": 2},
+                ],
+            ),
         ]
         result = apply_cross_review(review, all_assessments)
         assert [x.id for x in result.findings] == ["f2", "f3", "f1"]
@@ -547,8 +556,14 @@ class TestApplyCrossReview:
         """When only dropping (no reorder), summary should not claim 're-ranked'."""
         review = _make_review([_make_finding("f1"), _make_finding("f2")])
         all_assessments = [
-            ("a1", [{"id": "f1", "valid": True, "rank": 1}, {"id": "f2", "valid": False, "rank": 2}]),
-            ("a2", [{"id": "f1", "valid": True, "rank": 1}, {"id": "f2", "valid": False, "rank": 2}]),
+            (
+                "a1",
+                [{"id": "f1", "valid": True, "rank": 1}, {"id": "f2", "valid": False, "rank": 2}],
+            ),
+            (
+                "a2",
+                [{"id": "f1", "valid": True, "rank": 1}, {"id": "f2", "valid": False, "rank": 2}],
+            ),
         ]
         result = apply_cross_review(review, all_assessments, min_validation_agreement=1.0)
         assert len(result.findings) == 1
@@ -561,9 +576,18 @@ class TestApplyCrossReview:
         assert review.review_quality_score == 0.9
         # All agents say valid for both -> avg valid_ratio 1.0, agent_factor 1.0 -> score 1.0
         all_assessments = [
-            ("a1", [{"id": "f1", "valid": True, "rank": 1}, {"id": "f2", "valid": True, "rank": 2}]),
-            ("a2", [{"id": "f1", "valid": True, "rank": 1}, {"id": "f2", "valid": True, "rank": 2}]),
-            ("a3", [{"id": "f1", "valid": True, "rank": 1}, {"id": "f2", "valid": True, "rank": 2}]),
+            (
+                "a1",
+                [{"id": "f1", "valid": True, "rank": 1}, {"id": "f2", "valid": True, "rank": 2}],
+            ),
+            (
+                "a2",
+                [{"id": "f1", "valid": True, "rank": 1}, {"id": "f2", "valid": True, "rank": 2}],
+            ),
+            (
+                "a3",
+                [{"id": "f1", "valid": True, "rank": 1}, {"id": "f2", "valid": True, "rank": 2}],
+            ),
         ]
         result = apply_cross_review(review, all_assessments)
         assert result.review_quality_score == 1.0
@@ -598,8 +622,14 @@ class TestApplyCrossReview:
         normal = _make_finding("f2")
         review = _make_review([critical_sec, normal])
         all_assessments = [
-            ("a1", [{"id": "sec1", "valid": False, "rank": 5}, {"id": "f2", "valid": True, "rank": 1}]),
-            ("a2", [{"id": "sec1", "valid": False, "rank": 5}, {"id": "f2", "valid": True, "rank": 2}]),
+            (
+                "a1",
+                [{"id": "sec1", "valid": False, "rank": 5}, {"id": "f2", "valid": True, "rank": 1}],
+            ),
+            (
+                "a2",
+                [{"id": "sec1", "valid": False, "rank": 5}, {"id": "f2", "valid": True, "rank": 2}],
+            ),
         ]
         result = apply_cross_review(review, all_assessments, min_validation_agreement=0.5)
         result_ids = [f.id for f in result.findings]
@@ -670,27 +700,46 @@ class TestEffectiveAgentCount:
         assert _effective_agent_count(additions=50, deletions=20, changed_files=2, requested=3) == 1
 
     def test_small_pr_caps_at_two(self):
-        assert _effective_agent_count(additions=200, deletions=100, changed_files=5, requested=3) == 2
+        assert (
+            _effective_agent_count(additions=200, deletions=100, changed_files=5, requested=3) == 2
+        )
 
     def test_large_pr_uses_requested(self):
-        assert _effective_agent_count(additions=400, deletions=200, changed_files=10, requested=3) == 3
+        assert (
+            _effective_agent_count(additions=400, deletions=200, changed_files=10, requested=3) == 3
+        )
 
     def test_requested_one_always_one(self):
-        assert _effective_agent_count(additions=1000, deletions=500, changed_files=20, requested=1) == 1
+        assert (
+            _effective_agent_count(additions=1000, deletions=500, changed_files=20, requested=1)
+            == 1
+        )
 
     def test_boundary_150_lines_3_files(self):
-        assert _effective_agent_count(additions=100, deletions=49, changed_files=3, requested=3) == 1
-        assert _effective_agent_count(additions=100, deletions=50, changed_files=3, requested=3) == 2
+        assert (
+            _effective_agent_count(additions=100, deletions=49, changed_files=3, requested=3) == 1
+        )
+        assert (
+            _effective_agent_count(additions=100, deletions=50, changed_files=3, requested=3) == 2
+        )
 
     def test_boundary_150_lines_4_files(self):
-        assert _effective_agent_count(additions=100, deletions=30, changed_files=4, requested=3) == 2
+        assert (
+            _effective_agent_count(additions=100, deletions=30, changed_files=4, requested=3) == 2
+        )
 
     def test_boundary_500_lines(self):
-        assert _effective_agent_count(additions=300, deletions=199, changed_files=5, requested=3) == 2
-        assert _effective_agent_count(additions=300, deletions=200, changed_files=5, requested=3) == 3
+        assert (
+            _effective_agent_count(additions=300, deletions=199, changed_files=5, requested=3) == 2
+        )
+        assert (
+            _effective_agent_count(additions=300, deletions=200, changed_files=5, requested=3) == 3
+        )
 
     def test_requested_caps_result(self):
-        assert _effective_agent_count(additions=200, deletions=100, changed_files=5, requested=1) == 1
+        assert (
+            _effective_agent_count(additions=200, deletions=100, changed_files=5, requested=1) == 1
+        )
         assert _effective_agent_count(additions=50, deletions=20, changed_files=2, requested=0) == 0
 
 
@@ -821,12 +870,16 @@ class TestConfidenceFiltering:
     def test_exact_threshold_kept(self):
         """Findings exactly at the threshold are kept (>= comparison)."""
         all_findings = [
-            ("agent-1", [
-                _make_raw_finding("critical", 0.5),
-                _make_raw_finding("warning", 0.6, title="Warning issue"),
-                _make_raw_finding("suggestion", 0.7, title="Suggestion issue"),
-                _make_raw_finding("nitpick", 0.8, title="Nit: Style issue"),
-            ], "summary"),
+            (
+                "agent-1",
+                [
+                    _make_raw_finding("critical", 0.5),
+                    _make_raw_finding("warning", 0.6, title="Warning issue"),
+                    _make_raw_finding("suggestion", 0.7, title="Suggestion issue"),
+                    _make_raw_finding("nitpick", 0.8, title="Nit: Style issue"),
+                ],
+                "summary",
+            ),
         ]
         result = aggregate_findings(all_findings, "test/repo", 1)
         assert len(result.findings) == 4
@@ -834,11 +887,15 @@ class TestConfidenceFiltering:
     def test_mixed_confidence_partial_filtering(self):
         """Only low-confidence findings are dropped; high-confidence ones survive."""
         all_findings = [
-            ("agent-1", [
-                _make_raw_finding("critical", 0.95),
-                _make_raw_finding("nitpick", 0.5, title="Nit: Low confidence nit"),
-                _make_raw_finding("warning", 0.9, title="High conf warning"),
-            ], "summary"),
+            (
+                "agent-1",
+                [
+                    _make_raw_finding("critical", 0.95),
+                    _make_raw_finding("nitpick", 0.5, title="Nit: Low confidence nit"),
+                    _make_raw_finding("warning", 0.9, title="High conf warning"),
+                ],
+                "summary",
+            ),
         ]
         result = aggregate_findings(all_findings, "test/repo", 1)
         assert len(result.findings) == 2
@@ -870,10 +927,14 @@ class TestConfidenceFiltering:
             Severity.NITPICK: 0.0,
         }
         all_findings = [
-            ("agent-1", [
-                _make_raw_finding("critical", 0.1),
-                _make_raw_finding("nitpick", 0.01, title="Nit: tiny"),
-            ], "summary"),
+            (
+                "agent-1",
+                [
+                    _make_raw_finding("critical", 0.1),
+                    _make_raw_finding("nitpick", 0.01, title="Nit: tiny"),
+                ],
+                "summary",
+            ),
         ]
         result = aggregate_findings(all_findings, "test/repo", 1, confidence_thresholds=custom)
         assert len(result.findings) == 2
@@ -881,10 +942,14 @@ class TestConfidenceFiltering:
     def test_quality_score_computed_after_filtering(self):
         """Quality score should be based on the filtered set, not the pre-filter set."""
         all_findings = [
-            ("agent-1", [
-                _make_raw_finding("critical", 0.95),
-                _make_raw_finding("nitpick", 0.1, title="Nit: low"),
-            ], "summary"),
+            (
+                "agent-1",
+                [
+                    _make_raw_finding("critical", 0.95),
+                    _make_raw_finding("nitpick", 0.1, title="Nit: low"),
+                ],
+                "summary",
+            ),
         ]
         result = aggregate_findings(all_findings, "test/repo", 1)
         assert len(result.findings) == 1

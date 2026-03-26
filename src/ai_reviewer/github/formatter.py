@@ -106,18 +106,22 @@ class GitHubFormatter:
                 parts.append(f"💡 {by_sev[Severity.SUGGESTION]} suggestions")
             if by_sev.get(Severity.NITPICK, 0) > 0:
                 parts.append(f"📝 {by_sev[Severity.NITPICK]} nitpicks")
-            body = (", ".join(parts) + ". See inline comments.") if parts else "See inline comments."
-        return "\n".join([
-            f"## 🤖 {self.reviewer_name}",
-            "",
-            header,
-            "",
-            body,
-            "",
-            "---",
-            "",
-            self._format_footer(review),
-        ])
+            body = (
+                (", ".join(parts) + ". See inline comments.") if parts else "See inline comments."
+            )
+        return "\n".join(
+            [
+                f"## 🤖 {self.reviewer_name}",
+                "",
+                header,
+                "",
+                body,
+                "",
+                "---",
+                "",
+                self._format_footer(review),
+            ]
+        )
 
     def format_review_with_delta_compact(
         self, review: ConsolidatedReview, delta: ReviewDelta
@@ -134,18 +138,22 @@ class GitHubFormatter:
                 parts.append(f"🆕 {len(delta.new_findings)} new")
             if delta.open_findings:
                 parts.append(f"⏳ {len(delta.open_findings)} open")
-            body = (" | ".join(parts) + ". See inline comments.") if parts else "See inline comments."
-        return "\n".join([
-            f"## 🤖 {self.reviewer_name}",
-            "",
-            header,
-            "",
-            body,
-            "",
-            "---",
-            "",
-            self._format_footer(review),
-        ])
+            body = (
+                (" | ".join(parts) + ". See inline comments.") if parts else "See inline comments."
+            )
+        return "\n".join(
+            [
+                f"## 🤖 {self.reviewer_name}",
+                "",
+                header,
+                "",
+                body,
+                "",
+                "---",
+                "",
+                self._format_footer(review),
+            ]
+        )
 
     def _format_header(self, review: ConsolidatedReview) -> str:
         """Format the review header."""
