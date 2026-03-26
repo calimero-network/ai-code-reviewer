@@ -172,6 +172,7 @@ async def review_pr_async(
             num_agents=num_agents,
             enable_cross_review=enable_cross_review,
             min_validation_agreement=min_validation_agreement,
+            config=config,
         )
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")

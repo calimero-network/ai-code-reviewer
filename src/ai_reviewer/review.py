@@ -743,6 +743,7 @@ async def review_pr_with_cursor_agent(
     num_agents: int = 3,
     enable_cross_review: bool = True,
     min_validation_agreement: float = 2 / 3,
+    config: Any | None = None,
 ) -> ConsolidatedReview:
     """Review a PR using Cursor Background Agent(s).
 
@@ -756,6 +757,8 @@ async def review_pr_with_cursor_agent(
         enable_cross_review: If True (default) and num_agents > 1, run a second round where
             agents validate and rank findings; drop low-agreement and re-order by rank.
         min_validation_agreement: Fraction of assessing agents that must mark a finding valid (0-1, default 2/3).
+        config: Optional Config object; used to pass aggregator confidence thresholds and
+            review_policy.secret_scan_exclude into the pipeline.
 
     Returns:
         ConsolidatedReview with findings
@@ -773,7 +776,8 @@ async def review_pr_with_cursor_agent(
     files = gh.get_changed_files(pr)
     context = gh.build_review_context(pr, repo_obj)
 
-    secret_findings = scan_for_secrets(diff)
+    secret_scan_exclude = config.review_policy.secret_scan_exclude if config else []
+    secret_findings = scan_for_secrets(diff, exclude_patterns=secret_scan_exclude)
     if secret_findings:
         logger.warning(
             "Secret scanner detected %d potential secret(s) — these bypass aggregation/cross-review",
@@ -861,7 +865,15 @@ async def review_pr_with_cursor_agent(
             all_findings = await asyncio.gather(*tasks)
 
     # Aggregate findings
-    review = aggregate_findings(list(all_findings), repo, pr_number)
+    confidence_thresholds = None
+    if config:
+        confidence_thresholds = {
+            Severity.CRITICAL: config.aggregator.min_confidence_critical,
+            Severity.WARNING: config.aggregator.min_confidence_warning,
+            Severity.SUGGESTION: config.aggregator.min_confidence_suggestion,
+            Severity.NITPICK: config.aggregator.min_confidence_nitpick,
+        }
+    review = aggregate_findings(list(all_findings), repo, pr_number, confidence_thresholds=confidence_thresholds)
 
     # Optional: cross-review round (agents validate and rank findings).
     # Note: cross-review doubles API calls; disable with --no-cross-review for cost-sensitive use.

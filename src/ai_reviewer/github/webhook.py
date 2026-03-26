@@ -132,6 +132,7 @@ def _setup_default_review_handler() -> None:
     from ai_reviewer.agents.cursor_client import CursorConfig
     from ai_reviewer.github.client import GitHubClient
     from ai_reviewer.github.formatter import GitHubFormatter
+    from ai_reviewer.config import load_config
 
     async def default_review_handler(repo: str, pr_number: int) -> None:
         """Default review handler that reads config from environment."""
@@ -172,6 +173,12 @@ def _setup_default_review_handler() -> None:
         )
 
         try:
+            webhook_config = load_config()
+        except Exception as e:
+            logger.warning("Failed to load config file, using defaults: %s", e)
+            webhook_config = None
+
+        try:
             review = await review_pr_with_cursor_agent(
                 repo=repo,
                 pr_number=pr_number,
@@ -180,6 +187,7 @@ def _setup_default_review_handler() -> None:
                 num_agents=num_agents,
                 enable_cross_review=enable_cross_review,
                 min_validation_agreement=min_agreement,
+                config=webhook_config,
             )
 
             if review.all_agents_failed:
