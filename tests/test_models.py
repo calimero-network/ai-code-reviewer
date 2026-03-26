@@ -224,9 +224,9 @@ def _make_consolidated_finding(
     file_path: str = "src/auth.py",
     line_start: int = 10,
     title: str = "SQL Injection Vulnerability",
-    severity: "Severity | None" = None,
-    category: "Category | None" = None,
-) -> "ConsolidatedFinding":
+    severity=None,
+    category=None,
+):
     from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
 
     return ConsolidatedFinding(
