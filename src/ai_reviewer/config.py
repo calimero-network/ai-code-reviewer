@@ -38,6 +38,7 @@ class GitHubConfig:
     webhook_secret: str | None = None
     app_id: str | None = None
     private_key_path: str | None = None
+    extra_reviewer_users: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -163,6 +164,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         webhook_secret=github_raw.get("webhook_secret"),
         app_id=github_raw.get("app_id"),
         private_key_path=github_raw.get("private_key_path"),
+        extra_reviewer_users=github_raw.get("extra_reviewer_users", []),
     )
 
     # Agents config

@@ -85,10 +85,10 @@ class ConsolidatedFinding:
 
         Key uses normalized title (lowercase+strip) and excludes severity so the
         hash stays stable when AI-generated titles vary in casing/whitespace or
-        when severity is re-assessed between runs — matching the existing delta
-        tracking logic in compute_review_delta().
+        when severity is re-assessed between runs.
         """
         import hashlib
+
         normalized_title = self.title.lower().strip()
         key = f"{self.file_path or ''}:{self.line_start or 0}:{normalized_title}"
         return hashlib.sha256(key.encode()).hexdigest()[:12]

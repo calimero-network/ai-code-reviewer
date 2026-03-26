@@ -2,7 +2,9 @@
 
 import contextlib
 import logging
+import os
 import re
+import time
 from dataclasses import dataclass, field
 
 import requests
@@ -20,6 +22,24 @@ logger = logging.getLogger(__name__)
 
 # Sentinel for failed user login fetch (distinct from empty string)
 _USER_FETCH_FAILED = "__FETCH_FAILED__"
+
+
+def _raise_if_forbidden(exc: Exception) -> None:
+    """Re-raise 403 Forbidden immediately — it won't resolve on retry.
+
+    Handles both PyGithub GithubException (REST calls via PyGithub) and
+    requests.HTTPError (direct requests.post calls, e.g. GraphQL endpoint).
+    """
+    if isinstance(exc, GithubException) and exc.status == 403:
+        raise PermissionError("GitHub REST API 403 Forbidden — check token scopes") from exc
+    if isinstance(exc, requests.exceptions.HTTPError):
+        resp = getattr(exc, "response", None)
+        if resp is not None and resp.status_code == 403:
+            raise PermissionError("GitHub GraphQL 403 Forbidden") from exc
+
+
+_RESOLVE_COMMENT_DELAY_S: float = float(os.environ.get("AI_REVIEWER_RESOLVE_DELAY", "0.2"))
+_MAX_RESOLVE_COMMENTS: int = int(os.environ.get("AI_REVIEWER_MAX_RESOLVE", "100"))
 
 
 @dataclass
@@ -41,6 +61,7 @@ class PreviousComment:
     severity: str  # Extracted from emoji
     body: str
     is_resolved: bool = False
+    finding_hash: str | None = None  # Embedded hash for stable cross-run matching
 
 
 @dataclass
@@ -61,17 +82,24 @@ class ReviewDelta:
 class GitHubClient:
     """Client for GitHub API operations."""
 
-    def __init__(self, token: str, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        token: str,
+        base_url: str | None = None,
+        extra_reviewer_users: list[str] | None = None,
+    ) -> None:
         """Initialize the GitHub client.
 
         Args:
             token: GitHub personal access token or app token
             base_url: Optional base URL for GitHub Enterprise
+            extra_reviewer_users: Additional bot/user logins to treat as AI reviewer accounts
         """
         self._token = token
         self._base_url = base_url
         self._current_user_login: str | None = None
         self._allowed_users: set[str] | None = None
+        self._extra_reviewer_users: set[str] = set(extra_reviewer_users or [])
 
         if base_url:
             self._gh = Github(token, base_url=base_url)
@@ -88,6 +116,9 @@ class GitHubClient:
             try:
                 self._current_user_login = self._gh.get_user().login
             except Exception as e:
+                # Do NOT raise here — this method is used by callers that swallow
+                # exceptions (e.g. _dismiss_pending_reviews). Cache the failure so
+                # we don't retry a 403 or other permanent error on every call.
                 logger.warning(f"Could not fetch current user: {e}")
                 self._current_user_login = _USER_FETCH_FAILED
 
@@ -104,9 +135,9 @@ class GitHubClient:
         if self._allowed_users is None:
             current_user = self._get_current_user_login()
             if current_user:
-                self._allowed_users = self.AI_REVIEWER_USERS | {current_user}
+                self._allowed_users = self.AI_REVIEWER_USERS | {current_user} | self._extra_reviewer_users
             else:
-                self._allowed_users = self.AI_REVIEWER_USERS.copy()
+                self._allowed_users = self.AI_REVIEWER_USERS | self._extra_reviewer_users
         return self._allowed_users
 
     def get_repo(self, repo_name: str) -> Repository:
@@ -176,6 +207,7 @@ class GitHubClient:
                 if hasattr(content, "decoded_content"):
                     files[file.filename] = content.decoded_content.decode("utf-8")
             except Exception as e:
+                _raise_if_forbidden(e)
                 logger.warning(f"Could not fetch {file.filename}: {e}")
 
         return files
@@ -233,6 +265,7 @@ class GitHubClient:
                     review.dismiss("Superseded by new AI review")
                     return True
         except Exception as e:
+            _raise_if_forbidden(e)
             logger.warning(f"Could not dismiss pending reviews: {e}")
 
         return False
@@ -309,6 +342,7 @@ class GitHubClient:
                 comment_body = f"{severity_emoji} **{finding.title}**\n\n{finding.description}"
                 if finding.suggested_fix:
                     comment_body += f"\n\n**Suggested fix:**\n```\n{finding.suggested_fix}\n```"
+                comment_body += f"\n\n<!-- ai-reviewer-id: {finding.finding_hash} -->"
 
                 # Use create_review_comment for inline comments on the diff
                 pr.create_review_comment(
@@ -320,6 +354,7 @@ class GitHubClient:
                 posted_count += 1
                 logger.debug(f"Posted inline comment on {finding.file_path}:{finding.line_start}")
             except Exception as e:
+                _raise_if_forbidden(e)
                 # Inline comments can fail if the line isn't in the diff
                 logger.warning(
                     f"Could not post inline comment on {finding.file_path}:{finding.line_start}: {e}"
@@ -395,6 +430,10 @@ class GitHubClient:
         title_match = re.search(r"\*\*([^*]+)\*\*", body)
         title = title_match.group(1) if title_match else "Unknown Issue"
 
+        # Extract embedded hash for stable cross-run matching
+        hash_match = re.search(r"<!-- ai-reviewer-id: ([a-f0-9]{12}) -->", body)
+        finding_hash = hash_match.group(1) if hash_match else None
+
         return PreviousComment(
             id=comment.id,
             file_path=comment.path,
@@ -403,6 +442,7 @@ class GitHubClient:
             severity=severity,
             body=body,
             is_resolved=False,  # GitHub API doesn't expose this directly
+            finding_hash=finding_hash,
         )
 
     def compute_review_delta(
@@ -422,22 +462,29 @@ class GitHubClient:
         previous_comments = self.get_previous_review_comments(pr)
         delta = ReviewDelta(previous_comments=previous_comments)
 
-        # Create a lookup for previous comments by (file, line, title_normalized)
-        previous_lookup: dict[tuple[str, int, str], PreviousComment] = {}
+        # Build two lookups: hash-based (preferred) and title-based (fallback for old comments)
+        hash_lookup: dict[str, PreviousComment] = {}
+        title_lookup: dict[tuple[str, int, str], PreviousComment] = {}
         for comment in previous_comments:
+            if comment.finding_hash:
+                hash_lookup[comment.finding_hash] = comment
             key = (comment.file_path, comment.line, self._normalize_title(comment.title))
-            previous_lookup[key] = comment
+            title_lookup[key] = comment
 
         # Track which previous comments are still open
         matched_previous: set[int] = set()
 
         for finding in current_findings:
-            key = (finding.file_path, finding.line_start, self._normalize_title(finding.title))
+            # Prefer hash match (stable across title/line drift) then fall back to title match
+            matched_comment = hash_lookup.get(finding.finding_hash)
+            if matched_comment is None:
+                key = (finding.file_path, finding.line_start, self._normalize_title(finding.title))
+                matched_comment = title_lookup.get(key)
 
-            if key in previous_lookup:
+            if matched_comment is not None:
                 # This finding was already reported - it's still OPEN
                 delta.open_findings.append(finding)
-                matched_previous.add(previous_lookup[key].id)
+                matched_previous.add(matched_comment.id)
             else:
                 # This is a NEW finding
                 delta.new_findings.append(finding)
@@ -478,6 +525,12 @@ class GitHubClient:
                         # → likely fixed
                         delta.fixed_findings.append(comment)
                 # else: file in diff but line wasn't modified → don't mark as fixed
+
+        # Deduplicate by comment ID to prevent exponential growth on re-reviews
+        seen: set[int] = set()
+        delta.fixed_findings = [
+            f for f in delta.fixed_findings if f.id not in seen and not seen.add(f.id)  # type: ignore[func-returns-value]
+        ]
 
         logger.info(
             f"Review delta: {len(delta.new_findings)} new, "
@@ -592,11 +645,13 @@ class GitHubClient:
             result = response.json()
 
             if "errors" in result:
-                logger.warning(f"GraphQL errors: {result['errors']}")
+                logger.warning("GraphQL request returned errors (use DEBUG for details)")
+                logger.debug("GraphQL errors: %s", result["errors"])
                 return None
 
             return result.get("data")
         except Exception as e:
+            _raise_if_forbidden(e)
             logger.warning(f"GraphQL request failed: {e}")
             return None
 
@@ -773,7 +828,15 @@ class GitHubClient:
         # Batch-fetch all thread mappings once (avoids N+1 GraphQL calls)
         thread_mapping = self._fetch_thread_mapping(repo_name, pr.number)
 
-        for fixed in delta.fixed_findings:
+        findings_to_process = delta.fixed_findings[:_MAX_RESOLVE_COMMENTS]
+        if len(delta.fixed_findings) > _MAX_RESOLVE_COMMENTS:
+            logger.warning(
+                "Capping resolved comment processing at %d (have %d)",
+                _MAX_RESOLVE_COMMENTS,
+                len(delta.fixed_findings),
+            )
+
+        for fixed in findings_to_process:
             # Skip if we've already marked this as resolved (avoid duplicate "Resolved" on re-review)
             if fixed.id in existing_replies:
                 logger.debug(f"Comment {fixed.id} already has resolved reply, skipping")
@@ -804,7 +867,9 @@ class GitHubClient:
 
                 resolved_count += 1
                 logger.debug(f"Marked comment {fixed.id} as resolved")
+                time.sleep(_RESOLVE_COMMENT_DELAY_S)
             except Exception as e:
+                _raise_if_forbidden(e)
                 logger.warning(f"Could not resolve comment {fixed.id}: {e}")
 
         return resolved_count
