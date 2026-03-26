@@ -1,5 +1,6 @@
 """Tests for data models."""
 
+import re
 from datetime import datetime
 
 
@@ -217,3 +218,74 @@ def test_finding_hash_differs_for_different_content():
         confidence=1.0,
     )
     assert f1.finding_hash != f2.finding_hash
+
+
+def _make_consolidated_finding(
+    file_path: str = "src/auth.py",
+    line_start: int = 10,
+    title: str = "SQL Injection Vulnerability",
+    severity: "Severity | None" = None,
+    category: "Category | None" = None,
+) -> "ConsolidatedFinding":
+    from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+    return ConsolidatedFinding(
+        id="test-1",
+        file_path=file_path,
+        line_start=line_start,
+        line_end=None,
+        severity=severity or Severity.WARNING,
+        category=category or Category.SECURITY,
+        title=title,
+        description="desc",
+        suggested_fix=None,
+        consensus_score=1.0,
+        agreeing_agents=["a"],
+        confidence=0.9,
+    )
+
+
+class TestFindingHashFuzzy:
+    """Tests for the fuzzy hash property on ConsolidatedFinding."""
+
+    def test_fuzzy_hash_is_12_chars_hex(self):
+        """Fuzzy hash returns a 12-character hex string."""
+        f = _make_consolidated_finding()
+        assert re.fullmatch(r"[a-f0-9]{12}", f.finding_hash_fuzzy)
+
+    def test_fuzzy_hash_ignores_line_number(self):
+        """Same file+title at different lines produce same fuzzy hash."""
+        f1 = _make_consolidated_finding(line_start=10)
+        f2 = _make_consolidated_finding(line_start=50)
+        assert f1.finding_hash_fuzzy == f2.finding_hash_fuzzy
+
+    def test_fuzzy_hash_differs_from_primary(self):
+        """Fuzzy and primary hashes are different values."""
+        f = _make_consolidated_finding()
+        assert f.finding_hash != f.finding_hash_fuzzy
+
+    def test_fuzzy_hash_ignores_minor_title_variation(self):
+        """Fuzzy hash matches when titles share the same keywords."""
+        f1 = _make_consolidated_finding(title="SQL Injection Vulnerability Found")
+        f2 = _make_consolidated_finding(title="Found SQL Injection Vulnerability")
+        assert f1.finding_hash_fuzzy == f2.finding_hash_fuzzy
+
+    def test_fuzzy_hash_stable_across_category_changes(self):
+        """Fuzzy hash is same regardless of category (not included)."""
+        from ai_reviewer.models.findings import Category
+
+        f1 = _make_consolidated_finding(category=Category.SECURITY)
+        f2 = _make_consolidated_finding(category=Category.PERFORMANCE)
+        assert f1.finding_hash_fuzzy == f2.finding_hash_fuzzy
+
+    def test_fuzzy_hash_differs_for_different_file(self):
+        """Different files produce different fuzzy hashes."""
+        f1 = _make_consolidated_finding(file_path="a.py")
+        f2 = _make_consolidated_finding(file_path="b.py")
+        assert f1.finding_hash_fuzzy != f2.finding_hash_fuzzy
+
+    def test_primary_hash_unchanged(self):
+        """Existing finding_hash behavior is preserved."""
+        f1 = _make_consolidated_finding(line_start=10)
+        f2 = _make_consolidated_finding(line_start=50)
+        assert f1.finding_hash != f2.finding_hash  # Primary IS line-sensitive

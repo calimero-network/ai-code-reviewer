@@ -94,6 +94,20 @@ class ConsolidatedFinding:
         return hashlib.sha256(key.encode()).hexdigest()[:12]
 
     @property
+    def finding_hash_fuzzy(self) -> str:
+        """Fuzzy hash ignoring line number and category for cross-run matching.
+
+        Uses file_path + sorted title keywords (4+ chars) so the hash stays
+        stable when a finding drifts lines or gets recategorized between runs.
+        """
+        import hashlib
+        import re
+
+        words = sorted(set(re.findall(r"\b\w{4,}\b", self.title.lower())))
+        key = f"{self.file_path or ''}:{':'.join(words[:5])}"
+        return hashlib.sha256(key.encode()).hexdigest()[:12]
+
+    @property
     def priority_score(self) -> float:
         """Compute priority based on severity and consensus."""
         severity_weights = {

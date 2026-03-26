@@ -90,6 +90,22 @@ class PreviousComment:
     is_resolved: bool = False
     finding_hash: str | None = None  # Embedded hash for stable cross-run matching
 
+    @property
+    def finding_hash_fuzzy(self) -> str | None:
+        """Fuzzy hash for cross-run matching (ignores line, category).
+
+        Mirrors ConsolidatedFinding.finding_hash_fuzzy so that a previous
+        comment can be matched to a current finding even when the line number
+        or category has drifted between review runs.
+        """
+        if not self.file_path or not self.title:
+            return None
+        import hashlib
+
+        words = sorted(set(re.findall(r"\b\w{4,}\b", self.title.lower())))
+        key = f"{self.file_path}:{':'.join(words[:5])}"
+        return hashlib.sha256(key.encode()).hexdigest()[:12]
+
 
 @dataclass
 class ReviewDelta:
@@ -495,12 +511,16 @@ class GitHubClient:
         previous_comments = self.get_previous_review_comments(pr)
         delta = ReviewDelta(previous_comments=previous_comments)
 
-        # Build two lookups: hash-based (preferred) and title-based (fallback for old comments)
+        # Build three lookups: strict hash, fuzzy hash, and title-based (legacy fallback)
         hash_lookup: dict[str, PreviousComment] = {}
+        fuzzy_lookup: dict[str, PreviousComment] = {}
         title_lookup: dict[tuple[str, int, str], PreviousComment] = {}
         for comment in previous_comments:
             if comment.finding_hash:
                 hash_lookup[comment.finding_hash] = comment
+            fuzzy = comment.finding_hash_fuzzy
+            if fuzzy:
+                fuzzy_lookup[fuzzy] = comment
             key = (comment.file_path, comment.line, self._normalize_title(comment.title))
             title_lookup[key] = comment
 
@@ -508,8 +528,10 @@ class GitHubClient:
         matched_previous: set[int] = set()
 
         for finding in current_findings:
-            # Prefer hash match (stable across title/line drift) then fall back to title match
+            # Three-tier matching: strict hash → fuzzy hash → title+line
             matched_comment = hash_lookup.get(finding.finding_hash)
+            if matched_comment is None:
+                matched_comment = fuzzy_lookup.get(finding.finding_hash_fuzzy)
             if matched_comment is None:
                 key = (finding.file_path, finding.line_start, self._normalize_title(finding.title))
                 matched_comment = title_lookup.get(key)

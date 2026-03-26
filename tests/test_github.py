@@ -1195,3 +1195,232 @@ class TestApplyCommentLimits:
         original_order = [f.id for f in findings]
         apply_comment_limits(findings, max_total=2, max_per_file=10)
         assert [f.id for f in findings] == original_order
+
+
+def _make_finding_for_delta(
+    file_path: str = "src/auth.py",
+    line_start: int = 10,
+    title: str = "SQL Injection Vulnerability",
+):
+    from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+    return ConsolidatedFinding(
+        id="test-1",
+        file_path=file_path,
+        line_start=line_start,
+        line_end=None,
+        severity=Severity.WARNING,
+        category=Category.SECURITY,
+        title=title,
+        description="desc",
+        suggested_fix=None,
+        consensus_score=1.0,
+        agreeing_agents=["a"],
+        confidence=0.9,
+    )
+
+
+class TestPreviousCommentFuzzyHash:
+    """Tests for the fuzzy hash property on PreviousComment."""
+
+    def test_fuzzy_hash_matches_finding_fuzzy_hash(self):
+        """PreviousComment fuzzy hash matches ConsolidatedFinding fuzzy hash for same content."""
+        from ai_reviewer.github.client import PreviousComment
+
+        finding = _make_finding_for_delta(
+            file_path="src/auth.py", title="SQL Injection Vulnerability"
+        )
+        comment = PreviousComment(
+            id=1,
+            file_path="src/auth.py",
+            line=10,
+            title="SQL Injection Vulnerability",
+            severity="warning",
+            body="body",
+        )
+        assert comment.finding_hash_fuzzy == finding.finding_hash_fuzzy
+
+    def test_fuzzy_hash_none_when_no_file_path(self):
+        """Returns None when file_path is empty."""
+        from ai_reviewer.github.client import PreviousComment
+
+        comment = PreviousComment(
+            id=1, file_path="", line=10, title="Issue", severity="warning", body="body"
+        )
+        assert comment.finding_hash_fuzzy is None
+
+    def test_fuzzy_hash_none_when_no_title(self):
+        """Returns None when title is empty."""
+        from ai_reviewer.github.client import PreviousComment
+
+        comment = PreviousComment(
+            id=1, file_path="src/auth.py", line=10, title="", severity="warning", body="body"
+        )
+        assert comment.finding_hash_fuzzy is None
+
+    def test_fuzzy_hash_ignores_line_drift(self):
+        """Same file+title at different lines produce same fuzzy hash."""
+        from ai_reviewer.github.client import PreviousComment
+
+        c1 = PreviousComment(
+            id=1,
+            file_path="src/auth.py",
+            line=10,
+            title="SQL Injection Vulnerability",
+            severity="warning",
+            body="body",
+        )
+        c2 = PreviousComment(
+            id=2,
+            file_path="src/auth.py",
+            line=50,
+            title="SQL Injection Vulnerability",
+            severity="warning",
+            body="body",
+        )
+        assert c1.finding_hash_fuzzy == c2.finding_hash_fuzzy
+
+
+class TestComputeReviewDeltaFuzzyMatching:
+    """Tests for multi-tier matching in compute_review_delta()."""
+
+    def test_fuzzy_match_catches_line_drifted_finding(self):
+        """A finding that moved lines is matched via fuzzy hash (not new)."""
+        from ai_reviewer.github.client import GitHubClient, PreviousComment
+
+        prev_comment = PreviousComment(
+            id=1,
+            file_path="src/auth.py",
+            line=10,
+            title="SQL Injection Vulnerability",
+            severity="warning",
+            body="🟡 **SQL Injection Vulnerability**\n\ndesc\n\n<!-- ai-reviewer-id: aabbccddee11 -->",
+            finding_hash="aabbccddee11",
+        )
+
+        current_finding = _make_finding_for_delta(
+            file_path="src/auth.py",
+            line_start=25,
+            title="SQL Injection Vulnerability",
+        )
+
+        mock_pr = MagicMock()
+        mock_file = MagicMock()
+        mock_file.filename = "src/auth.py"
+        mock_file.patch = "@@ -1,3 +1,3 @@\n-old\n+new"
+        mock_file.status = "modified"
+        mock_pr.get_files.return_value = [mock_file]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client.get_previous_review_comments = MagicMock(return_value=[prev_comment])
+
+            delta = client.compute_review_delta(mock_pr, [current_finding])
+
+        assert len(delta.open_findings) == 1
+        assert len(delta.new_findings) == 0
+
+    def test_strict_hash_takes_priority_over_fuzzy(self):
+        """When strict hash matches, fuzzy hash is not consulted."""
+        from ai_reviewer.github.client import GitHubClient, PreviousComment
+
+        finding = _make_finding_for_delta(file_path="src/auth.py", line_start=10)
+        strict_hash = finding.finding_hash
+
+        prev_comment = PreviousComment(
+            id=1,
+            file_path="src/auth.py",
+            line=10,
+            title="SQL Injection Vulnerability",
+            severity="warning",
+            body=f"body\n\n<!-- ai-reviewer-id: {strict_hash} -->",
+            finding_hash=strict_hash,
+        )
+
+        mock_pr = MagicMock()
+        mock_file = MagicMock()
+        mock_file.filename = "src/auth.py"
+        mock_file.patch = "@@ -1,3 +1,3 @@\n-old\n+new"
+        mock_file.status = "modified"
+        mock_pr.get_files.return_value = [mock_file]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client.get_previous_review_comments = MagicMock(return_value=[prev_comment])
+
+            delta = client.compute_review_delta(mock_pr, [finding])
+
+        assert len(delta.open_findings) == 1
+        assert len(delta.new_findings) == 0
+
+    def test_title_fallback_still_works(self):
+        """Legacy title+line matching still works when no hashes match."""
+        from ai_reviewer.github.client import GitHubClient, PreviousComment
+
+        prev_comment = PreviousComment(
+            id=1,
+            file_path="src/auth.py",
+            line=10,
+            title="SQL Injection Vulnerability",
+            severity="warning",
+            body="🟡 **SQL Injection Vulnerability**\n\ndesc",
+            finding_hash=None,
+        )
+
+        current_finding = _make_finding_for_delta(
+            file_path="src/auth.py",
+            line_start=10,
+            title="SQL Injection Vulnerability",
+        )
+
+        mock_pr = MagicMock()
+        mock_file = MagicMock()
+        mock_file.filename = "src/auth.py"
+        mock_file.patch = "@@ -1,3 +1,3 @@\n-old\n+new"
+        mock_file.status = "modified"
+        mock_pr.get_files.return_value = [mock_file]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client.get_previous_review_comments = MagicMock(return_value=[prev_comment])
+
+            delta = client.compute_review_delta(mock_pr, [current_finding])
+
+        assert len(delta.open_findings) == 1
+        assert len(delta.new_findings) == 0
+
+    def test_truly_new_finding_not_matched(self):
+        """A genuinely new finding (different file+title) is classified as new."""
+        from ai_reviewer.github.client import GitHubClient, PreviousComment
+
+        prev_comment = PreviousComment(
+            id=1,
+            file_path="src/auth.py",
+            line=10,
+            title="SQL Injection Vulnerability",
+            severity="warning",
+            body="body",
+            finding_hash="aabbccddee11",
+        )
+
+        new_finding = _make_finding_for_delta(
+            file_path="src/utils.py",
+            line_start=5,
+            title="Buffer Overflow Risk",
+        )
+
+        mock_pr = MagicMock()
+        mock_file = MagicMock()
+        mock_file.filename = "src/utils.py"
+        mock_file.patch = "@@ -1,3 +1,3 @@\n-old\n+new"
+        mock_file.status = "modified"
+        mock_pr.get_files.return_value = [mock_file]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client.get_previous_review_comments = MagicMock(return_value=[prev_comment])
+
+            delta = client.compute_review_delta(mock_pr, [new_finding])
+
+        assert len(delta.new_findings) == 1
+        assert len(delta.open_findings) == 0
