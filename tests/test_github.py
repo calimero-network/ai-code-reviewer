@@ -8,6 +8,28 @@ import pytest
 class TestGitHubClient:
     """Tests for GitHub API client."""
 
+    def test_403_raises_permission_error_immediately(self):
+        """403 from a method using _raise_if_forbidden must surface as PermissionError."""
+        from github.GithubException import GithubException
+
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_file = MagicMock(filename="foo.py", status="modified")
+        mock_repo = MagicMock()
+        mock_repo.get_contents.side_effect = GithubException(
+            status=403, data={"message": "Forbidden"}, headers={}
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.get_files.return_value = [mock_file]
+        mock_pr.base.repo = mock_repo
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            with pytest.raises(PermissionError):
+                client.get_changed_files(mock_pr)
+            assert mock_repo.get_contents.call_count == 1
+
     def test_extracts_pr_diff(self):
         """Test extracting diff from a PR."""
         from ai_reviewer.github.client import GitHubClient
@@ -982,3 +1004,73 @@ class TestResolveFixedComments:
             assert client._graphql_request.call_count == client._MAX_GRAPHQL_PAGES
             # Should still return the mapping it built
             assert 123 in result
+
+    def test_fixed_findings_deduplicated_by_id(self):
+        """compute_review_delta must deduplicate fixed_findings by comment ID."""
+        from ai_reviewer.github.client import GitHubClient, PreviousComment
+
+        # Build a comment that appears in a file NOT in the PR diff —
+        # that path marks it as fixed in compute_review_delta.
+        stale_comment = PreviousComment(
+            id=42, file_path="deleted.py", line=5, title="Old issue", severity="Warning", body="b"
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.get_review_comments.return_value = []
+
+        # get_previous_review_comments returns the same comment twice (simulating
+        # a scenario where the same comment was stored/retrieved twice)
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+
+        with patch.object(
+            client,
+            "get_previous_review_comments",
+            return_value=[stale_comment, stale_comment],  # duplicate
+        ):
+            mock_file = MagicMock()
+            mock_file.filename = "other.py"  # deleted.py is NOT in the diff → triggers fixed
+            mock_file.status = "modified"
+            mock_file.patch = "@@ -1,3 +1,3 @@\n-old\n+new"
+            mock_pr.get_files.return_value = [mock_file]
+
+            delta = client.compute_review_delta(mock_pr, current_findings=[])
+
+        # Even though the same comment appeared twice in previous_comments,
+        # fixed_findings must be deduplicated to exactly 1 entry
+        assert len(delta.fixed_findings) == 1
+        assert delta.fixed_findings[0].id == 42
+
+    def test_spoofed_resolved_comment_not_counted(self):
+        """A 'Resolved' comment from a non-bot user must not be counted."""
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+        mock_comment = MagicMock()
+        mock_comment.body = "✅ **Resolved** - fake"
+        mock_comment.in_reply_to_id = 999
+        mock_comment.user.login = "malicious-user"
+        mock_pr = MagicMock()
+        mock_pr.get_review_comments.return_value = [mock_comment]
+        with patch.object(client, "_get_allowed_users", return_value={"github-actions[bot]"}):
+            resolved = client._get_resolved_comment_ids(mock_pr)
+        assert 999 not in resolved
+
+    def test_graphql_errors_not_logged_verbatim_at_warning(self, caplog):
+        """Raw GraphQL error details must not appear in WARNING-level logs."""
+        import logging
+
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+        mock_resp = MagicMock()
+        mock_resp.raise_for_status.return_value = None
+        mock_resp.json.return_value = {"errors": [{"message": "secret internal detail"}]}
+        with patch("requests.post", return_value=mock_resp):
+            with caplog.at_level(logging.WARNING):
+                result = client._graphql_request("{ viewer { login } }")
+        assert result is None
+        warning_msgs = [r.message for r in caplog.records if r.levelno == logging.WARNING]
+        assert not any("secret internal detail" in m for m in warning_msgs)
