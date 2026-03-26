@@ -79,6 +79,7 @@ class ReviewPolicy:
     block_on_critical: bool = True
     require_human_review_for: list[str] = field(default_factory=list)
     ignore_patterns: list[str] = field(default_factory=list)
+    secret_scan_exclude: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -236,6 +237,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         block_on_critical=policy_raw.get("block_on_critical", True),
         require_human_review_for=policy_raw.get("require_human_review_for", []),
         ignore_patterns=policy_raw.get("ignore_patterns", []),
+        secret_scan_exclude=policy_raw.get("secret_scan_exclude", []),
     )
 
     # Server settings
