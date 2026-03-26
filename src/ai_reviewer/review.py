@@ -556,11 +556,45 @@ CONFIDENCE_THRESHOLDS: dict[Severity, float] = {
 }
 
 
+def compute_quality_score(
+    findings: list[ConsolidatedFinding],
+    agent_count: int,
+    total_lines: int,
+) -> float:
+    """Composite quality score factoring severity, density, consensus, and agents.
+
+    Returns a float between 0.0 and 0.95.
+    """
+    if not findings:
+        base = 0.85
+        agent_bonus = min(0.10, (agent_count - 1) * 0.05)
+        return min(0.95, base + agent_bonus)
+
+    severity_penalty = {
+        Severity.CRITICAL: 0.20,
+        Severity.WARNING: 0.06,
+        Severity.SUGGESTION: 0.02,
+        Severity.NITPICK: 0.005,
+    }
+    total_penalty = sum(severity_penalty.get(f.severity, 0.02) * f.confidence for f in findings)
+
+    density = len(findings) / max(total_lines / 100, 1)
+    density_penalty = min(0.15, density * 0.03)
+
+    avg_consensus = sum(f.consensus_score for f in findings) / len(findings)
+    consensus_factor = 0.8 + (avg_consensus * 0.2)
+    agent_factor = min(1.0, agent_count / 3)
+
+    raw_score = max(0.0, 1.0 - total_penalty - density_penalty)
+    return round(min(0.95, raw_score * consensus_factor * agent_factor), 2)
+
+
 def aggregate_findings(
     all_findings: list[tuple[str, list[dict], str]],
     repo: str,
     pr_number: int,
     confidence_thresholds: dict[Severity, float] | None = None,
+    total_lines: int = 0,
 ) -> ConsolidatedReview:
     """Aggregate findings from multiple agents."""
 
@@ -635,16 +669,8 @@ def aggregate_findings(
     # Build combined summary
     combined_summary = "\n".join(summaries) if summaries else "Review completed"
 
-    # Compute quality score from consensus and agent count
     total_agents = len(all_findings)
-    if not consolidated:
-        # No findings: higher score for more agents (max 0.95)
-        quality_score = min(0.95, 0.7 + total_agents * 0.1)
-    else:
-        # With findings: score based on average consensus weighted by agent coverage
-        avg_consensus = sum(f.consensus_score for f in consolidated) / len(consolidated)
-        agent_factor = min(1.0, total_agents / 3)  # Full credit at 3+ agents
-        quality_score = round(avg_consensus * agent_factor, 2)
+    quality_score = compute_quality_score(consolidated, total_agents, total_lines)
 
     return ConsolidatedReview(
         id=f"review-{uuid4().hex[:8]}",
@@ -869,8 +895,13 @@ async def review_pr_with_cursor_agent(
             Severity.SUGGESTION: config.aggregator.min_confidence_suggestion,
             Severity.NITPICK: config.aggregator.min_confidence_nitpick,
         }
+    total_lines = context.additions + context.deletions
     review = aggregate_findings(
-        list(all_findings), repo, pr_number, confidence_thresholds=confidence_thresholds
+        list(all_findings),
+        repo,
+        pr_number,
+        confidence_thresholds=confidence_thresholds,
+        total_lines=total_lines,
     )
 
     # Optional: cross-review round (agents validate and rank findings).

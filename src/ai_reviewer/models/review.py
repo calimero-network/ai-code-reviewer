@@ -7,6 +7,17 @@ from ai_reviewer.models.findings import Category, ConsolidatedFinding, ReviewFin
 
 
 @dataclass
+class ScoreBreakdown:
+    """Transparent breakdown of quality score components."""
+
+    severity_penalty: float
+    density_penalty: float
+    consensus_factor: float
+    agent_factor: float
+    raw_score: float
+
+
+@dataclass
 class AgentReview:
     """Complete review from a single agent."""
 
@@ -51,6 +62,9 @@ class ConsolidatedReview:
 
     # Track failed agents
     failed_agents: list[str] = field(default_factory=list)
+
+    # Transparent score breakdown (populated by compute_quality_score)
+    score_breakdown: ScoreBreakdown | None = None
 
     @property
     def findings_by_severity(self) -> dict[Severity, int]:
