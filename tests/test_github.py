@@ -110,35 +110,28 @@ class TestGitHubPRHandler:
     @pytest.mark.asyncio
     async def test_handles_pr_opened_event(self):
         """Test handling PR opened webhook event."""
+        from ai_reviewer.github import webhook
         from ai_reviewer.github.webhook import PREvent, handle_pr_event
 
-        event = PREvent(
-            repo="test-org/test-repo",
-            pr_number=42,
-            action="opened",
-        )
+        mock_handler = AsyncMock()
+        event = PREvent(repo="test-org/test-repo", pr_number=42, action="opened")
 
-        with patch("ai_reviewer.github.webhook.review_pr", new_callable=AsyncMock) as mock_review:
+        with patch.object(webhook, "_review_handler", mock_handler):
             await handle_pr_event(event)
-            mock_review.assert_called_once_with(
-                repo="test-org/test-repo",
-                pr_number=42,
-            )
+            mock_handler.assert_called_once_with(repo="test-org/test-repo", pr_number=42)
 
     @pytest.mark.asyncio
     async def test_ignores_irrelevant_actions(self):
         """Test that irrelevant PR actions are ignored."""
+        from ai_reviewer.github import webhook
         from ai_reviewer.github.webhook import PREvent, handle_pr_event
 
-        event = PREvent(
-            repo="test-org/test-repo",
-            pr_number=42,
-            action="labeled",  # Not a review trigger
-        )
+        mock_handler = AsyncMock()
+        event = PREvent(repo="test-org/test-repo", pr_number=42, action="labeled")
 
-        with patch("ai_reviewer.github.webhook.review_pr", new_callable=AsyncMock) as mock_review:
+        with patch.object(webhook, "_review_handler", mock_handler):
             await handle_pr_event(event)
-            mock_review.assert_not_called()
+            mock_handler.assert_not_called()
 
 
 class TestReviewFormatter:
