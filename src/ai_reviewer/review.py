@@ -197,6 +197,86 @@ def filter_diff_by_ignore_patterns(diff: str, patterns: list[str]) -> str:
     return "".join(sections)
 
 
+_LANGUAGE_RULES: dict[str, str] = {
+    "python": (
+        "For Python:\n"
+        "- Mutable default arguments (e.g. `def f(x=[])`) — flag every occurrence.\n"
+        "- Bare `except:` or `except Exception:` without re-raise — require specific exception types.\n"
+        "- Missing type hints on public function signatures.\n"
+        '- f-string injection in `logging.info(f"...")` — use `logging.info("...", arg)` instead.\n'
+        "- Missing context managers (`with`) for file handles, DB connections, locks.\n"
+        "- `subprocess` calls with `shell=True` — flag as security risk.\n"
+        "- Shadowing built-in names (`id`, `type`, `list`, `dict`, `input`, `hash`).\n"
+        "- `import *` usage — require explicit imports.\n"
+        "- Missing `__all__` in library/package modules that define a public API.\n"
+        "- `os.path` usage where `pathlib.Path` is preferred in modern Python."
+    ),
+    "rust": (
+        "For Rust:\n"
+        "- `.unwrap()` / `.expect()` in non-test code — require proper error propagation with `?` or `match`.\n"
+        "- `unsafe` blocks without a `// SAFETY:` comment justifying invariants.\n"
+        "- Unnecessary `.clone()` — flag when borrowing or references would suffice.\n"
+        "- Unbounded allocations: `Vec::new()` in loops without pre-allocated capacity, or "
+        "`collect()` on unbounded iterators without size hints.\n"
+        "- Missing lifetime annotations where the compiler cannot elide them.\n"
+        "- `panic!()` / `todo!()` / `unimplemented!()` in library code — should return `Result`.\n"
+        "- Mutex poisoning: using `.lock().unwrap()` without handling `PoisonError`.\n"
+        "- Large types on the stack — suggest `Box<T>` for types > ~1KB.\n"
+        "- Missing `#[must_use]` on functions returning `Result` or important values.\n"
+        "- `String` vs `&str` in function parameters — prefer `&str` / `impl AsRef<str>` for inputs."
+    ),
+    "javascript": (
+        "For JavaScript:\n"
+        "- Prototype pollution via unguarded `Object.assign` or bracket notation from user input.\n"
+        "- `==` vs `===` — require strict equality everywhere.\n"
+        "- Unhandled Promise rejections: missing `.catch()` or `try/catch` around `await`.\n"
+        "- `eval()`, `new Function()`, `innerHTML` — flag as security risks.\n"
+        "- Missing input sanitization on user-facing data (XSS vectors).\n"
+        "- `var` usage — require `const`/`let`.\n"
+        "- Callback hell — suggest async/await refactoring when nesting > 2 levels.\n"
+        "- Missing `AbortController` for fetch calls that should be cancellable.\n"
+        "- `JSON.parse()` without try/catch.\n"
+        "- Regex denial-of-service (ReDoS) — flag catastrophic backtracking patterns."
+    ),
+    "typescript": (
+        "For TypeScript:\n"
+        "- `any` type escapes — flag every `any` that isn't explicitly justified.\n"
+        "- Type assertions (`as T`) that bypass type safety — prefer type guards.\n"
+        "- `@ts-ignore` / `@ts-expect-error` without justification comment.\n"
+        "- Missing error boundaries in React components (when JSX is present).\n"
+        "- `==` vs `===` — require strict equality everywhere.\n"
+        "- Unhandled Promise rejections: missing `.catch()` or `try/catch` around `await`.\n"
+        "- `eval()`, `new Function()`, `innerHTML` — flag as security risks.\n"
+        "- Missing input sanitization on user-facing data (XSS vectors).\n"
+        "- `JSON.parse()` without try/catch.\n"
+        "- Regex denial-of-service (ReDoS) — flag catastrophic backtracking patterns."
+    ),
+    "go": (
+        "For Go:\n"
+        "- Unchecked errors: every returned `error` must be checked or explicitly ignored with `_`.\n"
+        "- SQL string concatenation — use parameterized queries to prevent injection.\n"
+        "- Goroutine leaks: ensure goroutines have a termination path (context, done channel, timeout).\n"
+        "- Missing `defer` for resource cleanup (files, connections, locks).\n"
+        "- Nil pointer dereference: check interface/pointer values before use after type assertions.\n"
+        "- `sync.Mutex` without matching `Unlock` (prefer `defer mu.Unlock()` immediately after `Lock`).\n"
+        "- Unbuffered channel sends in goroutines without a receiver — can block forever.\n"
+        "- `init()` functions with side effects — prefer explicit initialization.\n"
+        "- Exported functions missing doc comments.\n"
+        "- `context.Background()` in request handlers — propagate the request context instead."
+    ),
+}
+
+
+def get_language_rules(languages: list[str]) -> str:
+    """Return language-specific review rules for the given languages."""
+    rules = []
+    for lang in languages:
+        rule = _LANGUAGE_RULES.get(lang.lower(), "")
+        if rule:
+            rules.append(rule)
+    return "\n\n".join(rules)
+
+
 def get_base_prompt(
     context: ReviewContext,
     diff: str,
@@ -243,6 +323,11 @@ def get_base_prompt(
         rules_list = "\n".join(f"- {r}" for r in context.repo_config["custom_rules"])
         custom_rules_section = f"\n## Repository-Specific Rules\n{rules_list}\n"
 
+    lang_rules_section = ""
+    lang_rules = get_language_rules(context.repo_languages)
+    if lang_rules:
+        lang_rules_section = f"\n## Language-specific guidance\n{lang_rules}\n"
+
     return f"""You are performing a **code review** of a pull request.
 {review_standard}
 {what_to_look_for}
@@ -258,7 +343,7 @@ def get_base_prompt(
 
 ## PR Description
 {context.pr_description or "No description provided."}
-{conventions_section}{custom_rules_section}
+{conventions_section}{custom_rules_section}{lang_rules_section}
 ## Code Changes (Diff)
 ```diff
 {diff[:50000]}

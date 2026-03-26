@@ -403,3 +403,106 @@ class TestAdaptivePromptInstructions:
         prompt = get_base_prompt(ctx, "diff text", {"a.py": "code"}, changed_paths=["a.py"])
         assert "Repository Conventions" in prompt
         assert "precision" in prompt.lower() or "padding" in prompt.lower()
+
+
+class TestLanguageRules:
+    """Tests for language-specific review rules."""
+
+    def test_python_rules(self):
+        """Python language returns Python-specific rules."""
+        from ai_reviewer.review import get_language_rules
+
+        rules = get_language_rules(["Python"])
+        assert "mutable default" in rules.lower()
+        assert "type hint" in rules.lower()
+        assert "__init__" in rules or "context manager" in rules.lower()
+
+    def test_rust_rules(self):
+        """Rust language returns Rust-specific rules."""
+        from ai_reviewer.review import get_language_rules
+
+        rules = get_language_rules(["Rust"])
+        assert "unwrap" in rules.lower()
+        assert "unsafe" in rules.lower()
+        assert "clone" in rules.lower() or "lifetime" in rules.lower()
+
+    def test_javascript_rules(self):
+        """JavaScript language returns JS-specific rules."""
+        from ai_reviewer.review import get_language_rules
+
+        rules = get_language_rules(["JavaScript"])
+        assert "prototype" in rules.lower()
+        assert "===" in rules
+        assert "async" in rules.lower() or "promise" in rules.lower()
+
+    def test_typescript_rules(self):
+        """TypeScript language returns TS-specific rules."""
+        from ai_reviewer.review import get_language_rules
+
+        rules = get_language_rules(["TypeScript"])
+        assert "any" in rules.lower()
+        assert "===" in rules
+        assert "promise" in rules.lower() or "async" in rules.lower()
+        assert "type assertion" in rules.lower() or "type guard" in rules.lower()
+
+    def test_unknown_language_returns_empty(self):
+        """Unknown language returns empty string."""
+        from ai_reviewer.review import get_language_rules
+
+        rules = get_language_rules(["BrainFuck"])
+        assert rules == ""
+
+    def test_multiple_languages(self):
+        """Multiple languages returns combined rules."""
+        from ai_reviewer.review import get_language_rules
+
+        rules = get_language_rules(["Python", "Rust", "JavaScript"])
+        assert "mutable default" in rules.lower()
+        assert "unwrap" in rules.lower()
+        assert "prototype" in rules.lower()
+
+
+class TestLanguageRulesPromptWiring:
+    """Test that get_base_prompt() includes language guidance when repo_languages are set."""
+
+    def test_language_guidance_section_present(self):
+        from ai_reviewer.models.context import ReviewContext
+        from ai_reviewer.review import get_base_prompt
+
+        ctx = ReviewContext(
+            repo_name="test/repo",
+            pr_number=1,
+            pr_title="Test",
+            pr_description="",
+            base_branch="main",
+            head_branch="feat",
+            author="dev",
+            changed_files_count=1,
+            additions=10,
+            deletions=2,
+            repo_languages=["Python", "Rust"],
+        )
+        prompt = get_base_prompt(ctx, "diff text", {})
+        assert "Language-specific guidance" in prompt
+        assert "mutable default" in prompt.lower()
+        assert "unwrap" in prompt.lower()
+
+    def test_no_language_guidance_when_empty(self):
+        from ai_reviewer.models.context import ReviewContext
+        from ai_reviewer.review import get_base_prompt
+
+        ctx = ReviewContext(
+            repo_name="test/repo",
+            pr_number=1,
+            pr_title="Test",
+            pr_description="",
+            base_branch="main",
+            head_branch="feat",
+            author="dev",
+            changed_files_count=1,
+            additions=10,
+            deletions=2,
+            repo_languages=[],
+        )
+        prompt = get_base_prompt(ctx, "diff text", {})
+        assert "Language-specific guidance" not in prompt
