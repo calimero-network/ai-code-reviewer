@@ -9,19 +9,26 @@ class TestGitHubClient:
     """Tests for GitHub API client."""
 
     def test_403_raises_permission_error_immediately(self):
-        """403 must raise PermissionError without retry."""
+        """403 from a method using _raise_if_forbidden must surface as PermissionError."""
         from github.GithubException import GithubException
 
         from ai_reviewer.github.client import GitHubClient
 
-        with patch("ai_reviewer.github.client.Github") as mock_gh:
-            mock_gh.return_value.get_repo.side_effect = GithubException(
-                status=403, data={"message": "Forbidden"}, headers={}
-            )
+        mock_file = MagicMock(filename="foo.py", status="modified")
+        mock_repo = MagicMock()
+        mock_repo.get_contents.side_effect = GithubException(
+            status=403, data={"message": "Forbidden"}, headers={}
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.get_files.return_value = [mock_file]
+        mock_pr.base.repo = mock_repo
+
+        with patch("ai_reviewer.github.client.Github"):
             client = GitHubClient(token="test-token")
-            with pytest.raises((GithubException, PermissionError)):
-                client.get_repo("owner/repo")
-            assert mock_gh.return_value.get_repo.call_count == 1
+            with pytest.raises(PermissionError):
+                client.get_changed_files(mock_pr)
+            assert mock_repo.get_contents.call_count == 1
 
     def test_extracts_pr_diff(self):
         """Test extracting diff from a PR."""

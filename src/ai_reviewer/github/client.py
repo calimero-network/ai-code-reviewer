@@ -31,7 +31,7 @@ def _raise_if_forbidden(exc: Exception) -> None:
     requests.HTTPError (direct requests.post calls, e.g. GraphQL endpoint).
     """
     if isinstance(exc, GithubException) and exc.status == 403:
-        raise PermissionError(f"GitHub 403 Forbidden: {exc.data}") from exc
+        raise PermissionError("GitHub REST API 403 Forbidden — check token scopes") from exc
     if isinstance(exc, requests.exceptions.HTTPError):
         resp = getattr(exc, "response", None)
         if resp is not None and resp.status_code == 403:
