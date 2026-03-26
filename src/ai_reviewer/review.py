@@ -789,7 +789,7 @@ def compute_quality_score(
     """
     if not findings:
         base = 0.85
-        agent_bonus = min(0.10, (agent_count - 1) * 0.05)
+        agent_bonus = max(0.0, min(0.10, (agent_count - 1) * 0.05))
         raw_pre_cap = base + agent_bonus
         final = min(0.95, raw_pre_cap)
         rounded = round(final, 2)

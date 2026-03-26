@@ -67,6 +67,12 @@ class TestComputeQualityScore:
         score, _ = compute_quality_score(findings, agent_count=3, total_lines=50)
         assert score >= 0.0
 
+    def test_zero_agents_no_negative_bonus(self):
+        """Zero agents should not produce a negative bonus (score must be >= 0.85)."""
+        score, breakdown = compute_quality_score([], agent_count=0, total_lines=100)
+        assert score >= 0.85
+        assert breakdown.agent_factor >= 0.0
+
     def test_score_capped_at_095(self):
         """Clean review score should never exceed 0.95."""
         score, _ = compute_quality_score([], agent_count=10, total_lines=10)

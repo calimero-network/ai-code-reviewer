@@ -692,6 +692,8 @@ class GitHubClient:
         # Track which previous comments are still open
         matched_previous: set[int] = set()
 
+        review_count = estimate_review_count(delta)
+
         for finding in current_findings:
             # Three-tier matching: strict hash → fuzzy hash → title+line
             matched_comment = hash_lookup.get(finding.finding_hash)
@@ -706,7 +708,6 @@ class GitHubClient:
             if matched_comment is not None:
                 prev_sev = _parse_severity(matched_comment.severity)
                 if prev_sev is not None:
-                    review_count = estimate_review_count(delta)
                     finding.severity = stabilize_severity(finding.severity, prev_sev, review_count)
                 delta.open_findings.append(finding)
                 matched_previous.add(matched_comment.id)
