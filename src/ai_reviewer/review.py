@@ -30,6 +30,7 @@ from ai_reviewer.github.client import GitHubClient
 from ai_reviewer.models.context import ReviewContext
 from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
 from ai_reviewer.models.review import ConsolidatedReview
+from ai_reviewer.security.scanner import scan_for_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -175,14 +176,15 @@ def get_base_prompt(
 """
 
 
-def get_output_format(pr_type: str = "code") -> str:
+def get_output_format(pr_type: str = "code", total_lines: int = 0) -> str:
     """Get the JSON output format instructions."""
+    max_findings = max(3, min(10, total_lines // 100 + 3))
     concise_rules = [
         "- Be concise: one short sentence per finding description. Do not repeat the same point.",
         "- Only report issues on changed lines; do not suggest pre-existing improvements.",
         "- **Severity semantics:** critical = must fix (security bugs or data corruption risks only); warning = should fix (other serious correctness or maintainability issues); suggestion = consider; nitpick = optional polish—always prefix title with \"Nit: \" for nitpicks.",
         "- If the code looks good for your focus area, return empty findings array.",
-        "- Maximum 5 findings per agent.",
+        f"- Maximum {max_findings} findings per agent.",
         "- If something is done well (e.g. clear naming, good tests), mention it briefly in the summary.",
     ]
     if pr_type == "docs":
@@ -217,6 +219,19 @@ You MUST respond with a single valid JSON object (no markdown fences around it):
 
 **Rules**:
 {chr(10).join(concise_rules)}
+
+## Example of a GOOD finding (specific, actionable):
+{{"file_path": "auth.py", "line_start": 45, "severity": "critical",
+ "category": "security", "title": "SQL injection via string interpolation",
+ "description": "User input interpolated directly into SQL query without parameterization.",
+ "suggested_fix": "Use parameterized query: cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))",
+ "confidence": 0.95}}
+
+## Example of a BAD finding (vague -- DO NOT produce these):
+{{"file_path": "utils.py", "line_start": 1, "severity": "suggestion",
+ "category": "testing", "title": "Consider adding more tests",
+ "description": "The code could benefit from additional test coverage.",
+ "confidence": 0.5}}
 
 Analyze the PR and output your JSON review.
 """
@@ -534,10 +549,19 @@ def _cluster_raw_findings(
     return clusters
 
 
+CONFIDENCE_THRESHOLDS: dict[Severity, float] = {
+    Severity.CRITICAL: 0.5,
+    Severity.WARNING: 0.6,
+    Severity.SUGGESTION: 0.7,
+    Severity.NITPICK: 0.8,
+}
+
+
 def aggregate_findings(
     all_findings: list[tuple[str, list[dict], str]],
     repo: str,
     pr_number: int,
+    confidence_thresholds: dict[Severity, float] | None = None,
 ) -> ConsolidatedReview:
     """Aggregate findings from multiple agents."""
 
@@ -598,6 +622,17 @@ def aggregate_findings(
 
     # Sort by priority
     consolidated.sort(key=lambda f: f.priority_score, reverse=True)
+
+    # Filter out low-confidence findings per severity
+    thresholds = confidence_thresholds if confidence_thresholds is not None else CONFIDENCE_THRESHOLDS
+    pre_filter_count = len(consolidated)
+    consolidated = [
+        f for f in consolidated
+        if f.confidence >= thresholds.get(f.severity, 0.0)
+    ]
+    filtered_count = pre_filter_count - len(consolidated)
+    if filtered_count > 0:
+        logger.info("Confidence filter dropped %d finding(s)", filtered_count)
 
     # Build combined summary
     combined_summary = "\n".join(summaries) if summaries else "Review completed"
@@ -687,6 +722,18 @@ async def run_cross_review_round(
     ]
 
 
+def _effective_agent_count(
+    additions: int, deletions: int, changed_files: int, requested: int
+) -> int:
+    """Scale agent count with PR size to save cost and latency on small PRs."""
+    total = additions + deletions
+    if total < 150 and changed_files <= 3:
+        return min(1, requested)
+    elif total < 500:
+        return min(2, requested)
+    return requested
+
+
 async def review_pr_with_cursor_agent(
     repo: str,
     pr_number: int,
@@ -726,10 +773,28 @@ async def review_pr_with_cursor_agent(
     files = gh.get_changed_files(pr)
     context = gh.build_review_context(pr, repo_obj)
 
+    secret_findings = scan_for_secrets(diff)
+    if secret_findings:
+        logger.warning(
+            "Secret scanner detected %d potential secret(s) — these bypass aggregation/cross-review",
+            len(secret_findings),
+        )
+
     logger.info(f"Reviewing PR #{pr_number}: {context.pr_title}")
     logger.info(
         f"Files changed: {context.changed_files_count} (+{context.additions}/-{context.deletions})"
     )
+
+    effective = _effective_agent_count(
+        context.additions, context.deletions, context.changed_files_count, num_agents
+    )
+    if effective != num_agents:
+        logger.info(
+            f"Effective agent count: {effective} (requested {num_agents})"
+        )
+    num_agents = effective
+    if num_agents <= 2:
+        enable_cross_review = False
 
     changed_paths = list(files.keys())
     pr_type = _detect_pr_type(changed_paths)
@@ -737,7 +802,7 @@ async def review_pr_with_cursor_agent(
         logger.info(f"PR type: {pr_type} – using context-aware review rules")
 
     base_prompt = get_base_prompt(context, diff, files, changed_paths=changed_paths)
-    output_format = get_output_format(pr_type)
+    output_format = get_output_format(pr_type, total_lines=context.additions + context.deletions)
     repo_url = f"https://github.com/{repo}"
 
     # Select agents to run
@@ -832,6 +897,9 @@ async def review_pr_with_cursor_agent(
                 logger.info(
                     f"Cross-review done: {len(review.findings)} findings after validation"
                 )
+
+    if secret_findings:
+        review.findings = secret_findings + review.findings
 
     review.total_review_time_ms = int((time.time() - start_time) * 1000)
 

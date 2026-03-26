@@ -8,12 +8,15 @@ from ai_reviewer.models.context import ReviewContext
 from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
 from ai_reviewer.models.review import ConsolidatedReview
 from ai_reviewer.review import (
+    CONFIDENCE_THRESHOLDS,
     _cluster_raw_findings,
     _detect_pr_type,
+    _effective_agent_count,
     _raw_findings_similar,
     aggregate_findings,
     apply_cross_review,
     get_cross_review_prompt,
+    get_output_format,
     parse_cross_review_response,
 )
 
@@ -658,3 +661,231 @@ class TestGetCrossReviewPrompt:
         excerpt = prompt.split("```diff")[1].split("```")[0].strip()
         assert excerpt.endswith("a" * 30)
         assert not excerpt.endswith("b")
+
+
+class TestEffectiveAgentCount:
+    """Tests for _effective_agent_count."""
+
+    def test_tiny_pr_caps_at_one(self):
+        assert _effective_agent_count(additions=50, deletions=20, changed_files=2, requested=3) == 1
+
+    def test_small_pr_caps_at_two(self):
+        assert _effective_agent_count(additions=200, deletions=100, changed_files=5, requested=3) == 2
+
+    def test_large_pr_uses_requested(self):
+        assert _effective_agent_count(additions=400, deletions=200, changed_files=10, requested=3) == 3
+
+    def test_requested_one_always_one(self):
+        assert _effective_agent_count(additions=1000, deletions=500, changed_files=20, requested=1) == 1
+
+    def test_boundary_150_lines_3_files(self):
+        assert _effective_agent_count(additions=100, deletions=49, changed_files=3, requested=3) == 1
+        assert _effective_agent_count(additions=100, deletions=50, changed_files=3, requested=3) == 2
+
+    def test_boundary_150_lines_4_files(self):
+        assert _effective_agent_count(additions=100, deletions=30, changed_files=4, requested=3) == 2
+
+    def test_boundary_500_lines(self):
+        assert _effective_agent_count(additions=300, deletions=199, changed_files=5, requested=3) == 2
+        assert _effective_agent_count(additions=300, deletions=200, changed_files=5, requested=3) == 3
+
+    def test_requested_caps_result(self):
+        assert _effective_agent_count(additions=200, deletions=100, changed_files=5, requested=1) == 1
+        assert _effective_agent_count(additions=50, deletions=20, changed_files=2, requested=0) == 0
+
+
+class TestGetOutputFormatFewShotExamples:
+    """Tests for few-shot examples in get_output_format (Task 5)."""
+
+    def test_good_example_present(self):
+        output = get_output_format()
+        assert "Example of a GOOD finding" in output
+        assert "SQL injection via string interpolation" in output
+
+    def test_bad_example_present(self):
+        output = get_output_format()
+        assert "Example of a BAD finding" in output
+        assert "Consider adding more tests" in output
+        assert "DO NOT produce these" in output
+
+    def test_examples_appear_after_rules_before_analyze(self):
+        output = get_output_format()
+        rules_pos = output.index("**Rules**")
+        good_pos = output.index("Example of a GOOD finding")
+        bad_pos = output.index("Example of a BAD finding")
+        analyze_pos = output.index("Analyze the PR")
+        assert rules_pos < good_pos < bad_pos < analyze_pos
+
+
+class TestGetOutputFormatAdaptiveFindings:
+    """Tests for adaptive max findings in get_output_format (Task 7)."""
+
+    def test_zero_lines_gives_minimum_3(self):
+        output = get_output_format(total_lines=0)
+        assert "Maximum 3 findings per agent" in output
+
+    def test_500_lines_gives_8(self):
+        output = get_output_format(total_lines=500)
+        assert "Maximum 8 findings per agent" in output
+
+    def test_2000_lines_capped_at_10(self):
+        output = get_output_format(total_lines=2000)
+        assert "Maximum 10 findings per agent" in output
+
+    def test_100_lines_gives_4(self):
+        output = get_output_format(total_lines=100)
+        assert "Maximum 4 findings per agent" in output
+
+    def test_default_no_lines_gives_3(self):
+        output = get_output_format()
+        assert "Maximum 3 findings per agent" in output
+
+    def test_docs_type_still_has_adaptive_limit(self):
+        output = get_output_format(pr_type="docs", total_lines=700)
+        assert "Maximum 10 findings per agent" in output
+        assert "Only factual errors or security" in output
+
+
+def _make_raw_finding(
+    severity: str = "warning",
+    confidence: float = 0.8,
+    file_path: str = "src/foo.py",
+    title: str = "Test issue",
+) -> dict:
+    return {
+        "file_path": file_path,
+        "line_start": 10,
+        "severity": severity,
+        "category": "logic",
+        "title": title,
+        "description": "Description",
+        "confidence": confidence,
+    }
+
+
+class TestConfidenceFiltering:
+    """Tests for confidence-based filtering in aggregate_findings."""
+
+    def test_default_thresholds_exist(self):
+        assert Severity.CRITICAL in CONFIDENCE_THRESHOLDS
+        assert Severity.WARNING in CONFIDENCE_THRESHOLDS
+        assert Severity.SUGGESTION in CONFIDENCE_THRESHOLDS
+        assert Severity.NITPICK in CONFIDENCE_THRESHOLDS
+
+    def test_default_threshold_values(self):
+        assert CONFIDENCE_THRESHOLDS[Severity.CRITICAL] == 0.5
+        assert CONFIDENCE_THRESHOLDS[Severity.WARNING] == 0.6
+        assert CONFIDENCE_THRESHOLDS[Severity.SUGGESTION] == 0.7
+        assert CONFIDENCE_THRESHOLDS[Severity.NITPICK] == 0.8
+
+    def test_high_confidence_findings_kept(self):
+        """Findings at or above their severity threshold are kept."""
+        all_findings = [
+            ("agent-1", [_make_raw_finding("critical", 0.95)], "summary"),
+        ]
+        result = aggregate_findings(all_findings, "test/repo", 1)
+        assert len(result.findings) == 1
+
+    def test_low_confidence_critical_dropped(self):
+        """Critical finding below 0.5 confidence is dropped."""
+        all_findings = [
+            ("agent-1", [_make_raw_finding("critical", 0.4)], "summary"),
+        ]
+        result = aggregate_findings(all_findings, "test/repo", 1)
+        assert len(result.findings) == 0
+
+    def test_low_confidence_warning_dropped(self):
+        """Warning finding below 0.6 confidence is dropped."""
+        all_findings = [
+            ("agent-1", [_make_raw_finding("warning", 0.5)], "summary"),
+        ]
+        result = aggregate_findings(all_findings, "test/repo", 1)
+        assert len(result.findings) == 0
+
+    def test_low_confidence_suggestion_dropped(self):
+        """Suggestion finding below 0.7 confidence is dropped."""
+        all_findings = [
+            ("agent-1", [_make_raw_finding("suggestion", 0.6)], "summary"),
+        ]
+        result = aggregate_findings(all_findings, "test/repo", 1)
+        assert len(result.findings) == 0
+
+    def test_low_confidence_nitpick_dropped(self):
+        """Nitpick finding below 0.8 confidence is dropped."""
+        all_findings = [
+            ("agent-1", [_make_raw_finding("nitpick", 0.7)], "summary"),
+        ]
+        result = aggregate_findings(all_findings, "test/repo", 1)
+        assert len(result.findings) == 0
+
+    def test_exact_threshold_kept(self):
+        """Findings exactly at the threshold are kept (>= comparison)."""
+        all_findings = [
+            ("agent-1", [
+                _make_raw_finding("critical", 0.5),
+                _make_raw_finding("warning", 0.6, title="Warning issue"),
+                _make_raw_finding("suggestion", 0.7, title="Suggestion issue"),
+                _make_raw_finding("nitpick", 0.8, title="Nit: Style issue"),
+            ], "summary"),
+        ]
+        result = aggregate_findings(all_findings, "test/repo", 1)
+        assert len(result.findings) == 4
+
+    def test_mixed_confidence_partial_filtering(self):
+        """Only low-confidence findings are dropped; high-confidence ones survive."""
+        all_findings = [
+            ("agent-1", [
+                _make_raw_finding("critical", 0.95),
+                _make_raw_finding("nitpick", 0.5, title="Nit: Low confidence nit"),
+                _make_raw_finding("warning", 0.9, title="High conf warning"),
+            ], "summary"),
+        ]
+        result = aggregate_findings(all_findings, "test/repo", 1)
+        assert len(result.findings) == 2
+        severities = {f.severity for f in result.findings}
+        assert Severity.CRITICAL in severities
+        assert Severity.WARNING in severities
+        assert Severity.NITPICK not in severities
+
+    def test_custom_thresholds_override_defaults(self):
+        """Custom thresholds passed to aggregate_findings override defaults."""
+        custom = {
+            Severity.CRITICAL: 0.99,
+            Severity.WARNING: 0.99,
+            Severity.SUGGESTION: 0.99,
+            Severity.NITPICK: 0.99,
+        }
+        all_findings = [
+            ("agent-1", [_make_raw_finding("critical", 0.95)], "summary"),
+        ]
+        result = aggregate_findings(all_findings, "test/repo", 1, confidence_thresholds=custom)
+        assert len(result.findings) == 0
+
+    def test_custom_thresholds_zero_keeps_all(self):
+        """Setting all thresholds to 0 keeps every finding."""
+        custom = {
+            Severity.CRITICAL: 0.0,
+            Severity.WARNING: 0.0,
+            Severity.SUGGESTION: 0.0,
+            Severity.NITPICK: 0.0,
+        }
+        all_findings = [
+            ("agent-1", [
+                _make_raw_finding("critical", 0.1),
+                _make_raw_finding("nitpick", 0.01, title="Nit: tiny"),
+            ], "summary"),
+        ]
+        result = aggregate_findings(all_findings, "test/repo", 1, confidence_thresholds=custom)
+        assert len(result.findings) == 2
+
+    def test_quality_score_computed_after_filtering(self):
+        """Quality score should be based on the filtered set, not the pre-filter set."""
+        all_findings = [
+            ("agent-1", [
+                _make_raw_finding("critical", 0.95),
+                _make_raw_finding("nitpick", 0.1, title="Nit: low"),
+            ], "summary"),
+        ]
+        result = aggregate_findings(all_findings, "test/repo", 1)
+        assert len(result.findings) == 1
+        assert result.review_quality_score > 0
