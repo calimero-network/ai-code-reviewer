@@ -9,6 +9,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 import requests
+import yaml
 from github import Github
 from github.GithubException import GithubException
 from github.PullRequest import PullRequest
@@ -287,6 +288,65 @@ class GitHubClient:
             labels=labels,
             repo_languages=languages,
         )
+
+    _CONVENTION_FILES = [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "CONTRIBUTING.md",
+        ".cursor/rules/README.md",
+    ]
+    _CONVENTION_PER_FILE_LIMIT = 10000
+    _CONVENTION_TOTAL_LIMIT = 30000
+
+    def load_repo_config(self, repo_name: str, ref: str) -> dict | None:
+        """Best-effort load of ``.ai-reviewer.yaml`` from the repo at *ref*.
+
+        Returns the parsed dict on success, or ``None`` when the file is
+        missing or contains invalid YAML.  403 Forbidden is re-raised via
+        ``_raise_if_forbidden`` so callers surface permission problems.
+        """
+        repo = self._gh.get_repo(repo_name)
+        try:
+            content = repo.get_contents(".ai-reviewer.yaml", ref=ref)
+            parsed = yaml.safe_load(content.decoded_content)
+            if isinstance(parsed, dict):
+                return parsed
+            logger.warning(".ai-reviewer.yaml did not parse to a dict; ignoring")
+            return None
+        except Exception as e:
+            _raise_if_forbidden(e)
+            logger.debug("Could not load .ai-reviewer.yaml: %s", e)
+            return None
+
+    def load_repo_conventions(self, repo_name: str, ref: str) -> str | None:
+        """Best-effort load and concatenation of convention docs from the repo.
+
+        Reads each file in ``_CONVENTION_FILES`` (in order), truncates each to
+        ``_CONVENTION_PER_FILE_LIMIT`` chars, joins them with a header, and
+        truncates the combined result to ``_CONVENTION_TOTAL_LIMIT`` chars.
+
+        Returns ``None`` when no convention files are found.
+        """
+        repo = self._gh.get_repo(repo_name)
+        parts: list[str] = []
+        for path in self._CONVENTION_FILES:
+            try:
+                content = repo.get_contents(path, ref=ref)
+                text = content.decoded_content.decode("utf-8", errors="replace")
+                if len(text) > self._CONVENTION_PER_FILE_LIMIT:
+                    text = text[: self._CONVENTION_PER_FILE_LIMIT] + "\n…(truncated)"
+                parts.append(f"### {path}\n{text}")
+            except Exception as e:
+                _raise_if_forbidden(e)
+                logger.debug("Convention file %s not found or unreadable: %s", path, e)
+
+        if not parts:
+            return None
+
+        combined = "\n\n".join(parts)
+        if len(combined) > self._CONVENTION_TOTAL_LIMIT:
+            combined = combined[: self._CONVENTION_TOTAL_LIMIT] + "\n…(truncated)"
+        return combined
 
     def _dismiss_pending_reviews(self, pr: PullRequest) -> bool:
         """Dismiss any pending reviews from the current user.

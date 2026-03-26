@@ -16,6 +16,7 @@ Severity semantics: see ai_reviewer.models.findings.Severity.
 """
 
 import asyncio
+import fnmatch
 import json
 import logging
 import re
@@ -119,6 +120,56 @@ def _detect_pr_type(changed_paths: list[str]) -> str:
     return "code"
 
 
+_DIFF_FILE_HEADER_RE = re.compile(r"^diff --git a/.+ b/(.+)$")
+
+
+def filter_by_ignore_patterns(files: dict[str, str], patterns: list[str]) -> dict[str, str]:
+    """Remove entries whose path matches any of the fnmatch *patterns*."""
+    if not patterns:
+        return files
+    return {
+        path: content
+        for path, content in files.items()
+        if not any(fnmatch.fnmatch(path, p) for p in patterns)
+    }
+
+
+def filter_diff_by_ignore_patterns(diff: str, patterns: list[str]) -> str:
+    """Drop entire file sections from a unified diff when the path matches *patterns*.
+
+    Splits on ``diff --git`` boundaries and reassembles only non-matching sections.
+    """
+    if not patterns:
+        return diff
+
+    sections: list[str] = []
+    current_section: list[str] = []
+    current_file: str | None = None
+
+    for line in diff.splitlines(keepends=True):
+        header_match = _DIFF_FILE_HEADER_RE.match(line.rstrip("\n"))
+        if header_match:
+            if (
+                current_section
+                and current_file is not None
+                and not any(fnmatch.fnmatch(current_file, p) for p in patterns)
+            ):
+                sections.append("".join(current_section))
+            current_section = [line]
+            current_file = header_match.group(1)
+        else:
+            current_section.append(line)
+
+    if (
+        current_section
+        and current_file is not None
+        and not any(fnmatch.fnmatch(current_file, p) for p in patterns)
+    ):
+        sections.append("".join(current_section))
+
+    return "".join(sections)
+
+
 def get_base_prompt(
     context: ReviewContext,
     diff: str,
@@ -149,6 +200,15 @@ def get_base_prompt(
     design_principles = """
 **Design principles to consider (when relevant):** SOLID (single responsibility, open/closed, Liskov substitution, interface segregation, dependency inversion); DRY (no duplicate logic—extract and reuse); KISS (keep it simple; avoid over-engineering); YAGNI (don't add code for hypothetical future needs); Composition over Inheritance (prefer composing over deep hierarchies); Law of Demeter (talk to immediate collaborators only, avoid long chains); Convention over Configuration where it fits. Only flag violations that meaningfully hurt maintainability or clarity—use "Nit:" for minor style preferences.
 """
+    conventions_section = ""
+    if context.conventions:
+        conventions_section = f"\n## Repository Conventions\n{context.conventions}\n"
+
+    custom_rules_section = ""
+    if context.repo_config and context.repo_config.get("custom_rules"):
+        rules_list = "\n".join(f"- {r}" for r in context.repo_config["custom_rules"])
+        custom_rules_section = f"\n## Repository-Specific Rules\n{rules_list}\n"
+
     return f"""You are performing a **code review** of a pull request.
 {review_standard}
 {what_to_look_for}
@@ -164,7 +224,7 @@ def get_base_prompt(
 
 ## PR Description
 {context.pr_description or "No description provided."}
-
+{conventions_section}{custom_rules_section}
 ## Code Changes (Diff)
 ```diff
 {diff[:50000]}
@@ -850,12 +910,25 @@ async def review_pr_with_cursor_agent(
     files = gh.get_changed_files(pr)
     context = gh.build_review_context(pr, repo_obj)
 
+    context.repo_config = gh.load_repo_config(repo, ref=pr.head.sha)
+    context.conventions = gh.load_repo_conventions(repo, ref=pr.head.sha)
+
     secret_scan_exclude = config.review_policy.secret_scan_exclude if config else []
     secret_findings = scan_for_secrets(diff, exclude_patterns=secret_scan_exclude)
     if secret_findings:
         logger.warning(
             "Secret scanner detected %d potential secret(s) — these bypass aggregation/cross-review",
             len(secret_findings),
+        )
+
+    ignore_patterns = (context.repo_config or {}).get("ignore", [])
+    if ignore_patterns:
+        pre_file_count = len(files)
+        files = filter_by_ignore_patterns(files, ignore_patterns)
+        diff = filter_diff_by_ignore_patterns(diff, ignore_patterns)
+        logger.info(
+            "Ignore patterns filtered %d file(s) from prompt inputs",
+            pre_file_count - len(files),
         )
 
     logger.info(f"Reviewing PR #{pr_number}: {context.pr_title}")

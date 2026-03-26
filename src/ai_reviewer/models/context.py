@@ -1,6 +1,9 @@
 """Review context models."""
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
+from typing import Any
 
 
 @dataclass
@@ -20,6 +23,8 @@ class ReviewContext:
     labels: list[str] = field(default_factory=list)
     repo_languages: list[str] = field(default_factory=list)
     custom_instructions: str | None = None
+    repo_config: dict[str, Any] | None = None
+    conventions: str | None = None
 
     def to_prompt_context(self) -> str:
         """Format context for inclusion in agent prompts."""
