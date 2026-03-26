@@ -216,6 +216,8 @@ To enable automatic thread resolution when issues are fixed, use a **Classic PAT
 
 3. The workflow automatically uses `GH_PAT` if available (falls back to `GITHUB_TOKEN`).
 
+> **Security note:** When using a Classic PAT, use a dedicated service account (not your personal account) with the minimum required scopes. Rotate tokens regularly. For production deployments, prefer GitHub Apps (fine-grained permissions) over Classic PATs.
+
 > **Why Classic PAT?** GitHub's GraphQL `resolveReviewThread` mutation requires:
 > - User-level authentication (not app/integration tokens)
 > - Classic PAT with `repo` scope (Fine-grained PATs return "Resource not accessible")
