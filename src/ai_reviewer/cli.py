@@ -151,7 +151,7 @@ async def review_pr_async(
             console.print("[dim]Cross-review disabled[/dim]")
 
     # Status callback
-    last_status = [None]
+    last_status: list[str | None] = [None]
 
     def on_status(status: str) -> None:
         if status != last_status[0]:

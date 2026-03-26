@@ -245,7 +245,7 @@ class ReviewAggregator:
         if not findings:
             return f"✅ No issues found by {agent_count} agents."
 
-        by_severity = {}
+        by_severity: dict[Severity, int] = {}
         for f in findings:
             by_severity[f.severity] = by_severity.get(f.severity, 0) + 1
 

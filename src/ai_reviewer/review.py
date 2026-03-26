@@ -564,7 +564,7 @@ def aggregate_findings(
 ) -> ConsolidatedReview:
     """Aggregate findings from multiple agents."""
 
-    consolidated = []
+    consolidated: list[ConsolidatedFinding] = []
     summaries = []
     failed_agents = []
 

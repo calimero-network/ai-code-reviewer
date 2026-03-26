@@ -663,7 +663,7 @@ class GitHubClient:
             "Content-Type": "application/json",
         }
 
-        payload = {"query": query}
+        payload: dict[str, object] = {"query": query}
         if variables:
             payload["variables"] = variables
 
