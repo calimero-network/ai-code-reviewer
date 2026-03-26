@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from collections import defaultdict
 from dataclasses import dataclass, field
 
 import requests
@@ -40,6 +41,32 @@ def _raise_if_forbidden(exc: Exception) -> None:
 
 _RESOLVE_COMMENT_DELAY_S: float = float(os.environ.get("AI_REVIEWER_RESOLVE_DELAY", "0.2"))
 _MAX_RESOLVE_COMMENTS: int = int(os.environ.get("AI_REVIEWER_MAX_RESOLVE", "100"))
+
+
+def apply_comment_limits(
+    findings: list[ConsolidatedFinding],
+    max_total: int = 50,
+    max_per_file: int = 10,
+) -> list[ConsolidatedFinding]:
+    """Select top findings respecting per-file and total caps.
+
+    Findings are sorted by priority_score descending, then selected greedily:
+    each finding is included only if its file hasn't already hit max_per_file
+    and the overall count hasn't hit max_total.
+    """
+    sorted_findings = sorted(findings, key=lambda f: f.priority_score, reverse=True)
+    per_file: dict[str, int] = defaultdict(int)
+    result: list[ConsolidatedFinding] = []
+
+    for finding in sorted_findings:
+        if len(result) >= max_total:
+            break
+        if per_file[finding.file_path] >= max_per_file:
+            continue
+        result.append(finding)
+        per_file[finding.file_path] += 1
+
+    return result
 
 
 @dataclass
@@ -315,12 +342,16 @@ class GitHubClient:
         self,
         pr: PullRequest,
         review: ConsolidatedReview,
+        max_total: int = 50,
+        max_per_file: int = 10,
     ) -> int:
         """Post inline comments for each finding.
 
         Args:
             pr: Pull request
             review: Consolidated review with findings
+            max_total: Maximum total inline comments to post
+            max_per_file: Maximum inline comments per file
 
         Returns:
             Number of successfully posted comments
@@ -329,7 +360,7 @@ class GitHubClient:
         head_commit = pr.get_commits().reversed[0]
         posted_count = 0
 
-        for finding in review.findings[:10]:  # Limit inline comments
+        for finding in apply_comment_limits(review.findings, max_total, max_per_file):
             try:
                 # Build comment body with emoji for severity
                 severity_emoji = {

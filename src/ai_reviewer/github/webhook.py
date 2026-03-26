@@ -232,7 +232,11 @@ def _setup_default_review_handler() -> None:
                     review_quality_score=review.review_quality_score,
                     total_review_time_ms=review.total_review_time_ms,
                 )
-                posted = gh.post_inline_comments(pr, new_only_review)
+                max_total = _get_env_int("MAX_TOTAL_FINDINGS", 50)
+                max_per_file = _get_env_int("MAX_FINDINGS_PER_FILE", 10)
+                posted = gh.post_inline_comments(
+                    pr, new_only_review, max_total=max_total, max_per_file=max_per_file
+                )
                 logger.info(f"Posted {posted} inline comments")
 
         except Exception as e:

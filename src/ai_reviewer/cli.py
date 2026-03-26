@@ -279,10 +279,14 @@ async def review_pr_async(
                     review_quality_score=review.review_quality_score,
                     total_review_time_ms=review.total_review_time_ms,
                 )
+                max_total = config.output.max_total_findings
+                max_per_file = config.output.max_findings_per_file
                 console.print(
-                    f"💬 Posting inline comments for {min(len(new_findings_to_post), 10)} new findings..."
+                    f"💬 Posting inline comments for up to {max_total} new findings..."
                 )
-                posted = gh.post_inline_comments(pr, new_only_review)
+                posted = gh.post_inline_comments(
+                    pr, new_only_review, max_total=max_total, max_per_file=max_per_file
+                )
                 console.print(f"   Posted {posted} inline comments")
 
             # Final status
