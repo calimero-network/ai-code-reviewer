@@ -273,6 +273,31 @@ async def handle_pr_event(event: PREvent) -> None:
         logger.warning("No review handler configured")
 
 
+async def _handle_issue_comment_event(payload: dict) -> None:
+    """Handle issue_comment webhook events — trigger review on /ai-review command."""
+    if payload.get("action") != "created":
+        return
+
+    comment_body = payload.get("comment", {}).get("body", "").strip()
+    if not comment_body.startswith("/ai-review"):
+        return
+
+    # Only valid on PR comments (not plain issues)
+    if "pull_request" not in payload.get("issue", {}):
+        logger.debug("Ignoring /ai-review on non-PR issue")
+        return
+
+    repo = payload.get("repository", {}).get("full_name", "")
+    pr_number = payload["issue"]["number"]
+
+    logger.info(f"Triggering review via /ai-review comment on {repo} PR #{pr_number}")
+
+    if _review_handler:
+        await _review_handler(repo=repo, pr_number=pr_number)
+    else:
+        logger.warning("No review handler configured for /ai-review trigger")
+
+
 async def review_pr(repo: str, pr_number: int) -> None:
     """Placeholder for review function - will be implemented with full app."""
     logger.info(f"Would review {repo} PR #{pr_number}")
@@ -338,6 +363,9 @@ def create_webhook_app(webhook_secret: str | None = None) -> FastAPI:
 
             # Process async to respond quickly
             asyncio.create_task(handle_pr_event(pr_event))
+
+        elif event_type == "issue_comment":
+            asyncio.create_task(_handle_issue_comment_event(payload))
 
         elif event_type == "ping":
             logger.info("Received ping from GitHub")

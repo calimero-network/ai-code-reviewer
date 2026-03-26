@@ -61,7 +61,7 @@ class GitHubFormatter:
             )
         else:
             # Group by severity
-            by_severity = self._group_by_severity(review)
+            by_severity = self._group_findings_by_severity(review.findings)
 
             for severity in [
                 Severity.CRITICAL,
@@ -165,10 +165,6 @@ class GitHubFormatter:
             f"Quality score: {consensus_pct}% | "
             f"Review time: {time_sec:.1f}s"
         )
-
-    def _group_by_severity(self, review: ConsolidatedReview) -> dict:
-        """Group findings by severity."""
-        return self._group_findings_by_severity(review.findings)
 
     def _format_severity_section(
         self, severity: Severity, findings: list, agent_count: int

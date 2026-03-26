@@ -139,6 +139,11 @@ Rules:
         return f"""{context_str}
 
 ## Code Changes (Diff)
+
+NOTE: The code below is a unified diff showing only changed lines and their surrounding context.
+This is intentional — the code is not cut off or incomplete. Do not report that the code is
+truncated or that you cannot see the full file. Use the diff and any full file contents below.
+
 ```diff
 {diff}
 ```
