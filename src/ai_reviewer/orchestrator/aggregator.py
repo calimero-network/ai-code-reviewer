@@ -82,7 +82,9 @@ class ReviewAggregator:
         # Generate summary
         summary = self._generate_summary(consolidated_findings, len(reviews))
 
-        quality_score = compute_quality_score(consolidated_findings, len(reviews), total_lines=0)
+        quality_score, score_breakdown = compute_quality_score(
+            consolidated_findings, len(reviews), total_lines=0
+        )
 
         # Calculate total review time
         total_time = sum(r.review_time_ms for r in reviews)
@@ -98,6 +100,7 @@ class ReviewAggregator:
             review_quality_score=quality_score,
             total_review_time_ms=total_time,
             agent_reviews=reviews,
+            score_breakdown=score_breakdown,
         )
 
     def _extract_tagged_findings(
@@ -280,6 +283,7 @@ class ReviewAggregator:
     ) -> ConsolidatedReview:
         """Create a clean review (no findings)."""
         total_time = sum(r.review_time_ms for r in reviews)
+        clean_score, score_breakdown = compute_quality_score([], len(reviews), total_lines=0)
         return ConsolidatedReview(
             id=f"review-{uuid.uuid4().hex[:8]}",
             created_at=datetime.now(),
@@ -288,7 +292,8 @@ class ReviewAggregator:
             findings=[],
             summary=f"✅ No issues found by {len(reviews)} agents. LGTM!",
             agent_count=len(reviews),
-            review_quality_score=compute_quality_score([], len(reviews), total_lines=0),
+            review_quality_score=clean_score,
             total_review_time_ms=total_time,
             agent_reviews=reviews,
+            score_breakdown=score_breakdown,
         )

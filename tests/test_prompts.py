@@ -383,8 +383,8 @@ class TestAdaptivePromptInstructions:
 
         ctx = self._make_context(additions=300, deletions=200)
         prompt = get_base_prompt(ctx, "diff text", {"a.py": "code"}, changed_paths=["a.py"])
-        assert "precision" not in prompt.lower() or "padding" not in prompt.lower()
-        assert "architect" not in prompt.lower() or "high-severity" not in prompt.lower()
+        assert "precision" not in prompt.lower() and "padding" not in prompt.lower()
+        assert "architect" not in prompt.lower() and "high-severity" not in prompt.lower()
 
     def test_docs_pr_still_gets_docs_instruction(self):
         from ai_reviewer.review import get_base_prompt

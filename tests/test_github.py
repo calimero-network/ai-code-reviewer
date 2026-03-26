@@ -534,6 +534,43 @@ class TestResolveFixedComments:
 
         assert 12345 in resolved
 
+    def test_old_resolved_format_also_recognized(self):
+        """Old '✅ **Resolved**' replies are still recognized as resolved."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_comment = MagicMock()
+        mock_comment.body = "✅ **Resolved** - This issue has been addressed in the latest changes."
+        mock_comment.in_reply_to_id = 12345
+        mock_comment.user.login = "github-actions[bot]"
+        mock_pr.get_review_comments.return_value = [mock_comment]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            resolved = client._get_resolved_comment_ids(mock_pr)
+
+        assert 12345 in resolved
+
+    def test_old_resolved_reply_excluded_from_previous_comments(self):
+        """Old-format resolved replies are not treated as findings."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        old_resolved = MagicMock()
+        old_resolved.body = "✅ **Resolved** - This issue has been addressed in the latest changes."
+        old_resolved.user.login = "github-actions[bot]"
+        old_resolved.id = 200
+        old_resolved.path = "test.py"
+        old_resolved.line = 10
+        old_resolved.original_line = 10
+        mock_pr.get_review_comments.return_value = [old_resolved]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            comments = client.get_previous_review_comments(mock_pr)
+
+        assert len(comments) == 0
+
     def test_get_resolved_comment_ids_filters_by_user(self):
         """Test that resolved replies from unknown users are ignored."""
         from ai_reviewer.github.client import GitHubClient

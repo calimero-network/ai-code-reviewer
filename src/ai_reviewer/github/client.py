@@ -17,12 +17,10 @@ from github.PullRequestComment import PullRequestComment
 from github.Repository import Repository
 
 from ai_reviewer.models.context import ReviewContext
-from ai_reviewer.models.findings import ConsolidatedFinding, Severity
+from ai_reviewer.models.findings import ConsolidatedFinding, Severity, compute_fuzzy_hash
 from ai_reviewer.models.review import ConsolidatedReview
 
 logger = logging.getLogger(__name__)
-
-_FUZZY_WORD_RE = re.compile(r"\b\w{4,}\b")
 
 # Sentinel for failed user login fetch (distinct from empty string)
 _USER_FETCH_FAILED = "__FETCH_FAILED__"
@@ -47,6 +45,16 @@ _MAX_RESOLVE_COMMENTS: int = int(os.environ.get("AI_REVIEWER_MAX_RESOLVE", "100"
 _NO_LONGER_DETECTED_REPLY = (
     "✅ **No longer detected** - This issue was not re-detected after the latest changes."
 )
+
+_RESOLVED_REPLY_MARKERS = (
+    _NO_LONGER_DETECTED_REPLY,
+    "✅ **Resolved**",
+    "✅ **No longer detected**",
+)
+
+
+def _is_resolved_reply(body: str) -> bool:
+    return any(marker in body for marker in _RESOLVED_REPLY_MARKERS)
 
 
 _SEVERITY_ORDER: list[Severity] = [
@@ -150,14 +158,7 @@ class PreviousComment:
         comment can be matched to a current finding even when the line number
         or category has drifted between review runs.
         """
-        if not self.file_path or not self.title:
-            return None
-        import hashlib
-
-        words = sorted(set(_FUZZY_WORD_RE.findall(self.title.lower())))
-        word_key = ":".join(words[:5]) if words else self.title.lower().strip()
-        key = f"{self.file_path}:{word_key}"
-        return hashlib.sha256(key.encode()).hexdigest()[:12]
+        return compute_fuzzy_hash(self.file_path, self.title)
 
 
 @dataclass
@@ -594,8 +595,8 @@ class GitHubClient:
 
         # Get review comments (inline comments on code)
         for comment in pr.get_review_comments():
-            # Skip our own "no longer detected" replies - they are not findings
-            if _NO_LONGER_DETECTED_REPLY in comment.body:
+            # Skip our own resolved / "no longer detected" replies - they are not findings
+            if _is_resolved_reply(comment.body):
                 continue
 
             user_login = comment.user.login
@@ -1113,8 +1114,8 @@ class GitHubClient:
         comments = raw_comments if raw_comments is not None else pr.get_review_comments()
 
         for comment in comments:
-            # Check if this is our "no longer detected" reply with a parent
-            if _NO_LONGER_DETECTED_REPLY not in comment.body:
+            # Check if this is our resolved / "no longer detected" reply with a parent
+            if not _is_resolved_reply(comment.body):
                 continue
 
             # Safely get in_reply_to_id (may be NotSet, None, or 0)

@@ -30,7 +30,7 @@ from ai_reviewer.agents.cursor_client import CursorClient, CursorConfig
 from ai_reviewer.github.client import GitHubClient
 from ai_reviewer.models.context import ReviewContext
 from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
-from ai_reviewer.models.review import ConsolidatedReview
+from ai_reviewer.models.review import ConsolidatedReview, ScoreBreakdown
 from ai_reviewer.security.scanner import scan_for_secrets
 
 logger = logging.getLogger(__name__)
@@ -580,13 +580,9 @@ def apply_cross_review(
     remaining_original_order = [f.id for f in review.findings if f.id in set(new_ids)]
     order_changed = remaining_original_order != new_ids
 
-    # Recompute quality score from cross-review valid_ratio (findings filtered/reordered)
-    agent_factor = min(1.0, review.agent_count / 3)
-    if not new_findings:
-        quality_score = round(min(0.95, 0.7 + review.agent_count * 0.1), 2)
-    else:
-        avg_valid_ratio = sum(x[1] for x in kept) / len(kept)
-        quality_score = round(avg_valid_ratio * agent_factor, 2)
+    quality_score, score_breakdown = compute_quality_score(
+        new_findings, review.agent_count, total_lines=0
+    )
 
     summary = review.summary
     if n_dropped > 0 or order_changed:
@@ -608,6 +604,7 @@ def apply_cross_review(
         review_quality_score=quality_score,
         total_review_time_ms=review.total_review_time_ms,
         failed_agents=review.failed_agents,
+        score_breakdown=score_breakdown,
     )
 
 
@@ -749,7 +746,7 @@ def dedup_cross_file(
     listing the other file paths (capped to ``_CROSS_FILE_ALSO_FOUND_CAP``).
     """
     from collections import defaultdict
-    from copy import copy
+    from copy import deepcopy
 
     groups: dict[tuple[str, str], list[ConsolidatedFinding]] = defaultdict(list)
     for f in findings:
@@ -763,7 +760,7 @@ def dedup_cross_file(
             continue
 
         group.sort(key=lambda f: f.priority_score, reverse=True)
-        representative = copy(group[0])
+        representative = deepcopy(group[0])
 
         other_paths = [f.file_path for f in group[1:]]
         if len(other_paths) > _CROSS_FILE_ALSO_FOUND_CAP:
@@ -783,33 +780,56 @@ def compute_quality_score(
     findings: list[ConsolidatedFinding],
     agent_count: int,
     total_lines: int,
-) -> float:
+) -> tuple[float, ScoreBreakdown]:
     """Composite quality score factoring severity, density, consensus, and agents.
 
-    Returns a float between 0.0 and 0.95.
+    Returns a score between 0.0 and 0.95 and a component breakdown.
+
+    When ``total_lines`` is 0, density normalization is skipped (density penalty is 0).
     """
     if not findings:
         base = 0.85
         agent_bonus = min(0.10, (agent_count - 1) * 0.05)
-        return min(0.95, base + agent_bonus)
+        raw_pre_cap = base + agent_bonus
+        final = min(0.95, raw_pre_cap)
+        rounded = round(final, 2)
+        breakdown = ScoreBreakdown(
+            severity_penalty=0.0,
+            density_penalty=0.0,
+            consensus_factor=1.0,
+            agent_factor=1.0,
+            raw_score=rounded,
+        )
+        return rounded, breakdown
 
-    severity_penalty = {
+    severity_weights = {
         Severity.CRITICAL: 0.20,
         Severity.WARNING: 0.06,
         Severity.SUGGESTION: 0.02,
         Severity.NITPICK: 0.005,
     }
-    total_penalty = sum(severity_penalty.get(f.severity, 0.02) * f.confidence for f in findings)
+    severity_penalty = sum(severity_weights.get(f.severity, 0.02) * f.confidence for f in findings)
 
-    density = len(findings) / max(total_lines / 100, 1)
-    density_penalty = min(0.15, density * 0.03)
+    if total_lines > 0:
+        density = len(findings) / max(total_lines / 100, 1)
+        density_penalty = min(0.15, density * 0.03)
+    else:
+        density_penalty = 0.0
 
     avg_consensus = sum(f.consensus_score for f in findings) / len(findings)
     consensus_factor = 0.8 + (avg_consensus * 0.2)
     agent_factor = min(1.0, agent_count / 3)
 
-    raw_score = max(0.0, 1.0 - total_penalty - density_penalty)
-    return round(min(0.95, raw_score * consensus_factor * agent_factor), 2)
+    raw_score = max(0.0, 1.0 - severity_penalty - density_penalty)
+    combined = raw_score * consensus_factor * agent_factor
+    breakdown = ScoreBreakdown(
+        severity_penalty=severity_penalty,
+        density_penalty=density_penalty,
+        consensus_factor=consensus_factor,
+        agent_factor=agent_factor,
+        raw_score=raw_score,
+    )
+    return round(min(0.95, combined), 2), breakdown
 
 
 def aggregate_findings(
@@ -899,7 +919,7 @@ def aggregate_findings(
     combined_summary = "\n".join(summaries) if summaries else "Review completed"
 
     total_agents = len(all_findings)
-    quality_score = compute_quality_score(consolidated, total_agents, total_lines)
+    quality_score, score_breakdown = compute_quality_score(consolidated, total_agents, total_lines)
 
     return ConsolidatedReview(
         id=f"review-{uuid4().hex[:8]}",
@@ -912,6 +932,7 @@ def aggregate_findings(
         review_quality_score=quality_score,
         total_review_time_ms=0,
         failed_agents=failed_agents,
+        score_breakdown=score_breakdown,
     )
 
 

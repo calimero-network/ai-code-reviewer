@@ -15,6 +15,7 @@ from ai_reviewer.review import (
     _raw_findings_similar,
     aggregate_findings,
     apply_cross_review,
+    compute_quality_score,
     dedup_cross_file,
     get_cross_review_prompt,
     get_output_format,
@@ -572,10 +573,9 @@ class TestApplyCrossReview:
         assert "re-ranked" not in result.summary
 
     def test_quality_score_recalculated_after_cross_review(self):
-        """Quality score is recomputed from cross-review valid_ratio, not copied unchanged."""
+        """Quality score is recomputed via compute_quality_score, not copied unchanged."""
         review = _make_review([_make_finding("f1"), _make_finding("f2")])
         assert review.review_quality_score == 0.9
-        # All agents say valid for both -> avg valid_ratio 1.0, agent_factor 1.0 -> score 1.0
         all_assessments = [
             (
                 "a1",
@@ -591,7 +591,11 @@ class TestApplyCrossReview:
             ),
         ]
         result = apply_cross_review(review, all_assessments)
-        assert result.review_quality_score == 1.0
+        expected_score, expected_breakdown = compute_quality_score(
+            result.findings, review.agent_count, total_lines=0
+        )
+        assert result.review_quality_score == expected_score
+        assert result.score_breakdown == expected_breakdown
 
     def test_valid_field_string_coerced_to_bool(self):
         """LLM may return valid as string 'false'; must be coerced so finding is dropped when appropriate."""
