@@ -120,9 +120,10 @@ class TestGitHubPRHandler:
             action="opened",
         )
 
-        with patch("ai_reviewer.github.webhook.review_pr", new_callable=AsyncMock) as mock_review:
+        mock_handler = AsyncMock()
+        with patch("ai_reviewer.github.webhook._review_handler", mock_handler):
             await handle_pr_event(event)
-            mock_review.assert_called_once_with(
+            mock_handler.assert_called_once_with(
                 repo="test-org/test-repo",
                 pr_number=42,
             )

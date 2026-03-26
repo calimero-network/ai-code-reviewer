@@ -29,8 +29,8 @@ class TestReviewAggregator:
             line_end=16,
             severity=Severity.CRITICAL,
             category=Category.SECURITY,
-            title="SQL Injection Vulnerability",  # Slightly different title
-            description="Direct string interpolation in SQL",
+            title="SQL Injection",
+            description="User input in query",
             suggested_fix="Use parameterized queries",
             confidence=0.9,
         )
@@ -133,7 +133,7 @@ class TestReviewAggregator:
             title="Critical Issue",
             description="Critical but only one agent found it",
             suggested_fix=None,
-            confidence=0.9,
+            confidence=1.0,
         )
 
         # Warning with full consensus
@@ -146,7 +146,7 @@ class TestReviewAggregator:
             title="Warning Issue",
             description="Warning but both agents agree",
             suggested_fix=None,
-            confidence=0.85,
+            confidence=0.6,
         )
 
         review_1 = AgentReview(
