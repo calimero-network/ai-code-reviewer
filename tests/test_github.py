@@ -464,7 +464,9 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
         mock_comment = MagicMock()
-        mock_comment.body = "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+        mock_comment.body = (
+            "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+        )
         mock_comment.in_reply_to_id = NotSet
         mock_comment.user.login = "github-actions[bot]"
         mock_pr.get_review_comments.return_value = [mock_comment]
@@ -481,7 +483,9 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
         mock_comment = MagicMock()
-        mock_comment.body = "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+        mock_comment.body = (
+            "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+        )
         mock_comment.in_reply_to_id = None
         mock_comment.user.login = "github-actions[bot]"
         mock_pr.get_review_comments.return_value = [mock_comment]
@@ -498,7 +502,9 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
         mock_comment = MagicMock()
-        mock_comment.body = "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+        mock_comment.body = (
+            "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+        )
         mock_comment.in_reply_to_id = 0
         mock_comment.user.login = "github-actions[bot]"
         mock_pr.get_review_comments.return_value = [mock_comment]
@@ -515,7 +521,9 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
         mock_comment = MagicMock()
-        mock_comment.body = "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+        mock_comment.body = (
+            "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+        )
         mock_comment.in_reply_to_id = 12345
         mock_comment.user.login = "github-actions[bot]"
         mock_pr.get_review_comments.return_value = [mock_comment]
@@ -532,7 +540,9 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
         mock_comment = MagicMock()
-        mock_comment.body = "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+        mock_comment.body = (
+            "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+        )
         mock_comment.in_reply_to_id = 12345
         mock_comment.user.login = "random-user"  # Not in AI_REVIEWER_USERS
         mock_pr.get_review_comments.return_value = [mock_comment]
@@ -549,7 +559,9 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
         mock_comment = MagicMock()
-        mock_comment.body = "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+        mock_comment.body = (
+            "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+        )
         mock_comment.in_reply_to_id = 12345
         mock_comment.user = None
         mock_pr.get_review_comments.return_value = [mock_comment]
@@ -566,7 +578,9 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
         mock_comment = MagicMock()
-        mock_comment.body = "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+        mock_comment.body = (
+            "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+        )
         mock_comment.in_reply_to_id = 12345
         mock_comment.user.login = None
         mock_pr.get_review_comments.return_value = [mock_comment]
@@ -1218,6 +1232,188 @@ def _make_finding_for_delta(
         agreeing_agents=["a"],
         confidence=0.9,
     )
+
+
+class TestDeltaSeverityStabilization:
+    """Integration tests: compute_review_delta() stabilizes matched finding severity."""
+
+    def test_downgrade_blocked_on_later_review(self):
+        """current SUGGESTION + previous WARNING + review_count>=2 => stays WARNING."""
+        from ai_reviewer.github.client import GitHubClient, PreviousComment
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        prev_comment = PreviousComment(
+            id=1,
+            file_path="src/auth.py",
+            line=10,
+            title="SQL Injection Vulnerability",
+            severity="warning",
+            body="🟡 **SQL Injection Vulnerability**\n\ndesc\n\n<!-- ai-reviewer-id: aabbccddee11 -->",
+            finding_hash="aabbccddee11",
+        )
+
+        current_finding = ConsolidatedFinding(
+            id="test-1",
+            file_path="src/auth.py",
+            line_start=10,
+            line_end=None,
+            severity=Severity.SUGGESTION,
+            category=Category.SECURITY,
+            title="SQL Injection Vulnerability",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a"],
+            confidence=0.9,
+        )
+
+        mock_pr = MagicMock()
+        mock_file = MagicMock()
+        mock_file.filename = "src/auth.py"
+        mock_file.patch = "@@ -1,3 +1,3 @@\n-old\n+new"
+        mock_file.status = "modified"
+        mock_pr.get_files.return_value = [mock_file]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            # Provide enough previous comments so estimate_review_count >= 2
+            client.get_previous_review_comments = MagicMock(
+                return_value=[prev_comment]
+                + [
+                    PreviousComment(
+                        id=100 + i,
+                        file_path="src/other.py",
+                        line=i,
+                        title=f"Other issue {i}",
+                        severity="warning",
+                        body=f"body {i}",
+                    )
+                    for i in range(5)
+                ]
+            )
+
+            delta = client.compute_review_delta(mock_pr, [current_finding])
+
+        assert len(delta.open_findings) == 1
+        assert delta.open_findings[0].severity == Severity.WARNING
+
+    def test_upgrade_allowed_on_later_review(self):
+        """current CRITICAL + previous WARNING => upgrades to CRITICAL."""
+        from ai_reviewer.github.client import GitHubClient, PreviousComment
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        prev_comment = PreviousComment(
+            id=1,
+            file_path="src/auth.py",
+            line=10,
+            title="SQL Injection Vulnerability",
+            severity="warning",
+            body="🟡 **SQL Injection Vulnerability**\n\ndesc\n\n<!-- ai-reviewer-id: aabbccddee11 -->",
+            finding_hash="aabbccddee11",
+        )
+
+        current_finding = ConsolidatedFinding(
+            id="test-1",
+            file_path="src/auth.py",
+            line_start=10,
+            line_end=None,
+            severity=Severity.CRITICAL,
+            category=Category.SECURITY,
+            title="SQL Injection Vulnerability",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a"],
+            confidence=0.9,
+        )
+
+        mock_pr = MagicMock()
+        mock_file = MagicMock()
+        mock_file.filename = "src/auth.py"
+        mock_file.patch = "@@ -1,3 +1,3 @@\n-old\n+new"
+        mock_file.status = "modified"
+        mock_pr.get_files.return_value = [mock_file]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client.get_previous_review_comments = MagicMock(
+                return_value=[prev_comment]
+                + [
+                    PreviousComment(
+                        id=100 + i,
+                        file_path="src/other.py",
+                        line=i,
+                        title=f"Other issue {i}",
+                        severity="warning",
+                        body=f"body {i}",
+                    )
+                    for i in range(5)
+                ]
+            )
+
+            delta = client.compute_review_delta(mock_pr, [current_finding])
+
+        assert len(delta.open_findings) == 1
+        assert delta.open_findings[0].severity == Severity.CRITICAL
+
+    def test_unknown_previous_severity_leaves_current_unchanged(self):
+        """When previous severity is 'unknown', current severity is preserved."""
+        from ai_reviewer.github.client import GitHubClient, PreviousComment
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        prev_comment = PreviousComment(
+            id=1,
+            file_path="src/auth.py",
+            line=10,
+            title="SQL Injection Vulnerability",
+            severity="unknown",
+            body="**SQL Injection Vulnerability**\n\ndesc\n\n<!-- ai-reviewer-id: aabbccddee11 -->",
+            finding_hash="aabbccddee11",
+        )
+
+        current_finding = ConsolidatedFinding(
+            id="test-1",
+            file_path="src/auth.py",
+            line_start=10,
+            line_end=None,
+            severity=Severity.SUGGESTION,
+            category=Category.SECURITY,
+            title="SQL Injection Vulnerability",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a"],
+            confidence=0.9,
+        )
+
+        mock_pr = MagicMock()
+        mock_file = MagicMock()
+        mock_file.filename = "src/auth.py"
+        mock_file.patch = "@@ -1,3 +1,3 @@\n-old\n+new"
+        mock_file.status = "modified"
+        mock_pr.get_files.return_value = [mock_file]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client.get_previous_review_comments = MagicMock(
+                return_value=[prev_comment]
+                + [
+                    PreviousComment(
+                        id=100 + i,
+                        file_path="src/other.py",
+                        line=i,
+                        title=f"Other issue {i}",
+                        severity="warning",
+                        body=f"body {i}",
+                    )
+                    for i in range(5)
+                ]
+            )
+
+            delta = client.compute_review_delta(mock_pr, [current_finding])
+
+        assert len(delta.open_findings) == 1
+        assert delta.open_findings[0].severity == Severity.SUGGESTION
 
 
 class TestPreviousCommentFuzzyHash:

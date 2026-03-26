@@ -1,4 +1,4 @@
-"""Tests for convergence detection (Task 7).
+"""Tests for convergence detection (Task 7) and severity stabilization (Task 8).
 
 Convergence means "no delta churn" — the issue set hasn't changed since the
 last review.  This is distinct from ``all_issues_resolved`` (PR is clean).
@@ -13,6 +13,7 @@ from ai_reviewer.github.client import (
     ReviewDelta,
     has_converged,
     should_skip_review,
+    stabilize_severity,
 )
 from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
 
@@ -362,6 +363,58 @@ class TestCLIConvergenceGate:
             )
 
             mock_gh.post_review.assert_called_once()
+
+
+class TestSeverityStabilization:
+    """Unit tests for stabilize_severity() (Task 8)."""
+
+    def test_same_severity_returns_current(self):
+        assert (
+            stabilize_severity(Severity.WARNING, Severity.WARNING, review_count=3)
+            == Severity.WARNING
+        )
+
+    def test_upgrade_always_allowed(self):
+        assert (
+            stabilize_severity(Severity.CRITICAL, Severity.WARNING, review_count=5)
+            == Severity.CRITICAL
+        )
+        assert (
+            stabilize_severity(Severity.WARNING, Severity.SUGGESTION, review_count=3)
+            == Severity.WARNING
+        )
+
+    def test_downgrade_blocked_after_stabilization(self):
+        assert (
+            stabilize_severity(Severity.SUGGESTION, Severity.WARNING, review_count=2)
+            == Severity.WARNING
+        )
+        assert (
+            stabilize_severity(Severity.NITPICK, Severity.WARNING, review_count=3)
+            == Severity.WARNING
+        )
+
+    def test_downgrade_allowed_on_first_review(self):
+        assert (
+            stabilize_severity(Severity.SUGGESTION, Severity.WARNING, review_count=1)
+            == Severity.SUGGESTION
+        )
+
+    def test_downgrade_from_critical_blocked_after_stabilization(self):
+        assert (
+            stabilize_severity(Severity.WARNING, Severity.CRITICAL, review_count=2)
+            == Severity.CRITICAL
+        )
+        assert (
+            stabilize_severity(Severity.NITPICK, Severity.CRITICAL, review_count=4)
+            == Severity.CRITICAL
+        )
+
+    def test_downgrade_from_critical_allowed_on_first_review(self):
+        assert (
+            stabilize_severity(Severity.WARNING, Severity.CRITICAL, review_count=1)
+            == Severity.WARNING
+        )
 
 
 class TestWebhookConvergenceGate:

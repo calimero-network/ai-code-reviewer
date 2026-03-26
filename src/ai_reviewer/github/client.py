@@ -49,6 +49,52 @@ _NO_LONGER_DETECTED_REPLY = (
 )
 
 
+_SEVERITY_ORDER: list[Severity] = [
+    Severity.CRITICAL,
+    Severity.WARNING,
+    Severity.SUGGESTION,
+    Severity.NITPICK,
+]
+
+
+def _parse_severity(severity_str: str) -> Severity | None:
+    """Convert a severity string (from a previous comment) to a Severity enum.
+
+    Returns None for unrecognised values so callers can skip stabilization
+    rather than guessing.
+    """
+    try:
+        return Severity(severity_str.lower())
+    except ValueError:
+        return None
+
+
+def stabilize_severity(
+    current: Severity,
+    previous: Severity,
+    review_count: int,
+) -> Severity:
+    """Decide the effective severity for a matched finding.
+
+    * Same severity → keep current.
+    * Upgrade (more severe) → always allowed.
+    * Downgrade (less severe) → blocked once ``review_count >= 2``.
+    """
+    if current is previous:
+        return current
+
+    cur_idx = _SEVERITY_ORDER.index(current)
+    prev_idx = _SEVERITY_ORDER.index(previous)
+
+    is_upgrade = cur_idx < prev_idx
+    if is_upgrade:
+        return current
+
+    if review_count >= 2:
+        return previous
+    return current
+
+
 def apply_comment_limits(
     findings: list[ConsolidatedFinding],
     max_total: int = 50,
@@ -657,7 +703,10 @@ class GitHubClient:
                 matched_comment = title_lookup.get(key)
 
             if matched_comment is not None:
-                # This finding was already reported - it's still OPEN
+                prev_sev = _parse_severity(matched_comment.severity)
+                if prev_sev is not None:
+                    review_count = estimate_review_count(delta)
+                    finding.severity = stabilize_severity(finding.severity, prev_sev, review_count)
                 delta.open_findings.append(finding)
                 matched_previous.add(matched_comment.id)
             else:

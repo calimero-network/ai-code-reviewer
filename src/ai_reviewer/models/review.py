@@ -7,6 +7,25 @@ from ai_reviewer.models.findings import Category, ConsolidatedFinding, ReviewFin
 
 
 @dataclass
+class ReviewHistory:
+    """Cross-run history tracking for a single PR.
+
+    Staged for future use — the runtime severity-stabilization logic in
+    ``compute_review_delta`` currently derives its inputs from
+    ``PreviousComment`` matching and ``estimate_review_count``.  This model
+    captures richer state that downstream features (trend analysis, adaptive
+    thresholds) will consume once a persistence layer is wired in.
+    """
+
+    review_count: int = 0
+    previous_hashes: list[str] = field(default_factory=list)
+    resolved_hashes: list[str] = field(default_factory=list)
+    last_severity_map: dict[str, str] = field(default_factory=dict)
+    last_quality_score: float | None = None
+    last_review_sha: str | None = None
+
+
+@dataclass
 class ScoreBreakdown:
     """Transparent breakdown of quality score components."""
 
