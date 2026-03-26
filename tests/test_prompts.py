@@ -260,3 +260,146 @@ class TestPromptConventionsAndRules:
         prompt = get_base_prompt(ctx, "diff text", {})
         assert "Repository Conventions" not in prompt
         assert "Repository-Specific Rules" not in prompt
+
+
+class TestClassifyPR:
+    """Tests for classify_pr() — PR type + size classification."""
+
+    def test_trivial_code_pr(self):
+        from ai_reviewer.review import classify_pr
+
+        pr_type, pr_size = classify_pr(["src/main.py"], additions=20, deletions=10)
+        assert pr_type == "code"
+        assert pr_size == "trivial"
+
+    def test_small_code_pr(self):
+        from ai_reviewer.review import classify_pr
+
+        pr_type, pr_size = classify_pr(["src/main.py"], additions=100, deletions=50)
+        assert pr_type == "code"
+        assert pr_size == "small"
+
+    def test_medium_code_pr(self):
+        from ai_reviewer.review import classify_pr
+
+        pr_type, pr_size = classify_pr(
+            ["src/main.py", "src/utils.py"], additions=400, deletions=200
+        )
+        assert pr_type == "code"
+        assert pr_size == "medium"
+
+    def test_large_code_pr(self):
+        from ai_reviewer.review import classify_pr
+
+        pr_type, pr_size = classify_pr(["src/main.py"], additions=800, deletions=500)
+        assert pr_type == "code"
+        assert pr_size == "large"
+
+    def test_docs_only_pr(self):
+        from ai_reviewer.review import classify_pr
+
+        pr_type, pr_size = classify_pr(
+            ["docs/README.md", "CHANGELOG.md"], additions=50, deletions=10
+        )
+        assert pr_type == "docs"
+        assert pr_size == "small"
+
+    def test_ci_only_pr(self):
+        from ai_reviewer.review import classify_pr
+
+        pr_type, pr_size = classify_pr([".github/workflows/ci.yml"], additions=10, deletions=5)
+        assert pr_type == "ci"
+        assert pr_size == "trivial"
+
+    def test_boundary_trivial_small(self):
+        """Exactly 50 total lines should be 'small', not 'trivial'."""
+        from ai_reviewer.review import classify_pr
+
+        _, size = classify_pr(["a.py"], additions=30, deletions=20)
+        assert size == "small"
+
+    def test_boundary_small_medium(self):
+        """Exactly 200 total lines should be 'medium', not 'small'."""
+        from ai_reviewer.review import classify_pr
+
+        _, size = classify_pr(["a.py"], additions=120, deletions=80)
+        assert size == "medium"
+
+    def test_boundary_medium_large(self):
+        """Exactly 1000 total lines should be 'large', not 'medium'."""
+        from ai_reviewer.review import classify_pr
+
+        _, size = classify_pr(["a.py"], additions=600, deletions=400)
+        assert size == "large"
+
+    def test_empty_paths_defaults_to_code(self):
+        from ai_reviewer.review import classify_pr
+
+        pr_type, _ = classify_pr([], additions=10, deletions=5)
+        assert pr_type == "code"
+
+    def test_zero_lines_is_trivial(self):
+        from ai_reviewer.review import classify_pr
+
+        _, pr_size = classify_pr(["a.py"], additions=0, deletions=0)
+        assert pr_size == "trivial"
+
+
+class TestAdaptivePromptInstructions:
+    """Tests that get_base_prompt() injects size-aware guidance."""
+
+    def _make_context(self, additions=10, deletions=5):
+        from ai_reviewer.models.context import ReviewContext
+
+        return ReviewContext(
+            repo_name="test/repo",
+            pr_number=1,
+            pr_title="Test",
+            pr_description="",
+            base_branch="main",
+            head_branch="feat",
+            author="dev",
+            changed_files_count=1,
+            additions=additions,
+            deletions=deletions,
+        )
+
+    def test_small_pr_gets_precision_note(self):
+        from ai_reviewer.review import get_base_prompt
+
+        ctx = self._make_context(additions=20, deletions=10)
+        prompt = get_base_prompt(ctx, "diff text", {"a.py": "code"}, changed_paths=["a.py"])
+        assert "precision" in prompt.lower() or "padding" in prompt.lower()
+
+    def test_large_pr_gets_prioritization_note(self):
+        from ai_reviewer.review import get_base_prompt
+
+        ctx = self._make_context(additions=800, deletions=400)
+        prompt = get_base_prompt(ctx, "diff text", {"a.py": "code"}, changed_paths=["a.py"])
+        assert "architect" in prompt.lower() or "high-severity" in prompt.lower()
+
+    def test_medium_pr_has_no_size_note(self):
+        from ai_reviewer.review import get_base_prompt
+
+        ctx = self._make_context(additions=300, deletions=200)
+        prompt = get_base_prompt(ctx, "diff text", {"a.py": "code"}, changed_paths=["a.py"])
+        assert "precision" not in prompt.lower() or "padding" not in prompt.lower()
+        assert "architect" not in prompt.lower() or "high-severity" not in prompt.lower()
+
+    def test_docs_pr_still_gets_docs_instruction(self):
+        from ai_reviewer.review import get_base_prompt
+
+        ctx = self._make_context(additions=20, deletions=5)
+        prompt = get_base_prompt(
+            ctx, "diff text", {"README.md": "# Docs"}, changed_paths=["README.md"]
+        )
+        assert "docs-only" in prompt.lower()
+
+    def test_size_note_coexists_with_conventions(self):
+        from ai_reviewer.review import get_base_prompt
+
+        ctx = self._make_context(additions=20, deletions=10)
+        ctx.conventions = "Always use type hints."
+        prompt = get_base_prompt(ctx, "diff text", {"a.py": "code"}, changed_paths=["a.py"])
+        assert "Repository Conventions" in prompt
+        assert "precision" in prompt.lower() or "padding" in prompt.lower()

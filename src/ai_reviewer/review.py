@@ -120,6 +120,33 @@ def _detect_pr_type(changed_paths: list[str]) -> str:
     return "code"
 
 
+def classify_pr(
+    changed_paths: list[str],
+    additions: int = 0,
+    deletions: int = 0,
+) -> tuple[str, str]:
+    """Classify a PR by type (docs/ci/code) and size (trivial/small/medium/large).
+
+    Reuses ``_detect_pr_type`` for the type half and buckets
+    ``additions + deletions`` for size:
+      < 50  → trivial
+      < 200 → small
+      < 1000 → medium
+      ≥ 1000 → large
+    """
+    pr_type = _detect_pr_type(changed_paths)
+    total = additions + deletions
+    if total < 50:
+        pr_size = "trivial"
+    elif total < 200:
+        pr_size = "small"
+    elif total < 1000:
+        pr_size = "medium"
+    else:
+        pr_size = "large"
+    return pr_type, pr_size
+
+
 _DIFF_FILE_HEADER_RE = re.compile(r"^diff --git a/.+ b/(.+)$")
 
 
@@ -177,13 +204,20 @@ def get_base_prompt(
     changed_paths: list[str] | None = None,
 ) -> str:
     """Build the base review prompt."""
-    pr_type = _detect_pr_type(changed_paths or list(file_contents.keys()))
+    paths = changed_paths or list(file_contents.keys())
+    pr_type, pr_size = classify_pr(paths, context.additions, context.deletions)
 
     pr_type_instruction = ""
     if pr_type == "docs":
         pr_type_instruction = "\n**This PR is docs-only (markdown).** Only report factual errors, broken links, or security-sensitive content. Do not suggest code style, tests, or nitpicks.\n"
     elif pr_type == "ci":
         pr_type_instruction = "\n**This PR is CI/workflow-only.** Focus on workflow correctness (paths, steps, secrets). Do not report code style or nitpicks.\n"
+
+    pr_size_instruction = ""
+    if pr_size in ("trivial", "small"):
+        pr_size_instruction = "\n**Small change — prioritize precision.** Only report findings you are confident about. Do not pad the review with low-value suggestions.\n"
+    elif pr_size == "large":
+        pr_size_instruction = "\n**Large change — prioritize high-severity issues.** Focus on architectural concerns, correctness, and security over minor style or nitpicks.\n"
 
     files_context = ""
     if file_contents:
@@ -213,7 +247,7 @@ def get_base_prompt(
 {review_standard}
 {what_to_look_for}
 {design_principles}
-{pr_type_instruction}
+{pr_type_instruction}{pr_size_instruction}
 ## Pull Request Information
 - **Repository**: {context.repo_name}
 - **PR #{context.pr_number}**: {context.pr_title}
@@ -946,7 +980,7 @@ async def review_pr_with_cursor_agent(
         enable_cross_review = False
 
     changed_paths = list(files.keys())
-    pr_type = _detect_pr_type(changed_paths)
+    pr_type, _pr_size = classify_pr(changed_paths, context.additions, context.deletions)
     if pr_type != "code":
         logger.info(f"PR type: {pr_type} – using context-aware review rules")
 
