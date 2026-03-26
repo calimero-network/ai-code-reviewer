@@ -464,7 +464,7 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
         mock_comment = MagicMock()
-        mock_comment.body = "✅ **Resolved** - This issue has been addressed"
+        mock_comment.body = "✅ **No longer detected** - This issue was not re-detected after the latest changes."
         mock_comment.in_reply_to_id = NotSet
         mock_comment.user.login = "github-actions[bot]"
         mock_pr.get_review_comments.return_value = [mock_comment]
@@ -481,7 +481,7 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
         mock_comment = MagicMock()
-        mock_comment.body = "✅ **Resolved** - This issue has been addressed"
+        mock_comment.body = "✅ **No longer detected** - This issue was not re-detected after the latest changes."
         mock_comment.in_reply_to_id = None
         mock_comment.user.login = "github-actions[bot]"
         mock_pr.get_review_comments.return_value = [mock_comment]
@@ -498,7 +498,7 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
         mock_comment = MagicMock()
-        mock_comment.body = "✅ **Resolved** - This issue has been addressed"
+        mock_comment.body = "✅ **No longer detected** - This issue was not re-detected after the latest changes."
         mock_comment.in_reply_to_id = 0
         mock_comment.user.login = "github-actions[bot]"
         mock_pr.get_review_comments.return_value = [mock_comment]
@@ -515,7 +515,7 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
         mock_comment = MagicMock()
-        mock_comment.body = "✅ **Resolved** - This issue has been addressed"
+        mock_comment.body = "✅ **No longer detected** - This issue was not re-detected after the latest changes."
         mock_comment.in_reply_to_id = 12345
         mock_comment.user.login = "github-actions[bot]"
         mock_pr.get_review_comments.return_value = [mock_comment]
@@ -532,7 +532,7 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
         mock_comment = MagicMock()
-        mock_comment.body = "✅ **Resolved** - This issue has been addressed"
+        mock_comment.body = "✅ **No longer detected** - This issue was not re-detected after the latest changes."
         mock_comment.in_reply_to_id = 12345
         mock_comment.user.login = "random-user"  # Not in AI_REVIEWER_USERS
         mock_pr.get_review_comments.return_value = [mock_comment]
@@ -549,7 +549,7 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
         mock_comment = MagicMock()
-        mock_comment.body = "✅ **Resolved** - This issue has been addressed"
+        mock_comment.body = "✅ **No longer detected** - This issue was not re-detected after the latest changes."
         mock_comment.in_reply_to_id = 12345
         mock_comment.user = None
         mock_pr.get_review_comments.return_value = [mock_comment]
@@ -566,7 +566,7 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
         mock_comment = MagicMock()
-        mock_comment.body = "✅ **Resolved** - This issue has been addressed"
+        mock_comment.body = "✅ **No longer detected** - This issue was not re-detected after the latest changes."
         mock_comment.in_reply_to_id = 12345
         mock_comment.user.login = None
         mock_pr.get_review_comments.return_value = [mock_comment]
@@ -701,7 +701,7 @@ class TestResolveFixedComments:
         # Our "Resolved" reply - should be excluded
         resolved_reply = MagicMock()
         resolved_reply.body = (
-            "✅ **Resolved** - This issue has been addressed in the latest changes."
+            "✅ **No longer detected** - This issue was not re-detected after the latest changes."
         )
         resolved_reply.user.login = "github-actions[bot]"
         resolved_reply.id = 101
@@ -937,7 +937,7 @@ class TestResolveFixedComments:
         resolved_reply = MagicMock()
         resolved_reply.id = 101
         resolved_reply.body = (
-            "✅ **Resolved** - This issue has been addressed in the latest changes."
+            "✅ **No longer detected** - This issue was not re-detected after the latest changes."
         )
         resolved_reply.in_reply_to_id = 100
         resolved_reply.user.login = "github-actions[bot]"

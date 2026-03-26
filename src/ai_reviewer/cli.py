@@ -16,7 +16,7 @@ from rich.table import Table
 from ai_reviewer import __version__
 from ai_reviewer.agents.cursor_client import CursorConfig
 from ai_reviewer.config import load_config, validate_config
-from ai_reviewer.github.client import GitHubClient
+from ai_reviewer.github.client import GitHubClient, estimate_review_count, should_skip_review
 from ai_reviewer.github.formatter import GitHubFormatter, format_review_as_json
 from ai_reviewer.github.webhook import create_webhook_app, set_review_handler
 from ai_reviewer.review import review_pr_with_cursor_agent
@@ -73,6 +73,11 @@ def cli(verbose: bool) -> None:
     default=2 / 3,
     help="Fraction of assessing agents that must mark a finding valid (default: 2/3; with 2 agents, both must agree)",
 )
+@click.option(
+    "--force-review",
+    is_flag=True,
+    help="Bypass convergence detection and always post a review",
+)
 def review_pr(
     repo: str,
     pr_number: int,
@@ -84,6 +89,7 @@ def review_pr(
     config_path: str | None,
     no_cross_review: bool,
     min_agreement: float,
+    force_review: bool,
 ) -> None:
     """Review a GitHub pull request using Cursor AI agent(s).
 
@@ -105,6 +111,7 @@ def review_pr(
             config_path=Path(config_path) if config_path else None,
             enable_cross_review=not no_cross_review,
             min_validation_agreement=min_agreement,
+            force_review=force_review,
         )
     )
 
@@ -120,6 +127,7 @@ async def review_pr_async(
     config_path: Path | None = None,
     enable_cross_review: bool = True,
     min_validation_agreement: float = 2 / 3,
+    force_review: bool = False,
 ) -> None:
     """Async implementation of PR review using Cursor Background Agent(s)."""
     # Auto-detect GitHub Actions environment - never allow APPROVE there
@@ -239,6 +247,18 @@ async def review_pr_async(
             )
         else:
             console.print("   No previous review comments found (first run)")
+
+        # Convergence gate: skip posting when findings are unchanged
+        if delta.previous_comments and not force_review:
+            review_count = estimate_review_count(delta)
+            if should_skip_review(review_count, delta):
+                console.print(
+                    "[dim]⏭️  Findings unchanged since last review — skipping post "
+                    "(use --force-review to override)[/dim]"
+                )
+                return
+        elif force_review and delta.previous_comments:
+            console.print("[dim]⚡ --force-review: bypassing convergence check[/dim]")
 
         if dry_run:
             console.print("\n[yellow]Dry run - not posting to GitHub[/yellow]")

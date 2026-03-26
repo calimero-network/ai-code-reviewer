@@ -17,7 +17,7 @@ from github.PullRequestComment import PullRequestComment
 from github.Repository import Repository
 
 from ai_reviewer.models.context import ReviewContext
-from ai_reviewer.models.findings import ConsolidatedFinding
+from ai_reviewer.models.findings import ConsolidatedFinding, Severity
 from ai_reviewer.models.review import ConsolidatedReview
 
 logger = logging.getLogger(__name__)
@@ -44,6 +44,9 @@ def _raise_if_forbidden(exc: Exception) -> None:
 
 _RESOLVE_COMMENT_DELAY_S: float = float(os.environ.get("AI_REVIEWER_RESOLVE_DELAY", "0.2"))
 _MAX_RESOLVE_COMMENTS: int = int(os.environ.get("AI_REVIEWER_MAX_RESOLVE", "100"))
+_NO_LONGER_DETECTED_REPLY = (
+    "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+)
 
 
 def apply_comment_limits(
@@ -124,6 +127,52 @@ class ReviewDelta:
     def all_issues_resolved(self) -> bool:
         """Check if all previously found issues are now resolved."""
         return len(self.open_findings) == 0 and len(self.new_findings) == 0
+
+
+def has_converged(delta: ReviewDelta) -> bool:
+    """Return True when the issue set is unchanged since the last review.
+
+    "Converged" means no new findings appeared and no previously-reported
+    findings were fixed — the delta is stable.  Open findings may still exist;
+    convergence is *not* the same as ``ReviewDelta.all_issues_resolved``.
+    """
+    return len(delta.new_findings) == 0 and len(delta.fixed_findings) == 0
+
+
+def should_skip_review(review_count: int, delta: ReviewDelta) -> bool:
+    """Decide whether to skip posting a review for this run.
+
+    Rules:
+    * review_count <= 1  → never skip (first review always posts).
+    * review_count >= 2  → skip when ``has_converged(delta)`` is True.
+    * review_count >= 3  → also skip when the only new findings are NITPICKs
+      (the issue set is "effectively" unchanged).
+    """
+    if review_count <= 1:
+        return False
+
+    if has_converged(delta):
+        return True
+
+    if review_count >= 3 and delta.new_findings and not delta.fixed_findings:
+        all_nitpicks = all(f.severity == Severity.NITPICK for f in delta.new_findings)
+        if all_nitpicks:
+            return True
+
+    return False
+
+
+def estimate_review_count(delta: ReviewDelta) -> int:
+    """Approximate how many review rounds have occurred.
+
+    Uses the number of previous comments as a proxy.  Zero previous comments
+    means this is the first review (count=1).  Any previous comments imply at
+    least a second review (count=2+).  The exact count is intentionally coarse;
+    refine later without changing the gate interface.
+    """
+    if not delta.previous_comments:
+        return 1
+    return max(2, len(delta.previous_comments) // 3 + 1)
 
 
 class GitHubClient:
@@ -499,8 +548,8 @@ class GitHubClient:
 
         # Get review comments (inline comments on code)
         for comment in pr.get_review_comments():
-            # Skip our own "Resolved" replies - they are not findings
-            if "✅ **Resolved**" in comment.body:
+            # Skip our own "no longer detected" replies - they are not findings
+            if _NO_LONGER_DETECTED_REPLY in comment.body:
                 continue
 
             user_login = comment.user.login
@@ -621,7 +670,8 @@ class GitHubClient:
         # 2. The file was deleted (status=removed) - no patch for binary/large files, OR
         # 3. The commented line was modified AND the AI didn't find the issue again
         #
-        # This avoids false "Resolved" on unmodified code while still detecting
+        # This avoids false "no longer detected" replies on unmodified code while
+        # still detecting
         # actual fixes when the relevant lines were changed.
         pr_files = list(pr.get_files())
         changed_files = {f.filename for f in pr_files}
@@ -958,7 +1008,8 @@ class GitHubClient:
             )
 
         for fixed in findings_to_process:
-            # Skip if we've already marked this as resolved (avoid duplicate "Resolved" on re-review)
+            # Skip if we've already marked this as no longer detected
+            # (avoid duplicate replies on re-review)
             if fixed.id in existing_replies:
                 logger.debug(f"Comment {fixed.id} already has resolved reply, skipping")
                 continue
@@ -971,17 +1022,17 @@ class GitHubClient:
                 with contextlib.suppress(Exception):
                     comment.create_reaction("hooray")  # 🎉 reaction
 
-                # Post a reply indicating it's fixed
+                # Post a reply indicating the issue was not re-detected.
                 pr.create_review_comment_reply(
                     comment_id=fixed.id,
-                    body="✅ **Resolved** - This issue has been addressed in the latest changes.",
+                    body=_NO_LONGER_DETECTED_REPLY,
                 )
 
                 # Hand-in-hand: also resolve the thread in GitHub UI (collapse the conversation).
                 # Without this, the reply would show but the thread would stay "open".
                 if not self._resolve_thread_for_comment(fixed.id, thread_mapping):
                     logger.warning(
-                        f"Posted 'Resolved' reply on comment {fixed.id} but could not "
+                        f"Posted 'no longer detected' reply on comment {fixed.id} but could not "
                         "resolve the thread (GraphQL resolve failed or thread not found). "
                         "Thread may still appear open in the PR."
                     )
@@ -998,7 +1049,7 @@ class GitHubClient:
     def _get_resolved_comment_ids(
         self, pr: PullRequest, raw_comments: list | None = None
     ) -> set[int]:
-        """Get IDs of comments that already have a 'Resolved' reply from us.
+        """Get IDs of comments that already have a "no longer detected" reply from us.
 
         Args:
             pr: Pull request object
@@ -1013,8 +1064,8 @@ class GitHubClient:
         comments = raw_comments if raw_comments is not None else pr.get_review_comments()
 
         for comment in comments:
-            # Check if this is a "Resolved" reply with a parent
-            if "✅ **Resolved**" not in comment.body:
+            # Check if this is our "no longer detected" reply with a parent
+            if _NO_LONGER_DETECTED_REPLY not in comment.body:
                 continue
 
             # Safely get in_reply_to_id (may be NotSet, None, or 0)
