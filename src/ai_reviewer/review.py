@@ -20,7 +20,9 @@ import fnmatch
 import json
 import logging
 import re
+from collections import defaultdict
 from collections.abc import Callable
+from copy import deepcopy
 from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any
@@ -150,14 +152,20 @@ def classify_pr(
 _DIFF_FILE_HEADER_RE = re.compile(r"^diff --git a/.+ b/(.+)$")
 
 
+def _compile_ignore_patterns(patterns: list[str]) -> list[re.Pattern[str]]:
+    """Pre-compile fnmatch patterns into regex for efficient repeated matching."""
+    return [re.compile(fnmatch.translate(p)) for p in patterns]
+
+
 def filter_by_ignore_patterns(files: dict[str, str], patterns: list[str]) -> dict[str, str]:
     """Remove entries whose path matches any of the fnmatch *patterns*."""
     if not patterns:
         return files
+    compiled = _compile_ignore_patterns(patterns)
     return {
         path: content
         for path, content in files.items()
-        if not any(fnmatch.fnmatch(path, p) for p in patterns)
+        if not any(c.match(path) for c in compiled)
     }
 
 
@@ -169,6 +177,7 @@ def filter_diff_by_ignore_patterns(diff: str, patterns: list[str]) -> str:
     if not patterns:
         return diff
 
+    compiled = _compile_ignore_patterns(patterns)
     sections: list[str] = []
     current_section: list[str] = []
     current_file: str | None = None
@@ -179,7 +188,7 @@ def filter_diff_by_ignore_patterns(diff: str, patterns: list[str]) -> str:
             if (
                 current_section
                 and current_file is not None
-                and not any(fnmatch.fnmatch(current_file, p) for p in patterns)
+                and not any(c.match(current_file) for c in compiled)
             ):
                 sections.append("".join(current_section))
             current_section = [line]
@@ -190,7 +199,7 @@ def filter_diff_by_ignore_patterns(diff: str, patterns: list[str]) -> str:
     if (
         current_section
         and current_file is not None
-        and not any(fnmatch.fnmatch(current_file, p) for p in patterns)
+        and not any(c.match(current_file) for c in compiled)
     ):
         sections.append("".join(current_section))
 
@@ -318,10 +327,20 @@ def get_base_prompt(
     if context.conventions:
         conventions_section = f"\n## Repository Conventions\n{context.conventions}\n"
 
+    _MAX_CUSTOM_RULES = 20
+    _MAX_RULE_LENGTH = 500
+
     custom_rules_section = ""
     if context.repo_config and context.repo_config.get("custom_rules"):
-        rules_list = "\n".join(f"- {r}" for r in context.repo_config["custom_rules"])
-        custom_rules_section = f"\n## Repository-Specific Rules\n{rules_list}\n"
+        raw_rules = context.repo_config["custom_rules"]
+        validated = [
+            str(r)[:_MAX_RULE_LENGTH]
+            for r in raw_rules[:_MAX_CUSTOM_RULES]
+            if isinstance(r, (str, int, float))
+        ]
+        if validated:
+            rules_list = "\n".join(f"- {r}" for r in validated)
+            custom_rules_section = f"\n## Repository-Specific Rules\n{rules_list}\n"
 
     lang_rules_section = ""
     lang_rules = get_language_rules(context.repo_languages)
@@ -745,9 +764,6 @@ def dedup_cross_file(
     representative's description gets an appended "Also found in: …" note
     listing the other file paths (capped to ``_CROSS_FILE_ALSO_FOUND_CAP``).
     """
-    from collections import defaultdict
-    from copy import deepcopy
-
     groups: dict[tuple[str, str], list[ConsolidatedFinding]] = defaultdict(list)
     for f in findings:
         key = (f.category.value.lower().strip(), f.title.lower().strip())
@@ -788,19 +804,18 @@ def compute_quality_score(
     When ``total_lines`` is 0, density normalization is skipped (density penalty is 0).
     """
     if not findings:
-        base = 0.85
+        raw_score = 0.85
         agent_bonus = max(0.0, min(0.10, (agent_count - 1) * 0.05))
-        raw_pre_cap = base + agent_bonus
-        final = min(0.95, raw_pre_cap)
-        rounded = round(final, 2)
+        agent_factor = (raw_score + agent_bonus) / raw_score
+        combined = round(min(0.95, raw_score * agent_factor), 2)
         breakdown = ScoreBreakdown(
             severity_penalty=0.0,
             density_penalty=0.0,
             consensus_factor=1.0,
-            agent_factor=1.0,
-            raw_score=rounded,
+            agent_factor=round(agent_factor, 4),
+            raw_score=raw_score,
         )
-        return rounded, breakdown
+        return combined, breakdown
 
     severity_weights = {
         Severity.CRITICAL: 0.20,
