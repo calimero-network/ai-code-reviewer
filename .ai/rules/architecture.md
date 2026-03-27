@@ -1,5 +1,7 @@
 # Architecture Rules
 
+> **Canonical reference:** [`docs/ARCHITECTURE.md`](../../docs/ARCHITECTURE.md) is the comprehensive human-readable architecture documentation with flowcharts, scoring formulas, and the convergence state machine. This file is a quick-reference for AI agents — see the docs version for full detail.
+
 ## Purpose
 AI Code Reviewer is a multi-agent system that orchestrates multiple LLMs to produce comprehensive, high-quality code reviews through consensus.
 

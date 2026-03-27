@@ -76,6 +76,14 @@ All LLM agents access Claude, GPT-4, and other models through **Cursor's unified
 
 ---
 
+## Architecture
+
+The review pipeline has three stages: **agent execution**, **consensus aggregation**, and **incremental delta tracking**. Each push is compared against previous review comments to detect new, fixed, and open findings — with convergence logic that knows when to stop reviewing.
+
+For the full technical deep-dive including flowcharts, scoring formulas, and the convergence state machine, see **[Architecture Documentation](docs/ARCHITECTURE.md)**.
+
+---
+
 ## Configuration
 
 Create `config.yaml`:
