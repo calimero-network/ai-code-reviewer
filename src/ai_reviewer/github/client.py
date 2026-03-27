@@ -305,11 +305,7 @@ class SkipReason(enum.Enum):
     """Reason for skipping a review before running agents."""
 
     ALREADY_REVIEWED = "already_reviewed"
-    DEBOUNCED = "debounced"
     LGTM_FAST_PATH = "lgtm_fast_path"
-
-
-_DEBOUNCE_SECONDS: float = float(os.environ.get("AI_REVIEWER_DEBOUNCE_SECONDS", "120"))
 
 
 def should_skip_before_agents(
@@ -326,7 +322,6 @@ def should_skip_before_agents(
     Checks (in order):
     * ``force_review`` → never skip.
     * Same ``commit_sha`` → ``ALREADY_REVIEWED``.
-    * Timestamp within debounce window → ``DEBOUNCED``.
     """
     if force_review:
         return None
@@ -336,15 +331,6 @@ def should_skip_before_agents(
 
     if meta.commit_sha == current_sha:
         return SkipReason.ALREADY_REVIEWED
-
-    try:
-        last_review_time = datetime.fromisoformat(meta.timestamp)
-        now = datetime.now(UTC)
-        elapsed = (now - last_review_time).total_seconds()
-        if elapsed < _DEBOUNCE_SECONDS:
-            return SkipReason.DEBOUNCED
-    except (ValueError, TypeError):
-        pass
 
     return None
 

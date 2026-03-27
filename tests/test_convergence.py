@@ -654,27 +654,6 @@ class TestShouldSkipBeforeAgents:
         )
         assert should_skip_before_agents(meta, "def456") is None
 
-    def test_debounce_within_window(self):
-        recent_ts = datetime.now(UTC).isoformat()
-        meta = ReviewMeta(
-            commit_sha="old_sha",
-            review_count=2,
-            timestamp=recent_ts,
-            findings_hash="ff",
-        )
-        result = should_skip_before_agents(meta, "new_sha")
-        assert result == SkipReason.DEBOUNCED
-
-    def test_debounce_expired(self):
-        old_ts = "2020-01-01T00:00:00+00:00"
-        meta = ReviewMeta(
-            commit_sha="old_sha",
-            review_count=2,
-            timestamp=old_ts,
-            findings_hash="ff",
-        )
-        assert should_skip_before_agents(meta, "new_sha") is None
-
     def test_invalid_timestamp_does_not_skip(self):
         meta = ReviewMeta(
             commit_sha="old_sha",
