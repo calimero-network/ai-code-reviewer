@@ -142,7 +142,9 @@ class GitHubFormatter:
         if delta.all_issues_resolved:
             body = "✅ All issues resolved. Ready to merge!"
         else:
-            new_findings = delta.new_findings if inline_new_findings is None else inline_new_findings
+            new_findings = (
+                delta.new_findings if inline_new_findings is None else inline_new_findings
+            )
             parts = []
             if delta.fixed_findings:
                 parts.append(f"✅ {len(delta.fixed_findings)} fixed")
