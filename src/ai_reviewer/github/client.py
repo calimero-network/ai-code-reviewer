@@ -682,7 +682,11 @@ class GitHubClient:
         max_total: int,
         max_per_file: int,
     ) -> list[ReviewComment]:
-        """Build atomic review comments, skipping lines not resolvable in the diff."""
+        """Build atomic review comments, skipping lines not resolvable in the diff.
+
+        Each entry matches PyGithub's review comment shape: ``path``, ``line``, and ``body``,
+        suitable for ``PullRequest.create_review(..., comments=...)``.
+        """
         comments: list[ReviewComment] = []
         for finding in self.get_postable_inline_findings(
             pr,
