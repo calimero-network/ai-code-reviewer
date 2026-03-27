@@ -207,10 +207,10 @@ def _setup_default_review_handler() -> None:
             if meta is not None and not force_review:
                 lgtm_delta = gh.check_lgtm_fast_path(pr, meta)
                 if lgtm_delta is not None:
-                    review_count = meta.review_count + 1
+                    lgtm_review_count = meta.review_count + 1
                     new_meta = ReviewMeta.build(
                         commit_sha=current_sha,
-                        review_count=review_count,
+                        review_count=lgtm_review_count,
                         finding_hashes=[],
                     )
                     body = formatter.format_review_with_delta_compact(

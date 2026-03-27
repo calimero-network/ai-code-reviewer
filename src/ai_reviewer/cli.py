@@ -183,10 +183,10 @@ async def review_pr_async(
             lgtm_delta = gh.check_lgtm_fast_path(pr, meta)
             if lgtm_delta is not None:
                 formatter = GitHubFormatter(reviewer_name)
-                review_count = meta.review_count + 1
+                lgtm_review_count = meta.review_count + 1
                 new_meta = ReviewMeta.build(
                     commit_sha=current_sha,
-                    review_count=review_count,
+                    review_count=lgtm_review_count,
                     finding_hashes=[],
                 )
                 lgtm_review = _lgtm_placeholder_review(repo, pr_number)
