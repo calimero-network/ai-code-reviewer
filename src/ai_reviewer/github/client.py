@@ -625,28 +625,12 @@ class GitHubClient:
 
         Returns the number of inline comments included in the review.
         """
-        comments: list[ReviewComment] = []
-        if inline_findings:
-            for finding in apply_comment_limits(inline_findings, max_total, max_per_file):
-                severity_emoji = {
-                    "critical": "🔴",
-                    "warning": "🟡",
-                    "suggestion": "💡",
-                    "nitpick": "📝",
-                }.get(finding.severity.value, "ℹ️")
-
-                comment_body = f"{severity_emoji} **{finding.title}**\n\n{finding.description}"
-                if finding.suggested_fix:
-                    comment_body += f"\n\n**Suggested fix:**\n```\n{finding.suggested_fix}\n```"
-                comment_body += f"\n\n<!-- ai-reviewer-id: {finding.finding_hash} -->"
-
-                comments.append(
-                    ReviewComment(
-                        path=finding.file_path,
-                        line=finding.line_start,
-                        body=comment_body,
-                    )
-                )
+        comments = self._build_review_comments(
+            pr,
+            inline_findings=inline_findings,
+            max_total=max_total,
+            max_per_file=max_per_file,
+        )
 
         logger.info(
             "Posting review to PR #%d: %s (%d inline comments)",
@@ -690,6 +674,55 @@ class GitHubClient:
                 raise
 
         return len(comments)
+
+    def _build_review_comments(
+        self,
+        pr: PullRequest,
+        inline_findings: list[ConsolidatedFinding] | None,
+        max_total: int,
+        max_per_file: int,
+    ) -> list[ReviewComment]:
+        """Build atomic review comments, skipping lines not resolvable in the diff."""
+        if not inline_findings:
+            return []
+
+        file_modified_lines: dict[str, set[int]] = {}
+        for pr_file in pr.get_files():
+            if pr_file.patch:
+                file_modified_lines[pr_file.filename] = self._parse_modified_lines(pr_file.patch)
+
+        comments: list[ReviewComment] = []
+        for finding in apply_comment_limits(inline_findings, max_total, max_per_file):
+            modified_lines = file_modified_lines.get(finding.file_path)
+            if not modified_lines or finding.line_start not in modified_lines:
+                logger.warning(
+                    "Skipping inline comment on %s:%d because the line is not resolvable in the PR diff",
+                    finding.file_path,
+                    finding.line_start,
+                )
+                continue
+
+            severity_emoji = {
+                "critical": "🔴",
+                "warning": "🟡",
+                "suggestion": "💡",
+                "nitpick": "📝",
+            }.get(finding.severity.value, "ℹ️")
+
+            comment_body = f"{severity_emoji} **{finding.title}**\n\n{finding.description}"
+            if finding.suggested_fix:
+                comment_body += f"\n\n**Suggested fix:**\n```\n{finding.suggested_fix}\n```"
+            comment_body += f"\n\n<!-- ai-reviewer-id: {finding.finding_hash} -->"
+
+            comments.append(
+                ReviewComment(
+                    path=finding.file_path,
+                    line=finding.line_start,
+                    body=comment_body,
+                )
+            )
+
+        return comments
 
     def _post_as_comment(self, pr: PullRequest, body: str) -> None:
         """Post review as a regular issue comment (fallback).
