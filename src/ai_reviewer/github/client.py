@@ -18,7 +18,7 @@ import requests
 import yaml
 from github import Github
 from github.GithubException import GithubException
-from github.PullRequest import PullRequest
+from github.PullRequest import PullRequest, ReviewComment
 from github.PullRequestComment import PullRequestComment
 from github.Repository import Repository
 
@@ -613,26 +613,61 @@ class GitHubClient:
         review: ConsolidatedReview,  # noqa: ARG002
         body: str,
         event: str = "COMMENT",
-    ) -> None:
-        """Post a review to a PR.
+        inline_findings: list[ConsolidatedFinding] | None = None,
+        max_total: int = 50,
+        max_per_file: int = 10,
+    ) -> int:
+        """Post a review to a PR, optionally with inline comments in a single API call.
 
-        Args:
-            pr: Pull request to review
-            review: Consolidated review data (kept for API compatibility)
-            body: Review body text
-            event: Review event type (APPROVE, REQUEST_CHANGES, COMMENT)
+        When *inline_findings* is provided the top-level body and all inline
+        comments are submitted atomically via one ``create_review`` call.  This
+        prevents partial posting when a CI run is cancelled mid-flight.
+
+        Returns the number of inline comments included in the review.
         """
-        logger.info(f"Posting review to PR #{pr.number}: {event}")
+        comments: list[ReviewComment] = []
+        if inline_findings:
+            for finding in apply_comment_limits(inline_findings, max_total, max_per_file):
+                severity_emoji = {
+                    "critical": "🔴",
+                    "warning": "🟡",
+                    "suggestion": "💡",
+                    "nitpick": "📝",
+                }.get(finding.severity.value, "ℹ️")
+
+                comment_body = f"{severity_emoji} **{finding.title}**\n\n{finding.description}"
+                if finding.suggested_fix:
+                    comment_body += f"\n\n**Suggested fix:**\n```\n{finding.suggested_fix}\n```"
+                comment_body += f"\n\n<!-- ai-reviewer-id: {finding.finding_hash} -->"
+
+                comments.append(
+                    ReviewComment(
+                        path=finding.file_path,
+                        line=finding.line_start,
+                        body=comment_body,
+                    )
+                )
+
+        logger.info(
+            "Posting review to PR #%d: %s (%d inline comments)",
+            pr.number,
+            event,
+            len(comments),
+        )
 
         try:
-            pr.create_review(body=body, event=event)
+            if comments:
+                pr.create_review(body=body, event=event, comments=comments)
+            else:
+                pr.create_review(body=body, event=event)
         except GithubException as e:
             if e.status == 422 and "pending review" in str(e.data).lower():
                 logger.warning("User has a pending review, falling back to issue comment")
-                # Fall back to posting as a regular comment
                 self._post_as_comment(pr, body)
             else:
                 raise
+
+        return len(comments)
 
     def _post_as_comment(self, pr: PullRequest, body: str) -> None:
         """Post review as a regular issue comment (fallback).

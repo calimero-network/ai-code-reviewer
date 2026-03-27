@@ -300,33 +300,28 @@ def _setup_default_review_handler() -> None:
                 )
                 action = formatter.get_review_action(review, allow_approve=False)
 
-            gh.post_review(pr, review, body, action)
-            logger.info(f"Posted review to {repo} PR #{pr_number} ({action})")
-
             if delta.fixed_findings:
                 resolved = gh.resolve_fixed_comments(pr, delta)
                 logger.info(f"Resolved {resolved} comments")
 
-            if new_findings:
-                from ai_reviewer.models.review import ConsolidatedReview as CR
-
-                new_only_review = CR(
-                    id=review.id,
-                    created_at=review.created_at,
-                    repo=review.repo,
-                    pr_number=review.pr_number,
-                    findings=new_findings,
-                    summary=review.summary,
-                    agent_count=review.agent_count,
-                    review_quality_score=review.review_quality_score,
-                    total_review_time_ms=review.total_review_time_ms,
-                )
-                max_total = _get_env_int("MAX_TOTAL_FINDINGS", 50)
-                max_per_file = _get_env_int("MAX_FINDINGS_PER_FILE", 10)
-                posted = gh.post_inline_comments(
-                    pr, new_only_review, max_total=max_total, max_per_file=max_per_file
-                )
-                logger.info(f"Posted {posted} inline comments")
+            max_total = _get_env_int("MAX_TOTAL_FINDINGS", 50)
+            max_per_file = _get_env_int("MAX_FINDINGS_PER_FILE", 10)
+            posted = gh.post_review(
+                pr,
+                review,
+                body,
+                action,
+                inline_findings=new_findings or None,
+                max_total=max_total,
+                max_per_file=max_per_file,
+            )
+            logger.info(
+                "Posted review to %s PR #%d (%s, %d inline comments)",
+                repo,
+                pr_number,
+                action,
+                posted,
+            )
 
         except Exception as e:
             logger.exception(f"Error reviewing {repo} PR #{pr_number}: {e}")

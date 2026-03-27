@@ -358,36 +358,23 @@ async def review_pr_async(
                 )
                 action = formatter.get_review_action(review, allow_approve=allow_approve)
 
-            gh.post_review(pr, review, body, action)
-            console.print(f"📝 Posted review to GitHub ({action})")
-
-            # Resolve fixed comments
             if delta.fixed_findings:
                 console.print(f"✅ Marking {len(delta.fixed_findings)} fixed issues as resolved...")
                 resolved = gh.resolve_fixed_comments(pr, delta)
                 console.print(f"   Resolved {resolved} comments")
 
-            if new_findings_to_post:
-                from ai_reviewer.models.review import ConsolidatedReview as CR
-
-                new_only_review = CR(
-                    id=review.id,
-                    created_at=review.created_at,
-                    repo=review.repo,
-                    pr_number=review.pr_number,
-                    findings=new_findings_to_post,
-                    summary=review.summary,
-                    agent_count=review.agent_count,
-                    review_quality_score=review.review_quality_score,
-                    total_review_time_ms=review.total_review_time_ms,
-                )
-                max_total = config.output.max_total_findings
-                max_per_file = config.output.max_findings_per_file
-                console.print(f"💬 Posting inline comments for up to {max_total} new findings...")
-                posted = gh.post_inline_comments(
-                    pr, new_only_review, max_total=max_total, max_per_file=max_per_file
-                )
-                console.print(f"   Posted {posted} inline comments")
+            max_total = config.output.max_total_findings
+            max_per_file = config.output.max_findings_per_file
+            posted = gh.post_review(
+                pr,
+                review,
+                body,
+                action,
+                inline_findings=new_findings_to_post or None,
+                max_total=max_total,
+                max_per_file=max_per_file,
+            )
+            console.print(f"📝 Posted review to GitHub ({action}, {posted} inline comments)")
 
             # Final status
             if delta.all_issues_resolved:

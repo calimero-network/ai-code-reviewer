@@ -320,7 +320,6 @@ class TestCLIConvergenceGate:
 
             mock_gh.post_review.assert_not_called()
             mock_gh.resolve_fixed_comments.assert_not_called()
-            mock_gh.post_inline_comments.assert_not_called()
 
     def test_cli_posts_when_force_review_overrides_convergence(self):
         """When --force-review is set, posting proceeds even if converged."""
@@ -494,7 +493,6 @@ class TestWebhookConvergenceGate:
 
             mock_gh.post_review.assert_not_called()
             mock_gh.resolve_fixed_comments.assert_not_called()
-            mock_gh.post_inline_comments.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_webhook_posts_when_not_converged(self):
