@@ -205,40 +205,67 @@ def _setup_default_review_handler() -> None:
                 )
                 return
 
+            recheck_review = None
             if meta is not None and not force_review:
                 lgtm_delta = gh.check_lgtm_fast_path(pr, meta)
                 if lgtm_delta is not None:
-                    lgtm_review_count = meta.review_count + 1
-                    new_meta = ReviewMeta.build(
-                        commit_sha=current_sha,
-                        review_count=lgtm_review_count,
-                        finding_hashes=[],
-                    )
-                    lgtm_review = lgtm_placeholder_review(repo, pr_number)
-                    body = formatter.format_review_with_delta_compact(
-                        lgtm_review, lgtm_delta, meta=new_meta
-                    )
-                    gh.post_review(pr, body, "COMMENT")
-                    if lgtm_delta.fixed_findings:
-                        resolved = gh.resolve_fixed_comments(pr, lgtm_delta)
-                        logger.info(f"LGTM fast path: resolved {resolved} comments")
                     logger.info(
-                        "LGTM fast path for %s PR #%d — all issues resolved, skipped agents",
+                        "LGTM candidate for %s PR #%d — running 1-agent re-check",
                         repo,
                         pr_number,
                     )
-                    return
+                    recheck_review = await review_pr_with_cursor_agent(
+                        repo=repo,
+                        pr_number=pr_number,
+                        cursor_config=cursor_config,
+                        github_token=github_token,
+                        num_agents=1,
+                        enable_cross_review=False,
+                        config=webhook_config,
+                    )
 
-            review = await review_pr_with_cursor_agent(
-                repo=repo,
-                pr_number=pr_number,
-                cursor_config=cursor_config,
-                github_token=github_token,
-                num_agents=num_agents,
-                enable_cross_review=enable_cross_review,
-                min_validation_agreement=min_agreement,
-                config=webhook_config,
-            )
+                    if not recheck_review.findings:
+                        lgtm_review_count = meta.review_count + 1
+                        new_meta = ReviewMeta.build(
+                            commit_sha=current_sha,
+                            review_count=lgtm_review_count,
+                            finding_hashes=[],
+                        )
+                        lgtm_review = lgtm_placeholder_review(repo, pr_number)
+                        body = formatter.format_review_with_delta_compact(
+                            lgtm_review, lgtm_delta, meta=new_meta
+                        )
+                        gh.post_review(pr, body, "COMMENT")
+                        if lgtm_delta.fixed_findings:
+                            resolved = gh.resolve_fixed_comments(pr, lgtm_delta)
+                            logger.info(f"LGTM: resolved {resolved} comments")
+                        logger.info(
+                            "LGTM for %s PR #%d — verified clean by re-check",
+                            repo,
+                            pr_number,
+                        )
+                        return
+
+                    logger.info(
+                        "Re-check found %d issue(s) for %s PR #%d — falling back to normal flow",
+                        len(recheck_review.findings),
+                        repo,
+                        pr_number,
+                    )
+
+            if recheck_review is not None and recheck_review.findings:
+                review = recheck_review
+            else:
+                review = await review_pr_with_cursor_agent(
+                    repo=repo,
+                    pr_number=pr_number,
+                    cursor_config=cursor_config,
+                    github_token=github_token,
+                    num_agents=num_agents,
+                    enable_cross_review=enable_cross_review,
+                    min_validation_agreement=min_agreement,
+                    config=webhook_config,
+                )
 
             if review.all_agents_failed:
                 logger.error(f"All agents failed for {repo} PR #{pr_number}")

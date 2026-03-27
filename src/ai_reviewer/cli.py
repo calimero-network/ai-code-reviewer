@@ -26,6 +26,7 @@ from ai_reviewer.github.client import (
 )
 from ai_reviewer.github.formatter import GitHubFormatter, format_review_as_json
 from ai_reviewer.github.webhook import create_webhook_app, set_review_handler
+from ai_reviewer.models.review import ConsolidatedReview
 from ai_reviewer.review import review_pr_with_cursor_agent
 
 console = Console()
@@ -165,6 +166,7 @@ async def review_pr_async(
     gh: GitHubClient | None = None
     pr = None
     meta: ReviewMeta | None = None
+    recheck_review: ConsolidatedReview | None = None
 
     if output == "github":
         gh = GitHubClient(config.github.token)
@@ -183,33 +185,58 @@ async def review_pr_async(
         if meta is not None and not force_review:
             lgtm_delta = gh.check_lgtm_fast_path(pr, meta)
             if lgtm_delta is not None:
-                formatter = GitHubFormatter(reviewer_name)
-                lgtm_review_count = meta.review_count + 1
-                new_meta = ReviewMeta.build(
-                    commit_sha=current_sha,
-                    review_count=lgtm_review_count,
-                    finding_hashes=[],
+                console.print(
+                    "[dim]🔍 LGTM candidate detected — running lightweight 1-agent re-check…[/dim]"
                 )
-                lgtm_review = lgtm_placeholder_review(repo, pr_number)
-                if dry_run:
-                    console.print(
-                        "\n[yellow]Dry run - LGTM fast path (all issues resolved)[/yellow]"
+                try:
+                    recheck_review = await review_pr_with_cursor_agent(
+                        repo=repo,
+                        pr_number=pr_number,
+                        cursor_config=cursor_config,
+                        github_token=config.github.token,
+                        num_agents=1,
+                        enable_cross_review=False,
+                        config=config,
                     )
-                    print(
-                        formatter.format_review_with_delta(lgtm_review, lgtm_delta, meta=new_meta)
+                except Exception as e:
+                    console.print(f"[red]Error during LGTM re-check:[/red] {e}")
+                    sys.exit(1)
+
+                if not recheck_review.findings:
+                    formatter = GitHubFormatter(reviewer_name)
+                    lgtm_review_count = meta.review_count + 1
+                    new_meta = ReviewMeta.build(
+                        commit_sha=current_sha,
+                        review_count=lgtm_review_count,
+                        finding_hashes=[],
                     )
-                else:
-                    body = formatter.format_review_with_delta_compact(
-                        lgtm_review, lgtm_delta, meta=new_meta
-                    )
-                    gh.post_review(pr, body, "COMMENT")
-                    if lgtm_delta.fixed_findings:
-                        resolved = gh.resolve_fixed_comments(pr, lgtm_delta)
-                        console.print(f"✅ LGTM fast path: resolved {resolved} comments")
-                    console.print(
-                        "[green]🎉 LGTM fast path — all issues resolved, skipped agents[/green]"
-                    )
-                return
+                    lgtm_review = lgtm_placeholder_review(repo, pr_number)
+                    if dry_run:
+                        console.print(
+                            "\n[yellow]Dry run - LGTM (verified by 1-agent re-check)[/yellow]"
+                        )
+                        print(
+                            formatter.format_review_with_delta(
+                                lgtm_review, lgtm_delta, meta=new_meta
+                            )
+                        )
+                    else:
+                        body = formatter.format_review_with_delta_compact(
+                            lgtm_review, lgtm_delta, meta=new_meta
+                        )
+                        gh.post_review(pr, body, "COMMENT")
+                        if lgtm_delta.fixed_findings:
+                            resolved = gh.resolve_fixed_comments(pr, lgtm_delta)
+                            console.print(f"✅ LGTM: resolved {resolved} comments")
+                        console.print(
+                            "[green]🎉 LGTM — all issues resolved (verified by re-check)[/green]"
+                        )
+                    return
+
+                console.print(
+                    f"[yellow]Re-check found {len(recheck_review.findings)} issue(s) "
+                    f"— proceeding with normal review flow[/yellow]"
+                )
 
     # Status callback
     last_status: list[str | None] = [None]
@@ -219,21 +246,27 @@ async def review_pr_async(
             console.print(f"  → Agent status: [cyan]{status}[/cyan]")
             last_status[0] = status
 
-    try:
-        review = await review_pr_with_cursor_agent(
-            repo=repo,
-            pr_number=pr_number,
-            cursor_config=cursor_config,
-            github_token=config.github.token,
-            on_status=on_status,
-            num_agents=num_agents,
-            enable_cross_review=enable_cross_review,
-            min_validation_agreement=min_validation_agreement,
-            config=config,
-        )
-    except Exception as e:
-        console.print(f"[red]Error:[/red] {e}")
-        sys.exit(1)
+    # If we already ran a re-check that found issues, reuse that result
+    # instead of launching another duplicate agent pass.
+    if recheck_review is not None and recheck_review.findings:
+        review = recheck_review
+        console.print("[dim]Reusing re-check result as the review[/dim]")
+    else:
+        try:
+            review = await review_pr_with_cursor_agent(
+                repo=repo,
+                pr_number=pr_number,
+                cursor_config=cursor_config,
+                github_token=config.github.token,
+                on_status=on_status,
+                num_agents=num_agents,
+                enable_cross_review=enable_cross_review,
+                min_validation_agreement=min_validation_agreement,
+                config=config,
+            )
+        except Exception as e:
+            console.print(f"[red]Error:[/red] {e}")
+            sys.exit(1)
 
     # Check if all agents failed
     if review.all_agents_failed:

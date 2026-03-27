@@ -741,13 +741,17 @@ class GitHubClient:
         pr: PullRequest,
         meta: ReviewMeta,
     ) -> ReviewDelta | None:
-        """Check if the LGTM fast path applies (all issues resolved, skip agents).
+        """Check if the PR is an LGTM *candidate* based on diff heuristics.
 
         Computes a lightweight delta with an empty findings list to see whether
         every previously-reported comment has been fixed in the new diff.
 
-        Returns the delta if ``all_issues_resolved`` is True and
+        Returns the candidate delta when ``all_issues_resolved`` is True and
         ``meta.review_count >= 2``, otherwise ``None``.
+
+        **Important:** A non-None return only means the PR *looks* clean from
+        the diff.  Callers must run a lightweight 1-agent re-check to confirm
+        before posting the LGTM review.
         """
         if meta.review_count < 2:
             return None
