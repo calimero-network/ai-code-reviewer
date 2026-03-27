@@ -4,7 +4,7 @@ Convergence means "no delta churn" — the issue set hasn't changed since the
 last review.  This is distinct from ``all_issues_resolved`` (PR is clean).
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -16,6 +16,7 @@ from ai_reviewer.github.client import (
     SkipReason,
     compute_findings_hash,
     has_converged,
+    lgtm_placeholder_review,
     should_skip_before_agents,
     should_skip_review,
     stabilize_severity,
@@ -710,6 +711,16 @@ class TestLgtmFastPathVacuous:
         assert result.all_issues_resolved
 
 
+class TestLgtmPlaceholderReview:
+    """Tests for the synthetic LGTM review helper."""
+
+    def test_created_at_is_timezone_aware_utc(self):
+        review = lgtm_placeholder_review("test/repo", 42)
+
+        assert review.created_at.tzinfo is UTC
+        assert review.created_at.utcoffset() == timedelta(0)
+
+
 class TestFindingsHash:
     """Tests for compute_findings_hash and findings_hash comparison."""
 
@@ -1033,6 +1044,7 @@ class TestLgtmLightweightRecheck:
                     repo="test/repo",
                     pr_number=42,
                     output="github",
+                    min_validation_agreement=0.75,
                     force_review=False,
                 )
             )
@@ -1041,6 +1053,7 @@ class TestLgtmLightweightRecheck:
             call_kwargs = mock_agent.call_args.kwargs
             assert call_kwargs["num_agents"] == 1
             assert call_kwargs["enable_cross_review"] is False
+            assert call_kwargs["min_validation_agreement"] == pytest.approx(0.75)
 
     def test_cli_lgtm_recheck_zero_findings_posts_lgtm(self):
         """When re-check returns zero findings, LGTM review is posted."""
@@ -1224,7 +1237,11 @@ class TestLgtmLightweightRecheck:
         with (
             patch.dict(
                 "os.environ",
-                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+                {
+                    "CURSOR_API_KEY": "test",
+                    "GITHUB_TOKEN": "test",
+                    "MIN_VALIDATION_AGREEMENT": "0.8",
+                },
             ),
             patch("ai_reviewer.config.load_config"),
             patch(
@@ -1247,6 +1264,7 @@ class TestLgtmLightweightRecheck:
             call_kwargs = mock_agent.call_args.kwargs
             assert call_kwargs["num_agents"] == 1
             assert call_kwargs["enable_cross_review"] is False
+            assert call_kwargs["min_validation_agreement"] == pytest.approx(0.8)
             mock_gh.post_review.assert_called_once()
             mock_gh.resolve_fixed_comments.assert_called_once()
 

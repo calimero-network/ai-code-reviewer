@@ -305,7 +305,7 @@ def lgtm_placeholder_review(repo: str, pr_number: int) -> ConsolidatedReview:
     """Build a minimal ConsolidatedReview for the LGTM fast path."""
     return ConsolidatedReview(
         id="lgtm-fast-path",
-        created_at=datetime.now(),
+        created_at=datetime.now(UTC),
         repo=repo,
         pr_number=pr_number,
         findings=[],
@@ -662,8 +662,30 @@ class GitHubClient:
                 pr.create_review(body=body, event=event)
         except GithubException as e:
             if e.status == 422 and "pending review" in str(e.data).lower():
-                logger.warning("User has a pending review, falling back to issue comment")
-                self._post_as_comment(pr, body)
+                logger.warning(
+                    "Pending review detected on PR #%d, attempting dismiss-and-retry",
+                    pr.number,
+                )
+                self._dismiss_pending_reviews(pr)
+                try:
+                    if comments:
+                        pr.create_review(body=body, event=event, comments=comments)
+                    else:
+                        pr.create_review(body=body, event=event)
+                except GithubException as retry_exc:
+                    if retry_exc.status == 422 and "pending review" in str(retry_exc.data).lower():
+                        if comments:
+                            logger.warning(
+                                "Retry failed — posting body as issue comment. "
+                                "%d inline comment(s) could not be posted.",
+                                len(comments),
+                            )
+                            self._post_as_comment_with_inline_warning(pr, body, len(comments))
+                        else:
+                            logger.warning("Retry failed — posting body as issue comment")
+                            self._post_as_comment(pr, body)
+                    else:
+                        raise
             else:
                 raise
 
@@ -676,9 +698,20 @@ class GitHubClient:
             pr: Pull request object
             body: Comment body
         """
-        # Add a note that this is posted as a comment due to pending review
         comment_body = (
             f"⚠️ *Posted as comment because you have a pending review on this PR.*\n\n---\n\n{body}"
+        )
+        pr.create_issue_comment(comment_body)
+        logger.info(f"Posted review as issue comment on PR #{pr.number}")
+
+    def _post_as_comment_with_inline_warning(
+        self, pr: PullRequest, body: str, dropped_inline_count: int
+    ) -> None:
+        """Post review as issue comment with a warning about lost inline comments."""
+        comment_body = (
+            f"⚠️ *Posted as comment because a pending review could not be cleared.*\n"
+            f"**{dropped_inline_count} inline comment(s) could not be posted** — "
+            f"please check the review body below for details.\n\n---\n\n{body}"
         )
         pr.create_issue_comment(comment_body)
         logger.info(f"Posted review as issue comment on PR #{pr.number}")

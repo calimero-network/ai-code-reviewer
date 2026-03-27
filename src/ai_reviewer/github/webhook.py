@@ -221,6 +221,7 @@ def _setup_default_review_handler() -> None:
                         github_token=github_token,
                         num_agents=1,
                         enable_cross_review=False,
+                        min_validation_agreement=min_agreement,
                         config=webhook_config,
                     )
 
