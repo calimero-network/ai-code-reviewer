@@ -1668,3 +1668,154 @@ class TestComputeReviewDeltaFuzzyMatching:
 
         assert len(delta.new_findings) == 1
         assert len(delta.open_findings) == 0
+
+
+class TestGetReviewMetadata:
+    """Tests for get_review_metadata() parsing from mock PR reviews."""
+
+    def test_extracts_metadata_from_bot_review(self):
+        """Metadata is extracted from the most recent bot review."""
+        from ai_reviewer.github.client import GitHubClient
+
+        meta_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"abc123","review_count":2,'
+            '"timestamp":"2026-03-27T12:00:00Z","findings_hash":"deadbeef"} -->'
+        )
+
+        mock_review = MagicMock()
+        mock_review.user.login = "github-actions[bot]"
+        mock_review.body = f"Review body\n\n{meta_tag}"
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = [mock_review]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is not None
+        assert result.commit_sha == "abc123"
+        assert result.review_count == 2
+
+    def test_returns_none_for_legacy_reviews_without_metadata(self):
+        """Returns None when bot reviews have no metadata tag."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_review = MagicMock()
+        mock_review.user.login = "github-actions[bot]"
+        mock_review.body = "Old review without metadata"
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = [mock_review]
+        mock_pr.get_issue_comments.return_value = MagicMock(reversed=[])
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is None
+
+    def test_picks_most_recent_bot_review(self):
+        """When multiple bot reviews exist, picks the most recent one."""
+        from ai_reviewer.github.client import GitHubClient
+
+        old_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"old","review_count":1,'
+            '"timestamp":"2026-01-01T00:00:00Z","findings_hash":"aa"} -->'
+        )
+        new_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"new","review_count":3,'
+            '"timestamp":"2026-03-27T12:00:00Z","findings_hash":"bb"} -->'
+        )
+
+        old_review = MagicMock()
+        old_review.user.login = "github-actions[bot]"
+        old_review.body = f"Old review\n{old_tag}"
+
+        new_review = MagicMock()
+        new_review.user.login = "github-actions[bot]"
+        new_review.body = f"New review\n{new_tag}"
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = [old_review, new_review]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is not None
+        assert result.commit_sha == "new"
+        assert result.review_count == 3
+
+    def test_ignores_human_reviews(self):
+        """Human reviews are skipped even if they contain metadata-like text."""
+        from ai_reviewer.github.client import GitHubClient
+
+        human_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"spoofed","review_count":99,'
+            '"timestamp":"2026-01-01T00:00:00Z","findings_hash":"xx"} -->'
+        )
+
+        human_review = MagicMock()
+        human_review.user.login = "human-dev"
+        human_review.body = f"LGTM\n{human_tag}"
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = [human_review]
+        mock_pr.get_issue_comments.return_value = MagicMock(reversed=[])
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is None
+
+    def test_falls_back_to_issue_comments(self):
+        """Metadata is found in issue comments (fallback for _post_as_comment)."""
+        from ai_reviewer.github.client import GitHubClient
+
+        meta_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"fallback","review_count":1,'
+            '"timestamp":"2026-03-27T12:00:00Z","findings_hash":"cc"} -->'
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = []
+
+        mock_comment = MagicMock()
+        mock_comment.user.login = "github-actions[bot]"
+        mock_comment.body = f"Fallback comment\n{meta_tag}"
+        mock_pr.get_issue_comments.return_value = MagicMock(reversed=[mock_comment])
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is not None
+        assert result.commit_sha == "fallback"
+
+    def test_extra_reviewer_users_recognized(self):
+        """Reviews from extra_reviewer_users are also checked for metadata."""
+        from ai_reviewer.github.client import GitHubClient
+
+        meta_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"custom","review_count":2,'
+            '"timestamp":"2026-03-27T12:00:00Z","findings_hash":"dd"} -->'
+        )
+
+        mock_review = MagicMock()
+        mock_review.user.login = "custom-bot[bot]"
+        mock_review.body = f"Review\n{meta_tag}"
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = [mock_review]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(
+                token="test-token",
+                extra_reviewer_users=["custom-bot[bot]"],
+            )
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is not None
+        assert result.commit_sha == "custom"

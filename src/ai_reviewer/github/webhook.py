@@ -133,7 +133,9 @@ def _setup_default_review_handler() -> None:
     from ai_reviewer.config import load_config
     from ai_reviewer.github.client import (
         GitHubClient,
+        ReviewMeta,
         estimate_review_count,
+        should_skip_before_agents,
         should_skip_review,
     )
     from ai_reviewer.github.formatter import GitHubFormatter
@@ -182,6 +184,56 @@ def _setup_default_review_handler() -> None:
             webhook_config = None
 
         try:
+            gh = GitHubClient(github_token)
+            pr = gh.get_pull_request(repo, pr_number)
+            formatter = GitHubFormatter("AI Code Reviewer")
+
+            force_review = any(label.name.lower() == "force-review" for label in pr.get_labels())
+
+            meta = gh.get_review_metadata(pr)
+            current_sha = pr.head.sha
+
+            skip_reason = should_skip_before_agents(meta, current_sha, force_review)
+            if skip_reason is not None:
+                logger.info(
+                    "Pre-agent skip for %s PR #%d: %s (sha=%s)",
+                    repo,
+                    pr_number,
+                    skip_reason.value,
+                    current_sha[:8],
+                )
+                return
+
+            if meta is not None and not force_review:
+                lgtm_delta = gh.check_lgtm_fast_path(pr, meta)
+                if lgtm_delta is not None:
+                    review_count = meta.review_count + 1
+                    new_meta = ReviewMeta.build(
+                        commit_sha=current_sha,
+                        review_count=review_count,
+                        finding_hashes=[],
+                    )
+                    body = formatter.format_review_with_delta_compact(
+                        _lgtm_placeholder_review(repo, pr_number),
+                        lgtm_delta,
+                        meta=new_meta,
+                    )
+                    gh.post_review(
+                        pr,
+                        _lgtm_placeholder_review(repo, pr_number),
+                        body,
+                        "COMMENT",
+                    )
+                    if lgtm_delta.fixed_findings:
+                        resolved = gh.resolve_fixed_comments(pr, lgtm_delta)
+                        logger.info(f"LGTM fast path: resolved {resolved} comments")
+                    logger.info(
+                        "LGTM fast path for %s PR #%d — all issues resolved, skipped agents",
+                        repo,
+                        pr_number,
+                    )
+                    return
+
             review = await review_pr_with_cursor_agent(
                 repo=repo,
                 pr_number=pr_number,
@@ -197,52 +249,56 @@ def _setup_default_review_handler() -> None:
                 logger.error(f"All agents failed for {repo} PR #{pr_number}")
                 return
 
-            # Post review to GitHub
-            gh = GitHubClient(github_token)
-            pr = gh.get_pull_request(repo, pr_number)
-            formatter = GitHubFormatter("AI Code Reviewer")
+            meta_review_count = (meta.review_count + 1) if meta is not None else None
+            delta = gh.compute_review_delta(pr, review.findings, review_count=meta_review_count)
 
-            delta = gh.compute_review_delta(pr, review.findings)
-
-            force_review = any(label.name.lower() == "force-review" for label in pr.get_labels())
-
-            if delta.previous_comments and not force_review:
+            review_count: int
+            if meta_review_count is not None:
+                review_count = meta_review_count
+            else:
                 review_count = estimate_review_count(delta)
-                if should_skip_review(review_count, delta):
-                    logger.info(
-                        "Convergence detected for %s PR #%d — skipping post "
-                        "(review_count=%d, open=%d, new=%d, fixed=%d)",
-                        repo,
-                        pr_number,
-                        review_count,
-                        len(delta.open_findings),
-                        len(delta.new_findings),
-                        len(delta.fixed_findings),
-                    )
-                    return
+
+            if delta.previous_comments and not force_review and should_skip_review(review_count, delta):
+                logger.info(
+                    "Convergence detected for %s PR #%d — skipping post "
+                    "(review_count=%d, open=%d, new=%d, fixed=%d)",
+                    repo,
+                    pr_number,
+                    review_count,
+                    len(delta.open_findings),
+                    len(delta.new_findings),
+                    len(delta.fixed_findings),
+                )
+                return
+
+            finding_hashes = [f.finding_hash for f in review.findings]
+            new_meta = ReviewMeta.build(
+                commit_sha=current_sha,
+                review_count=review_count,
+                finding_hashes=finding_hashes,
+            )
 
             new_findings = delta.new_findings if delta.previous_comments else review.findings
             use_compact_body = len(new_findings) > 0
 
             if delta.previous_comments:
                 body = (
-                    formatter.format_review_with_delta_compact(review, delta)
+                    formatter.format_review_with_delta_compact(review, delta, meta=new_meta)
                     if use_compact_body
-                    else formatter.format_review_with_delta(review, delta)
+                    else formatter.format_review_with_delta(review, delta, meta=new_meta)
                 )
                 action = formatter.get_review_action_with_delta(review, delta, allow_approve=False)
             else:
                 body = (
-                    formatter.format_review_compact(review)
+                    formatter.format_review_compact(review, meta=new_meta)
                     if use_compact_body
-                    else formatter.format_review(review)
+                    else formatter.format_review(review, meta=new_meta)
                 )
                 action = formatter.get_review_action(review, allow_approve=False)
 
             gh.post_review(pr, review, body, action)
             logger.info(f"Posted review to {repo} PR #{pr_number} ({action})")
 
-            # Resolve fixed comments
             if delta.fixed_findings:
                 resolved = gh.resolve_fixed_comments(pr, delta)
                 logger.info(f"Resolved {resolved} comments")
@@ -270,6 +326,24 @@ def _setup_default_review_handler() -> None:
 
         except Exception as e:
             logger.exception(f"Error reviewing {repo} PR #{pr_number}: {e}")
+
+    def _lgtm_placeholder_review(repo: str, pr_number: int):
+        """Build a minimal ConsolidatedReview for the LGTM fast path."""
+        from datetime import datetime
+
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        return ConsolidatedReview(
+            id="lgtm-fast-path",
+            created_at=datetime.now(),
+            repo=repo,
+            pr_number=pr_number,
+            findings=[],
+            summary="All previously identified issues addressed",
+            agent_count=0,
+            review_quality_score=1.0,
+            total_review_time_ms=0,
+        )
 
     set_review_handler(default_review_handler)
 

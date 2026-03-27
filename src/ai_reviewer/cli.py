@@ -16,7 +16,13 @@ from rich.table import Table
 from ai_reviewer import __version__
 from ai_reviewer.agents.cursor_client import CursorConfig
 from ai_reviewer.config import load_config, validate_config
-from ai_reviewer.github.client import GitHubClient, estimate_review_count, should_skip_review
+from ai_reviewer.github.client import (
+    GitHubClient,
+    ReviewMeta,
+    estimate_review_count,
+    should_skip_before_agents,
+    should_skip_review,
+)
 from ai_reviewer.github.formatter import GitHubFormatter, format_review_as_json
 from ai_reviewer.github.webhook import create_webhook_app, set_review_handler
 from ai_reviewer.review import review_pr_with_cursor_agent
@@ -148,6 +154,58 @@ async def review_pr_async(
         f"[dim]Requested {num_agents} agent(s); actual count may be reduced for small PRs[/dim]"
     )
 
+    cursor_config = CursorConfig(
+        api_key=config.cursor.api_key,
+        base_url=config.cursor.base_url,
+        timeout=config.cursor.timeout_seconds,
+    )
+
+    # Pre-agent checks (github output only — json/markdown always run agents)
+    gh: GitHubClient | None = None
+    pr = None
+    meta: ReviewMeta | None = None
+
+    if output == "github":
+        gh = GitHubClient(config.github.token)
+        pr = gh.get_pull_request(repo, pr_number)
+        current_sha = pr.head.sha
+
+        meta = gh.get_review_metadata(pr)
+        skip_reason = should_skip_before_agents(meta, current_sha, force_review)
+        if skip_reason is not None:
+            console.print(
+                f"[dim]⏭️  Skipping review: {skip_reason.value} "
+                f"(use --force-review to override)[/dim]"
+            )
+            return
+
+        if meta is not None and not force_review:
+            lgtm_delta = gh.check_lgtm_fast_path(pr, meta)
+            if lgtm_delta is not None:
+                formatter = GitHubFormatter(reviewer_name)
+                review_count = meta.review_count + 1
+                new_meta = ReviewMeta.build(
+                    commit_sha=current_sha,
+                    review_count=review_count,
+                    finding_hashes=[],
+                )
+                lgtm_review = _lgtm_placeholder_review(repo, pr_number)
+                if dry_run:
+                    console.print("\n[yellow]Dry run - LGTM fast path (all issues resolved)[/yellow]")
+                    print(formatter.format_review_with_delta(lgtm_review, lgtm_delta, meta=new_meta))
+                else:
+                    body = formatter.format_review_with_delta_compact(
+                        lgtm_review, lgtm_delta, meta=new_meta
+                    )
+                    gh.post_review(pr, lgtm_review, body, "COMMENT")
+                    if lgtm_delta.fixed_findings:
+                        resolved = gh.resolve_fixed_comments(pr, lgtm_delta)
+                        console.print(f"✅ LGTM fast path: resolved {resolved} comments")
+                    console.print(
+                        "[green]🎉 LGTM fast path — all issues resolved, skipped agents[/green]"
+                    )
+                return
+
     # Status callback
     last_status: list[str | None] = [None]
 
@@ -155,13 +213,6 @@ async def review_pr_async(
         if status != last_status[0]:
             console.print(f"  → Agent status: [cyan]{status}[/cyan]")
             last_status[0] = status
-
-    # Run review with Cursor agent
-    cursor_config = CursorConfig(
-        api_key=config.cursor.api_key,
-        base_url=config.cursor.base_url,
-        timeout=config.cursor.timeout_seconds,
-    )
 
     try:
         review = await review_pr_with_cursor_agent(
@@ -229,13 +280,14 @@ async def review_pr_async(
         formatter = GitHubFormatter(reviewer_name)
         print(formatter.format_review(review))
     else:  # github
-        gh = GitHubClient(config.github.token)
-        pr = gh.get_pull_request(repo, pr_number)
+        assert gh is not None and pr is not None
         formatter = GitHubFormatter(reviewer_name)
+        current_sha = pr.head.sha
 
         # Compute delta from previous reviews
         console.print("🔄 Checking for previous review comments...")
-        delta = gh.compute_review_delta(pr, review.findings)
+        meta_review_count = (meta.review_count + 1) if meta is not None else None
+        delta = gh.compute_review_delta(pr, review.findings, review_count=meta_review_count)
 
         # Show delta summary
         if delta.previous_comments:
@@ -248,9 +300,15 @@ async def review_pr_async(
         else:
             console.print("   No previous review comments found (first run)")
 
+        # Accurate review count: prefer metadata, fall back to heuristic
+        review_count: int
+        if meta_review_count is not None:
+            review_count = meta_review_count
+        else:
+            review_count = estimate_review_count(delta)
+
         # Convergence gate: skip posting when findings are unchanged
         if delta.previous_comments and not force_review:
-            review_count = estimate_review_count(delta)
             if should_skip_review(review_count, delta):
                 console.print(
                     "[dim]⏭️  Findings unchanged since last review — skipping post "
@@ -260,12 +318,20 @@ async def review_pr_async(
         elif force_review and delta.previous_comments:
             console.print("[dim]⚡ --force-review: bypassing convergence check[/dim]")
 
+        # Build metadata to embed in the review comment
+        finding_hashes = [f.finding_hash for f in review.findings]
+        new_meta = ReviewMeta.build(
+            commit_sha=current_sha,
+            review_count=review_count,
+            finding_hashes=finding_hashes,
+        )
+
         if dry_run:
             console.print("\n[yellow]Dry run - not posting to GitHub[/yellow]")
             if delta.previous_comments:
-                print(formatter.format_review_with_delta(review, delta))
+                print(formatter.format_review_with_delta(review, delta, meta=new_meta))
             else:
-                print(formatter.format_review(review))
+                print(formatter.format_review(review, meta=new_meta))
         else:
             # Post inline comments only for NEW findings (compute first to choose body format)
             new_findings_to_post = (
@@ -273,19 +339,18 @@ async def review_pr_async(
             )
             use_compact_body = len(new_findings_to_post) > 0
 
-            # Use minimal top-level body when posting inline comments (P0: inline-first)
             if delta.previous_comments:
                 body = (
-                    formatter.format_review_with_delta_compact(review, delta)
+                    formatter.format_review_with_delta_compact(review, delta, meta=new_meta)
                     if use_compact_body
-                    else formatter.format_review_with_delta(review, delta)
+                    else formatter.format_review_with_delta(review, delta, meta=new_meta)
                 )
                 action = formatter.get_review_action_with_delta(review, delta, allow_approve)
             else:
                 body = (
-                    formatter.format_review_compact(review)
+                    formatter.format_review_compact(review, meta=new_meta)
                     if use_compact_body
-                    else formatter.format_review(review)
+                    else formatter.format_review(review, meta=new_meta)
                 )
                 action = formatter.get_review_action(review, allow_approve=allow_approve)
 
@@ -299,7 +364,6 @@ async def review_pr_async(
                 console.print(f"   Resolved {resolved} comments")
 
             if new_findings_to_post:
-                # Create a temporary review with only new findings for inline comments
                 from ai_reviewer.models.review import ConsolidatedReview as CR
 
                 new_only_review = CR(
@@ -327,6 +391,25 @@ async def review_pr_async(
             elif delta.previous_comments:
                 open_count = len(delta.open_findings) + len(delta.new_findings)
                 console.print(f"\n[yellow]⚠️  {open_count} issues remaining[/yellow]")
+
+
+def _lgtm_placeholder_review(repo: str, pr_number: int):
+    """Build a minimal ConsolidatedReview for the LGTM fast path."""
+    from datetime import datetime
+
+    from ai_reviewer.models.review import ConsolidatedReview
+
+    return ConsolidatedReview(
+        id="lgtm-fast-path",
+        created_at=datetime.now(),
+        repo=repo,
+        pr_number=pr_number,
+        findings=[],
+        summary="All previously identified issues addressed",
+        agent_count=0,
+        review_quality_score=1.0,
+        total_review_time_ms=0,
+    )
 
 
 @cli.group("config")

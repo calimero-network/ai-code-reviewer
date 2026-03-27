@@ -1,12 +1,18 @@
 """GitHub API client for PR operations."""
 
+from __future__ import annotations
+
 import contextlib
+import enum
+import hashlib
+import json
 import logging
 import os
 import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import requests
 import yaml
@@ -75,6 +81,79 @@ def _parse_severity(severity_str: str) -> Severity | None:
         return Severity(severity_str.lower())
     except ValueError:
         return None
+
+
+def compute_findings_hash(finding_hashes: list[str]) -> str:
+    """Deterministic hash of a sorted list of finding hashes.
+
+    Enables quick convergence checks: if the findings_hash from the previous
+    review matches the current one, the issue set is identical.
+    """
+    key = ":".join(sorted(finding_hashes))
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+_REVIEW_META_RE = re.compile(r"<!-- ai-reviewer-meta: ({.*?}) -->")
+
+
+@dataclass
+class ReviewMeta:
+    """Metadata embedded in top-level review comments for cross-run tracking."""
+
+    commit_sha: str
+    review_count: int
+    timestamp: str  # ISO 8601
+    findings_hash: str  # hash of sorted finding hashes for quick equality check
+
+    def to_html_comment(self) -> str:
+        payload = json.dumps(
+            {
+                "commit_sha": self.commit_sha,
+                "review_count": self.review_count,
+                "timestamp": self.timestamp,
+                "findings_hash": self.findings_hash,
+            },
+            separators=(",", ":"),
+        )
+        return f"<!-- ai-reviewer-meta: {payload} -->"
+
+    @classmethod
+    def parse(cls, body: str) -> ReviewMeta | None:
+        """Extract ReviewMeta from a comment body containing the HTML comment tag.
+
+        Returns None when the tag is missing or the JSON is malformed.
+        """
+        match = _REVIEW_META_RE.search(body)
+        if not match:
+            return None
+        try:
+            data = json.loads(match.group(1))
+        except (json.JSONDecodeError, TypeError):
+            return None
+        try:
+            return cls(
+                commit_sha=str(data["commit_sha"]),
+                review_count=int(data["review_count"]),
+                timestamp=str(data["timestamp"]),
+                findings_hash=str(data["findings_hash"]),
+            )
+        except (KeyError, ValueError, TypeError):
+            return None
+
+    @classmethod
+    def build(
+        cls,
+        commit_sha: str,
+        review_count: int,
+        finding_hashes: list[str],
+    ) -> ReviewMeta:
+        """Construct a ReviewMeta for the current review run."""
+        return cls(
+            commit_sha=commit_sha,
+            review_count=review_count,
+            timestamp=datetime.now(UTC).isoformat(),
+            findings_hash=compute_findings_hash(finding_hashes),
+        )
 
 
 def stabilize_severity(
@@ -220,6 +299,54 @@ def estimate_review_count(delta: ReviewDelta) -> int:
     if not delta.previous_comments:
         return 1
     return max(2, len(delta.previous_comments) // 3 + 1)
+
+
+class SkipReason(enum.Enum):
+    """Reason for skipping a review before running agents."""
+
+    ALREADY_REVIEWED = "already_reviewed"
+    DEBOUNCED = "debounced"
+    LGTM_FAST_PATH = "lgtm_fast_path"
+
+
+_DEBOUNCE_SECONDS: float = float(os.environ.get("AI_REVIEWER_DEBOUNCE_SECONDS", "120"))
+
+
+def should_skip_before_agents(
+    meta: ReviewMeta | None,
+    current_sha: str,
+    force_review: bool = False,
+) -> SkipReason | None:
+    """Decide whether to skip the review entirely before running agents.
+
+    Returns a ``SkipReason`` when the review should be skipped, or ``None``
+    when agents should proceed.  The LGTM fast path is **not** handled here
+    (it requires a lightweight delta computation); see the webhook/CLI callers.
+
+    Checks (in order):
+    * ``force_review`` → never skip.
+    * Same ``commit_sha`` → ``ALREADY_REVIEWED``.
+    * Timestamp within debounce window → ``DEBOUNCED``.
+    """
+    if force_review:
+        return None
+
+    if meta is None:
+        return None
+
+    if meta.commit_sha == current_sha:
+        return SkipReason.ALREADY_REVIEWED
+
+    try:
+        last_review_time = datetime.fromisoformat(meta.timestamp)
+        now = datetime.now(UTC)
+        elapsed = (now - last_review_time).total_seconds()
+        if elapsed < _DEBOUNCE_SECONDS:
+            return SkipReason.DEBOUNCED
+    except (ValueError, TypeError):
+        pass
+
+    return None
 
 
 class GitHubClient:
@@ -581,6 +708,80 @@ class GitHubClient:
         "github-actions[bot]",
     }
 
+    def get_review_metadata(self, pr: PullRequest) -> ReviewMeta | None:
+        """Extract ReviewMeta from the most recent bot review on this PR.
+
+        Iterates PR reviews in reverse chronological order, looking for the
+        ``<!-- ai-reviewer-meta: {...} -->`` HTML comment tag embedded by the
+        formatter.  Returns the parsed metadata or None when no metadata is
+        found (legacy reviews or first review).
+        """
+        allowed_users = self._get_allowed_users()
+        try:
+            reviews = list(pr.get_reviews())
+        except Exception as e:
+            _raise_if_forbidden(e)
+            logger.warning("Could not fetch PR reviews for metadata: %s", e)
+            return None
+
+        for review in reversed(reviews):
+            if review.user is None or review.user.login not in allowed_users:
+                continue
+            body = review.body or ""
+            meta = ReviewMeta.parse(body)
+            if meta is not None:
+                logger.debug(
+                    "Found review metadata: commit=%s count=%d",
+                    meta.commit_sha[:8],
+                    meta.review_count,
+                )
+                return meta
+
+        # Fallback: also check issue comments (posted via _post_as_comment fallback)
+        try:
+            for comment in pr.get_issue_comments().reversed:
+                if comment.user is None or comment.user.login not in allowed_users:
+                    continue
+                meta = ReviewMeta.parse(comment.body or "")
+                if meta is not None:
+                    logger.debug(
+                        "Found review metadata in issue comment: commit=%s count=%d",
+                        meta.commit_sha[:8],
+                        meta.review_count,
+                    )
+                    return meta
+        except Exception as e:
+            _raise_if_forbidden(e)
+            logger.warning("Could not fetch issue comments for metadata: %s", e)
+
+        return None
+
+    def check_lgtm_fast_path(
+        self,
+        pr: PullRequest,
+        meta: ReviewMeta,
+    ) -> ReviewDelta | None:
+        """Check if the LGTM fast path applies (all issues resolved, skip agents).
+
+        Computes a lightweight delta with an empty findings list to see whether
+        every previously-reported comment has been fixed in the new diff.
+
+        Returns the delta if ``all_issues_resolved`` is True and
+        ``meta.review_count >= 2``, otherwise ``None``.
+        """
+        if meta.review_count < 2:
+            return None
+
+        delta = self.compute_review_delta(pr, current_findings=[])
+        if delta.all_issues_resolved:
+            logger.info(
+                "LGTM fast path: all %d previous issues resolved (review_count=%d)",
+                len(delta.fixed_findings),
+                meta.review_count,
+            )
+            return delta
+        return None
+
     def get_previous_review_comments(self, pr: PullRequest) -> list[PreviousComment]:
         """Get all previous review comments from AI reviewers.
 
@@ -663,12 +864,15 @@ class GitHubClient:
         self,
         pr: PullRequest,
         current_findings: list[ConsolidatedFinding],
+        review_count: int | None = None,
     ) -> ReviewDelta:
         """Compare current findings with previous comments to compute delta.
 
         Args:
             pr: Pull request object
             current_findings: Current review findings
+            review_count: Accurate review count from metadata. When ``None``,
+                falls back to ``estimate_review_count()`` heuristic.
 
         Returns:
             ReviewDelta showing new, fixed, and open issues
@@ -692,7 +896,7 @@ class GitHubClient:
         # Track which previous comments are still open
         matched_previous: set[int] = set()
 
-        review_count = estimate_review_count(delta)
+        effective_review_count = review_count if review_count is not None else estimate_review_count(delta)
 
         for finding in current_findings:
             # Three-tier matching: strict hash → fuzzy hash → title+line
@@ -708,7 +912,7 @@ class GitHubClient:
             if matched_comment is not None:
                 prev_sev = _parse_severity(matched_comment.severity)
                 if prev_sev is not None:
-                    finding.severity = stabilize_severity(finding.severity, prev_sev, review_count)
+                    finding.severity = stabilize_severity(finding.severity, prev_sev, effective_review_count)
                 delta.open_findings.append(finding)
                 matched_previous.add(matched_comment.id)
             else:
