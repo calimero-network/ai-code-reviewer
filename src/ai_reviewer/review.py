@@ -163,9 +163,7 @@ def filter_by_ignore_patterns(files: dict[str, str], patterns: list[str]) -> dic
         return files
     compiled = _compile_ignore_patterns(patterns)
     return {
-        path: content
-        for path, content in files.items()
-        if not any(c.match(path) for c in compiled)
+        path: content for path, content in files.items() if not any(c.match(path) for c in compiled)
     }
 
 

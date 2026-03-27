@@ -204,9 +204,7 @@ def _setup_default_review_handler() -> None:
 
             delta = gh.compute_review_delta(pr, review.findings)
 
-            force_review = any(
-                label.name.lower() == "force-review" for label in pr.get_labels()
-            )
+            force_review = any(label.name.lower() == "force-review" for label in pr.get_labels())
 
             if delta.previous_comments and not force_review:
                 review_count = estimate_review_count(delta)
