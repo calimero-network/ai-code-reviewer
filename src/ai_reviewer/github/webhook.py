@@ -135,6 +135,7 @@ def _setup_default_review_handler() -> None:
         GitHubClient,
         ReviewMeta,
         estimate_review_count,
+        lgtm_placeholder_review,
         should_skip_before_agents,
         should_skip_review,
     )
@@ -213,17 +214,11 @@ def _setup_default_review_handler() -> None:
                         review_count=lgtm_review_count,
                         finding_hashes=[],
                     )
+                    lgtm_review = lgtm_placeholder_review(repo, pr_number)
                     body = formatter.format_review_with_delta_compact(
-                        _lgtm_placeholder_review(repo, pr_number),
-                        lgtm_delta,
-                        meta=new_meta,
+                        lgtm_review, lgtm_delta, meta=new_meta
                     )
-                    gh.post_review(
-                        pr,
-                        _lgtm_placeholder_review(repo, pr_number),
-                        body,
-                        "COMMENT",
-                    )
+                    gh.post_review(pr, body, "COMMENT")
                     if lgtm_delta.fixed_findings:
                         resolved = gh.resolve_fixed_comments(pr, lgtm_delta)
                         logger.info(f"LGTM fast path: resolved {resolved} comments")
@@ -308,7 +303,6 @@ def _setup_default_review_handler() -> None:
             max_per_file = _get_env_int("MAX_FINDINGS_PER_FILE", 10)
             posted = gh.post_review(
                 pr,
-                review,
                 body,
                 action,
                 inline_findings=new_findings or None,
@@ -325,24 +319,6 @@ def _setup_default_review_handler() -> None:
 
         except Exception as e:
             logger.exception(f"Error reviewing {repo} PR #{pr_number}: {e}")
-
-    def _lgtm_placeholder_review(repo: str, pr_number: int):
-        """Build a minimal ConsolidatedReview for the LGTM fast path."""
-        from datetime import datetime
-
-        from ai_reviewer.models.review import ConsolidatedReview
-
-        return ConsolidatedReview(
-            id="lgtm-fast-path",
-            created_at=datetime.now(),
-            repo=repo,
-            pr_number=pr_number,
-            findings=[],
-            summary="All previously identified issues addressed",
-            agent_count=0,
-            review_quality_score=1.0,
-            total_review_time_ms=0,
-        )
 
     set_review_handler(default_review_handler)
 

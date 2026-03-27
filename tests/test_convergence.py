@@ -664,6 +664,52 @@ class TestShouldSkipBeforeAgents:
         assert should_skip_before_agents(meta, "new_sha") is None
 
 
+class TestLgtmFastPathVacuous:
+    """LGTM fast path must not fire when there are no previous comments."""
+
+    def test_no_previous_comments_returns_none(self):
+        """When no previous inline comments exist, LGTM should not trigger."""
+        meta = ReviewMeta(
+            commit_sha="old_sha",
+            review_count=5,
+            timestamp="2020-01-01T00:00:00Z",
+            findings_hash="ff",
+        )
+        gh = MagicMock()
+        gh.compute_review_delta.return_value = ReviewDelta(previous_comments=[])
+
+        from ai_reviewer.github.client import GitHubClient
+
+        result = GitHubClient.check_lgtm_fast_path(gh, MagicMock(), meta)
+        assert result is None
+
+    def test_with_previous_comments_all_resolved(self):
+        """When previous comments exist and all resolved, LGTM should trigger."""
+        meta = ReviewMeta(
+            commit_sha="old_sha",
+            review_count=3,
+            timestamp="2020-01-01T00:00:00Z",
+            findings_hash="ff",
+        )
+        prev = PreviousComment(
+            id=1, file_path="f.py", line=1, title="Bug", severity="warning", body="x"
+        )
+        delta = ReviewDelta(
+            previous_comments=[prev],
+            fixed_findings=[prev],
+            open_findings=[],
+            new_findings=[],
+        )
+        gh = MagicMock()
+        gh.compute_review_delta.return_value = delta
+
+        from ai_reviewer.github.client import GitHubClient
+
+        result = GitHubClient.check_lgtm_fast_path(gh, MagicMock(), meta)
+        assert result is not None
+        assert result.all_issues_resolved
+
+
 class TestFindingsHash:
     """Tests for compute_findings_hash and findings_hash comparison."""
 

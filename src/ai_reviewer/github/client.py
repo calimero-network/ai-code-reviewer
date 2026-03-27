@@ -301,11 +301,25 @@ def estimate_review_count(delta: ReviewDelta) -> int:
     return max(2, len(delta.previous_comments) // 3 + 1)
 
 
+def lgtm_placeholder_review(repo: str, pr_number: int) -> ConsolidatedReview:
+    """Build a minimal ConsolidatedReview for the LGTM fast path."""
+    return ConsolidatedReview(
+        id="lgtm-fast-path",
+        created_at=datetime.now(),
+        repo=repo,
+        pr_number=pr_number,
+        findings=[],
+        summary="All previously identified issues addressed",
+        agent_count=0,
+        review_quality_score=1.0,
+        total_review_time_ms=0,
+    )
+
+
 class SkipReason(enum.Enum):
     """Reason for skipping a review before running agents."""
 
     ALREADY_REVIEWED = "already_reviewed"
-    LGTM_FAST_PATH = "lgtm_fast_path"
 
 
 def should_skip_before_agents(
@@ -356,6 +370,7 @@ class GitHubClient:
         self._current_user_login: str | None = None
         self._allowed_users: set[str] | None = None
         self._extra_reviewer_users: set[str] = set(extra_reviewer_users or [])
+        self._previous_comments_cache: dict[int, list[PreviousComment]] = {}
 
         if base_url:
             self._gh = Github(token, base_url=base_url)
@@ -596,7 +611,6 @@ class GitHubClient:
     def post_review(
         self,
         pr: PullRequest,
-        review: ConsolidatedReview,  # noqa: ARG002
         body: str,
         event: str = "COMMENT",
         inline_findings: list[ConsolidatedFinding] | None = None,
@@ -669,61 +683,6 @@ class GitHubClient:
         pr.create_issue_comment(comment_body)
         logger.info(f"Posted review as issue comment on PR #{pr.number}")
 
-    def post_inline_comments(
-        self,
-        pr: PullRequest,
-        review: ConsolidatedReview,
-        max_total: int = 50,
-        max_per_file: int = 10,
-    ) -> int:
-        """Post inline comments for each finding.
-
-        Args:
-            pr: Pull request
-            review: Consolidated review with findings
-            max_total: Maximum total inline comments to post
-            max_per_file: Maximum inline comments per file
-
-        Returns:
-            Number of successfully posted comments
-        """
-        # Get the head commit for inline comments
-        head_commit = pr.get_commits().reversed[0]
-        posted_count = 0
-
-        for finding in apply_comment_limits(review.findings, max_total, max_per_file):
-            try:
-                # Build comment body with emoji for severity
-                severity_emoji = {
-                    "critical": "🔴",
-                    "warning": "🟡",
-                    "suggestion": "💡",
-                    "nitpick": "📝",
-                }.get(finding.severity.value, "ℹ️")
-
-                comment_body = f"{severity_emoji} **{finding.title}**\n\n{finding.description}"
-                if finding.suggested_fix:
-                    comment_body += f"\n\n**Suggested fix:**\n```\n{finding.suggested_fix}\n```"
-                comment_body += f"\n\n<!-- ai-reviewer-id: {finding.finding_hash} -->"
-
-                # Use create_review_comment for inline comments on the diff
-                pr.create_review_comment(
-                    body=comment_body,
-                    commit=head_commit,
-                    path=finding.file_path,
-                    line=finding.line_start,
-                )
-                posted_count += 1
-                logger.debug(f"Posted inline comment on {finding.file_path}:{finding.line_start}")
-            except Exception as e:
-                _raise_if_forbidden(e)
-                # Inline comments can fail if the line isn't in the diff
-                logger.warning(
-                    f"Could not post inline comment on {finding.file_path}:{finding.line_start}: {e}"
-                )
-
-        return posted_count
-
     # Known AI reviewer bot usernames
     AI_REVIEWER_USERS = {
         "github-actions[bot]",
@@ -794,6 +753,8 @@ class GitHubClient:
             return None
 
         delta = self.compute_review_delta(pr, current_findings=[])
+        if not delta.previous_comments:
+            return None
         if delta.all_issues_resolved:
             logger.info(
                 "LGTM fast path: all %d previous issues resolved (review_count=%d)",
@@ -806,12 +767,18 @@ class GitHubClient:
     def get_previous_review_comments(self, pr: PullRequest) -> list[PreviousComment]:
         """Get all previous review comments from AI reviewers.
 
+        Results are cached per PR number for the lifetime of this client
+        instance to avoid redundant API calls (e.g. LGTM fast path check
+        followed by the main review flow).
+
         Args:
             pr: Pull request object
 
         Returns:
             List of previous comments from AI reviewers
         """
+        if pr.number in self._previous_comments_cache:
+            return self._previous_comments_cache[pr.number]
         comments: list[PreviousComment] = []
         allowed_users = self._get_allowed_users()
 
@@ -835,6 +802,7 @@ class GitHubClient:
                 comments.append(parsed)
 
         logger.info(f"Found {len(comments)} previous AI review comments")
+        self._previous_comments_cache[pr.number] = comments
         return comments
 
     def _parse_review_comment(self, comment: PullRequestComment) -> PreviousComment | None:

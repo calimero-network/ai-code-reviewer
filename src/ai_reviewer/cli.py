@@ -20,6 +20,7 @@ from ai_reviewer.github.client import (
     GitHubClient,
     ReviewMeta,
     estimate_review_count,
+    lgtm_placeholder_review,
     should_skip_before_agents,
     should_skip_review,
 )
@@ -189,7 +190,7 @@ async def review_pr_async(
                     review_count=lgtm_review_count,
                     finding_hashes=[],
                 )
-                lgtm_review = _lgtm_placeholder_review(repo, pr_number)
+                lgtm_review = lgtm_placeholder_review(repo, pr_number)
                 if dry_run:
                     console.print(
                         "\n[yellow]Dry run - LGTM fast path (all issues resolved)[/yellow]"
@@ -201,7 +202,7 @@ async def review_pr_async(
                     body = formatter.format_review_with_delta_compact(
                         lgtm_review, lgtm_delta, meta=new_meta
                     )
-                    gh.post_review(pr, lgtm_review, body, "COMMENT")
+                    gh.post_review(pr, body, "COMMENT")
                     if lgtm_delta.fixed_findings:
                         resolved = gh.resolve_fixed_comments(pr, lgtm_delta)
                         console.print(f"✅ LGTM fast path: resolved {resolved} comments")
@@ -367,7 +368,6 @@ async def review_pr_async(
             max_per_file = config.output.max_findings_per_file
             posted = gh.post_review(
                 pr,
-                review,
                 body,
                 action,
                 inline_findings=new_findings_to_post or None,
@@ -382,25 +382,6 @@ async def review_pr_async(
             elif delta.previous_comments:
                 open_count = len(delta.open_findings) + len(delta.new_findings)
                 console.print(f"\n[yellow]⚠️  {open_count} issues remaining[/yellow]")
-
-
-def _lgtm_placeholder_review(repo: str, pr_number: int):
-    """Build a minimal ConsolidatedReview for the LGTM fast path."""
-    from datetime import datetime
-
-    from ai_reviewer.models.review import ConsolidatedReview
-
-    return ConsolidatedReview(
-        id="lgtm-fast-path",
-        created_at=datetime.now(),
-        repo=repo,
-        pr_number=pr_number,
-        findings=[],
-        summary="All previously identified issues addressed",
-        agent_count=0,
-        review_quality_score=1.0,
-        total_review_time_ms=0,
-    )
 
 
 @cli.group("config")
