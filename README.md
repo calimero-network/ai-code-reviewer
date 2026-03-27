@@ -1,6 +1,6 @@
-# 🤖 AI Code Reviewer
+# AI Code Reviewer
 
-**Multi-agent code review system that orchestrates multiple LLMs to produce comprehensive, high-quality code reviews.**
+**Multi-agent code review system that orchestrates multiple LLMs to produce comprehensive, consensus-based code reviews.**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -8,15 +8,17 @@
 
 ## Overview
 
-AI Code Reviewer takes a different approach to automated code review: instead of relying on a single AI model, it orchestrates **multiple specialized agents** that review code from different perspectives (security, performance, architecture, etc.) and combines their findings into a unified, confidence-scored review.
+AI Code Reviewer takes a different approach to automated code review: instead of relying on a single model, it orchestrates **multiple specialized agents** that review code from different perspectives — security, performance, and code quality — then combines their findings into a unified, confidence-scored review.
 
 ### Key Features
 
-- 🔀 **Multi-Agent Architecture**: Run 2-5+ LLM agents in parallel, each with specialized focus
-- 🎯 **Consensus-Based Scoring**: Findings are weighted by how many agents agree
-- 🔑 **Single API Key**: All models (Claude, GPT-4, etc.) accessed via Cursor API
-- 🐙 **GitHub Integration**: Automatic PR reviews via webhooks
-- 📊 **Actionable Output**: Prioritized findings with suggested fixes
+- **Multi-Agent Architecture**: Run 2–5+ LLM agents in parallel, each with a specialized focus area
+- **Consensus-Based Scoring**: Findings are weighted by how many agents agree, reducing false positives
+- **Single API Key**: All models (Claude, GPT-4, etc.) accessed through the Cursor unified API
+- **GitHub Integration**: Automatic PR reviews via webhooks, with inline comments and thread resolution
+- **Incremental Reviews**: Delta tracking detects new, fixed, and open findings across pushes — with convergence logic that stops reviewing when findings stabilize
+
+For the full technical deep-dive — pipeline flowcharts, scoring formulas, convergence state machine, and prompt engineering — see the **[Architecture Documentation](docs/ARCHITECTURE.md)**.
 
 ---
 
@@ -26,8 +28,7 @@ AI Code Reviewer takes a different approach to automated code review: instead of
 # Install
 pip install ai-code-reviewer
 
-# Configure - Only 2 API keys needed!
-# Cursor API provides unified access to Claude, GPT-4, and other models
+# Export credentials
 export CURSOR_API_KEY=cur_...
 export GITHUB_TOKEN=ghp_...
 
@@ -42,37 +43,26 @@ git diff main | ai-reviewer review --output markdown
 
 ## How It Works
 
-All LLM agents access Claude, GPT-4, and other models through **Cursor's unified API**:
+All LLM agents access Claude, GPT-4, and other models through the Cursor unified API — a single key, consistent interface, and codebase context for pattern-aware reviews.
 
-- ✅ **Single API key** for all models
-- ✅ **Consistent interface** across different LLMs
-- ✅ **Codebase context** for pattern-aware reviews
+```mermaid
+flowchart LR
+    PR["PR Diff"] --> Cursor["Cursor API\n(Unified LLM Gateway)"]
 
+    subgraph Agents["Parallel Agent Execution"]
+        A1["Claude\n(Security)"]
+        A2["GPT-4\n(Performance)"]
+        A3["Claude\n(Patterns)"]
+    end
+
+    Cursor --> Agents
+
+    Agents --> Agg["Review Aggregator\n• Cluster similar findings\n• Compute consensus scores\n• Rank by severity × agreement"]
+    Agg --> Delta["Delta Tracking\n• New / fixed / open findings\n• Convergence detection"]
+    Delta --> Out["Consolidated Review\n(GitHub / JSON / MD)"]
 ```
-                            PR Diff
-                               │
-                               ▼
-┌──────────────────────────────────────────────────────────────┐
-│              Cursor API (Unified LLM Gateway)                 │
-│                                                               │
-│   ┌─────────────┐   ┌─────────────┐   ┌─────────────┐       │
-│   │   Claude    │   │    GPT-4    │   │   Claude    │       │
-│   │ (Security)  │   │(Performance)│   │ (Patterns)  │       │
-│   └──────┬──────┘   └──────┬──────┘   └──────┬──────┘       │
-│          │                 │                 │               │
-│          └─────────────────┼─────────────────┘               │
-│                            ▼                                 │
-│   ┌──────────────────────────────────────────────────────┐  │
-│   │                Review Aggregator                      │  │
-│   │  • Cluster similar findings                           │  │
-│   │  • Compute consensus scores                           │  │
-│   │  • Rank by severity × agreement                       │  │
-│   └──────────────────────────────────────────────────────┘  │
-└──────────────────────────────┬───────────────────────────────┘
-                               │
-                               ▼
-              Consolidated Review (GitHub / JSON / MD)
-```
+
+For a detailed breakdown of the pipeline, scoring formulas, and convergence logic, see the **[Architecture Documentation](docs/ARCHITECTURE.md)**.
 
 ---
 
@@ -81,15 +71,12 @@ All LLM agents access Claude, GPT-4, and other models through **Cursor's unified
 Create `config.yaml`:
 
 ```yaml
-# Single Cursor API key for all LLM models
 cursor:
   api_key: ${CURSOR_API_KEY}
 
-# GitHub integration
 github:
-  token: ${GITHUB_TOKEN}  # or PAT for thread resolution (see below)
+  token: ${GITHUB_TOKEN}  # or Classic PAT for thread resolution (see below)
 
-# Agents - different models, same Cursor API
 agents:
   - name: security-reviewer
     model: claude-4.5-opus-high-thinking
@@ -114,63 +101,59 @@ orchestrator:
 ## CLI Commands
 
 ```bash
-# Review Commands
-ai-reviewer review-pr <owner/repo> <pr-number>  # Review GitHub PR
-ai-reviewer review --diff <file>                 # Review local diff
-ai-reviewer review --commit <sha>                # Review specific commit
+# Review a GitHub PR
+ai-reviewer review-pr <owner/repo> <pr-number>
 
-# Server Commands
-ai-reviewer serve --port 8080                    # Start webhook server
+# Review a local diff or specific commit
+ai-reviewer review --diff <file>
+ai-reviewer review --commit <sha>
+
+# Start webhook server
+ai-reviewer serve --port 8080
 
 # Configuration
-ai-reviewer config validate                      # Check configuration
-ai-reviewer config show                          # Show active config
+ai-reviewer config validate
+ai-reviewer config show
 
-# Agents
-ai-reviewer agents list                          # List available agents
-ai-reviewer agents test <type>                   # Test single agent
+# Agent utilities
+ai-reviewer agents list
+ai-reviewer agents test <type>
 ```
 
 ---
 
 ## Output Example
 
-```markdown
-## 🤖 AI Code Review
+```
+Reviewed by 3 agents  |  Quality score: 87%
 
-**Reviewed by 3 agents** | Consensus score: 87%
+CRITICAL (1)
+  SQL Injection in auth/login.py:45  [3/3 agents]
+  User input interpolated directly into SQL query without parameterization.
 
-### 🔴 Critical (1)
+WARNING (2)
+  Missing rate limiting on /api/login  [2/3 agents]
+  Inefficient O(n²) loop in process_batch()  [2/3 agents]
 
-**SQL Injection** in `auth/login.py:45` | 3/3 agents ✓
-
-> User input interpolated into SQL query
-
-### 🟡 Warning (2)
-
-**Missing rate limiting** | 2/3 agents
-**Inefficient O(n²) loop** | 2/3 agents
-
-### 💡 Suggestions (3)
-
-- Add type hints to `process_user()`
-- Extract magic number to constant
-- Add docstring to `AuthHandler`
+SUGGESTION (3)
+  Add type hints to process_user()
+  Extract magic number 86400 to a named constant
+  Add docstring to AuthHandler
 ```
 
 ---
 
 ## Repository Configuration
 
-Add `.ai-reviewer.yaml` to your repo for custom settings:
+Add `.ai-reviewer.yaml` to the root of any reviewed repository to customize behavior:
 
 ```yaml
-# Ignore generated files
+# Exclude generated or vendored files from review
 ignore:
   - "**/*.generated.rs"
   - "**/vendor/**"
 
-# Custom instructions for agents
+# Append custom instructions to a specific agent's prompt
 agents:
   - name: security-reviewer
     custom_prompt_append: |
@@ -187,60 +170,44 @@ policy:
 
 ## GitHub Actions Setup
 
-### Basic Setup (GITHUB_TOKEN)
+### Basic Setup (`GITHUB_TOKEN`)
 
-The default `GITHUB_TOKEN` provided by GitHub Actions works for most features:
-- ✅ Posting reviews and comments
-- ✅ Adding reactions
-- ✅ Posting "Resolved" replies
-- ❌ Resolving review threads (requires PAT)
+The default `GITHUB_TOKEN` provided by GitHub Actions is sufficient for most features:
+
+- Posting reviews and inline comments
+- Adding reactions
+- Posting "Resolved" replies
+
+It cannot resolve review threads (collapsing them in the UI), which requires a Classic PAT.
 
 ### Full Features (Classic Personal Access Token)
 
-To enable automatic thread resolution when issues are fixed, use a **Classic PAT** (not Fine-grained):
+> **Note:** Fine-grained PATs do not support the `resolveReviewThread` GraphQL mutation. Use a Classic PAT with `repo` scope.
 
-> ⚠️ **Important**: Fine-grained PATs do NOT support the `resolveReviewThread` GraphQL mutation.
-> You must use a Classic PAT with `repo` scope.
+1. Create a [Classic Personal Access Token](https://github.com/settings/tokens/new) with the `repo` scope.
 
-1. Create a [Classic Personal Access Token](https://github.com/settings/tokens/new) with:
-   - **Note**: `ai-code-reviewer`
-   - **Expiration**: 90 days (or custom)
-   - **Scopes**: ✅ `repo` (Full control of private repositories)
-
-2. Add the PAT as a repository secret named `GH_PAT`:
+2. Add it as a repository secret named `GH_PAT`:
    ```
    Settings → Secrets and variables → Actions → New repository secret
    Name: GH_PAT
    Value: ghp_xxxxxxxxxxxxxxxxxxxx
    ```
 
-3. The workflow automatically uses `GH_PAT` if available (falls back to `GITHUB_TOKEN`).
+3. The workflow uses `GH_PAT` automatically when present, falling back to `GITHUB_TOKEN`.
 
-> **Security note:** When using a Classic PAT, use a dedicated service account (not your personal account) with the minimum required scopes. Rotate tokens regularly. For production deployments, prefer GitHub Apps (fine-grained permissions) over Classic PATs.
-
-> **Why Classic PAT?** GitHub's GraphQL `resolveReviewThread` mutation requires:
-> - User-level authentication (not app/integration tokens)
-> - Classic PAT with `repo` scope (Fine-grained PATs return "Resource not accessible")
->
-> Without a Classic PAT, the reviewer will still post "✅ Resolved" replies, but
-> threads won't collapse automatically in the GitHub UI.
+For production deployments, prefer a dedicated service account and rotate tokens regularly. GitHub Apps with fine-grained permissions are the recommended long-term approach.
 
 ---
 
 ## Development
 
 ```bash
-# Clone
 git clone https://github.com/calimero-network/ai-code-reviewer
 cd ai-code-reviewer
 
-# Install dev dependencies
 pip install -e ".[dev]"
 
-# Run tests
 pytest
-
-# Run linters
 ruff check .
 mypy src/
 ```
@@ -249,16 +216,14 @@ mypy src/
 
 ## AI Rules & Documentation
 
-This repository is designed to be AI-friendly with structured documentation that helps AI agents understand and work with the codebase.
-
-### For AI Assistants (Cursor, Claude, etc.)
+The repository ships structured AI context to help coding assistants work with the codebase effectively.
 
 ```
-.ai/                 # AI context, rules & automation
-├── context.md         # Fast codebase overview (read first!)
-├── doc-bot.md         # Documentation bot instructions
-├── prompts/           # Reusable AI prompts
-└── rules/             # Detailed rules per module
+.ai/
+├── context.md           # Codebase overview — read first
+├── doc-bot.md           # Documentation bot instructions
+├── prompts/             # Reusable AI prompts
+└── rules/               # Per-module design rules
     ├── architecture.md  # High-level design & invariants
     ├── agents.md        # Agent module patterns
     ├── orchestrator.md  # Orchestration rules
@@ -267,21 +232,7 @@ This repository is designed to be AI-friendly with structured documentation that
     └── conventions.md   # Coding style guide
 ```
 
-### Quick Start for AI Agents
-
-1. Read `.ai/context.md` for a fast overview
-2. Check `.ai/rules/<module>.md` for the specific module you're working on
-3. Follow patterns in `.ai/rules/conventions.md`
-
-### Documentation Bot
-
-PRs that change source code automatically trigger a documentation bot that:
-
-- Analyzes which docs might need updates
-- Posts suggestions as PR comments
-- Helps keep documentation in sync with code
-
-Configure via `.ai-reviewer.yaml` in the repo root.
+PRs that modify source code automatically trigger a documentation bot that analyzes which docs may need updating and posts suggestions as PR comments. Configure via `.ai-reviewer.yaml`.
 
 ---
 
