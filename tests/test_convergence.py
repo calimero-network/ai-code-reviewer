@@ -563,7 +563,7 @@ class TestReviewMetaParsing:
 
     def test_parse_valid_json(self):
         body = (
-            'Some review text\n'
+            "Some review text\n"
             '<!-- ai-reviewer-meta: {"commit_sha":"abc123","review_count":3,'
             '"timestamp":"2026-03-27T12:00:00Z","findings_hash":"deadbeef"} -->'
         )

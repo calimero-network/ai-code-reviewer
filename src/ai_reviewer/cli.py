@@ -191,8 +191,12 @@ async def review_pr_async(
                 )
                 lgtm_review = _lgtm_placeholder_review(repo, pr_number)
                 if dry_run:
-                    console.print("\n[yellow]Dry run - LGTM fast path (all issues resolved)[/yellow]")
-                    print(formatter.format_review_with_delta(lgtm_review, lgtm_delta, meta=new_meta))
+                    console.print(
+                        "\n[yellow]Dry run - LGTM fast path (all issues resolved)[/yellow]"
+                    )
+                    print(
+                        formatter.format_review_with_delta(lgtm_review, lgtm_delta, meta=new_meta)
+                    )
                 else:
                     body = formatter.format_review_with_delta_compact(
                         lgtm_review, lgtm_delta, meta=new_meta

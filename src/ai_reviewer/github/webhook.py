@@ -258,7 +258,11 @@ def _setup_default_review_handler() -> None:
             else:
                 review_count = estimate_review_count(delta)
 
-            if delta.previous_comments and not force_review and should_skip_review(review_count, delta):
+            if (
+                delta.previous_comments
+                and not force_review
+                and should_skip_review(review_count, delta)
+            ):
                 logger.info(
                     "Convergence detected for %s PR #%d — skipping post "
                     "(review_count=%d, open=%d, new=%d, fixed=%d)",
