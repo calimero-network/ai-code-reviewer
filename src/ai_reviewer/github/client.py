@@ -683,25 +683,13 @@ class GitHubClient:
         max_per_file: int,
     ) -> list[ReviewComment]:
         """Build atomic review comments, skipping lines not resolvable in the diff."""
-        if not inline_findings:
-            return []
-
-        file_modified_lines: dict[str, set[int]] = {}
-        for pr_file in pr.get_files():
-            if pr_file.patch:
-                file_modified_lines[pr_file.filename] = self._parse_modified_lines(pr_file.patch)
-
         comments: list[ReviewComment] = []
-        for finding in apply_comment_limits(inline_findings, max_total, max_per_file):
-            modified_lines = file_modified_lines.get(finding.file_path)
-            if not modified_lines or finding.line_start not in modified_lines:
-                logger.warning(
-                    "Skipping inline comment on %s:%d because the line is not resolvable in the PR diff",
-                    finding.file_path,
-                    finding.line_start,
-                )
-                continue
-
+        for finding in self.get_postable_inline_findings(
+            pr,
+            inline_findings=inline_findings,
+            max_total=max_total,
+            max_per_file=max_per_file,
+        ):
             severity_emoji = {
                 "critical": "🔴",
                 "warning": "🟡",
@@ -723,6 +711,37 @@ class GitHubClient:
             )
 
         return comments
+
+    def get_postable_inline_findings(
+        self,
+        pr: PullRequest,
+        inline_findings: list[ConsolidatedFinding] | None,
+        max_total: int,
+        max_per_file: int,
+    ) -> list[ConsolidatedFinding]:
+        """Return inline findings that can actually be posted on this PR diff."""
+        if not inline_findings:
+            return []
+
+        file_modified_lines: dict[str, set[int]] = {}
+        for pr_file in pr.get_files():
+            if pr_file.patch:
+                file_modified_lines[pr_file.filename] = self._parse_modified_lines(pr_file.patch)
+
+        postable_findings: list[ConsolidatedFinding] = []
+        for finding in apply_comment_limits(inline_findings, max_total, max_per_file):
+            modified_lines = file_modified_lines.get(finding.file_path)
+            if not modified_lines or finding.line_start not in modified_lines:
+                logger.warning(
+                    "Skipping inline comment on %s:%d because the line is not resolvable in the PR diff",
+                    finding.file_path,
+                    finding.line_start,
+                )
+                continue
+
+            postable_findings.append(finding)
+
+        return postable_findings
 
     def _post_as_comment(self, pr: PullRequest, body: str) -> None:
         """Post review as a regular issue comment (fallback).

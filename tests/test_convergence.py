@@ -1194,6 +1194,81 @@ class TestLgtmLightweightRecheck:
             mock_agent.assert_called_once()
             mock_gh.post_review.assert_called_once()
 
+    def test_cli_lgtm_recheck_error_falls_back_to_normal(self):
+        """When re-check fails, CLI falls back to the normal review flow."""
+        import asyncio
+
+        from ai_reviewer.cli import review_pr_async
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        meta = ReviewMeta(
+            commit_sha="old_sha",
+            review_count=3,
+            timestamp="2020-01-01T00:00:00Z",
+            findings_hash="ff",
+        )
+
+        lgtm_delta = ReviewDelta(
+            new_findings=[],
+            fixed_findings=[_prev_comment()],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+        )
+
+        normal_finding = _finding(title="Missed bug")
+        normal_review = ConsolidatedReview(
+            id="normal",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[normal_finding],
+            summary="One issue",
+            agent_count=1,
+            review_quality_score=0.8,
+            total_review_time_ms=500,
+        )
+
+        normal_delta = ReviewDelta(
+            new_findings=[normal_finding],
+            fixed_findings=[],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.head.sha = "new_sha"
+
+        mock_gh = MagicMock()
+        mock_gh.get_pull_request.return_value = mock_pr
+        mock_gh.get_review_metadata.return_value = meta
+        mock_gh.check_lgtm_fast_path.return_value = lgtm_delta
+        mock_gh.compute_review_delta.return_value = normal_delta
+
+        with (
+            patch("ai_reviewer.cli.load_config") as mock_load,
+            patch("ai_reviewer.cli.validate_config", return_value=[]),
+            patch("ai_reviewer.cli.GitHubClient", return_value=mock_gh),
+            patch(
+                "ai_reviewer.cli.review_pr_with_cursor_agent",
+                new_callable=AsyncMock,
+                side_effect=[RuntimeError("recheck failed"), normal_review],
+            ) as mock_agent,
+        ):
+            mock_config = MagicMock()
+            mock_load.return_value = mock_config
+
+            asyncio.run(
+                review_pr_async(
+                    repo="test/repo",
+                    pr_number=42,
+                    output="github",
+                    force_review=False,
+                )
+            )
+
+            assert mock_agent.await_count == 2
+            mock_gh.post_review.assert_called_once()
+
     @pytest.mark.asyncio
     async def test_webhook_lgtm_candidate_triggers_recheck(self):
         """Webhook runs a 1-agent re-check when LGTM candidate is detected."""
@@ -1342,6 +1417,81 @@ class TestLgtmLightweightRecheck:
             mock_agent.assert_called_once()
             mock_gh.post_review.assert_called_once()
 
+    @pytest.mark.asyncio
+    async def test_webhook_lgtm_recheck_error_falls_back(self):
+        """Webhook falls back to normal review when re-check errors."""
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        meta = ReviewMeta(
+            commit_sha="old_sha",
+            review_count=3,
+            timestamp="2020-01-01T00:00:00Z",
+            findings_hash="ff",
+        )
+
+        lgtm_delta = ReviewDelta(
+            new_findings=[],
+            fixed_findings=[_prev_comment()],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+        )
+
+        normal_finding = _finding(title="Missed bug")
+        normal_review = ConsolidatedReview(
+            id="normal",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[normal_finding],
+            summary="One issue",
+            agent_count=1,
+            review_quality_score=0.8,
+            total_review_time_ms=500,
+        )
+
+        normal_delta = ReviewDelta(
+            new_findings=[normal_finding],
+            fixed_findings=[],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.head.sha = "new_sha"
+        mock_pr.get_labels.return_value = []
+
+        mock_gh = MagicMock()
+        mock_gh.get_pull_request.return_value = mock_pr
+        mock_gh.get_review_metadata.return_value = meta
+        mock_gh.check_lgtm_fast_path.return_value = lgtm_delta
+        mock_gh.compute_review_delta.return_value = normal_delta
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+            ),
+            patch("ai_reviewer.config.load_config"),
+            patch(
+                "ai_reviewer.review.review_pr_with_cursor_agent",
+                new_callable=AsyncMock,
+                side_effect=[RuntimeError("recheck failed"), normal_review],
+            ) as mock_agent,
+            patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
+            patch("ai_reviewer.github.formatter.GitHubFormatter"),
+        ):
+            from ai_reviewer.github import webhook
+            from ai_reviewer.github.webhook import _setup_default_review_handler
+
+            _setup_default_review_handler()
+
+            handler = webhook._review_handler
+            assert handler is not None
+            await handler(repo="test/repo", pr_number=42)
+
+            assert mock_agent.await_count == 2
+            mock_gh.post_review.assert_called_once()
+
     def test_already_reviewed_skip_unchanged(self):
         """Existing already_reviewed skip behavior remains unchanged."""
         meta = ReviewMeta(
@@ -1386,6 +1536,72 @@ class TestLgtmLightweightRecheck:
 
 class TestCLIPreAgentChecks:
     """Integration tests for pre-agent checks in the CLI."""
+
+    def test_cli_compact_delta_body_uses_postable_new_finding_count(self):
+        """Compact delta body counts only inline findings that will actually be posted."""
+        import asyncio
+
+        from ai_reviewer.cli import review_pr_async
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        findings = [_finding(title=f"Issue {i}", line_start=10 + i) for i in range(4)]
+        postable_findings = findings[:2]
+        review = ConsolidatedReview(
+            id="r1",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=findings,
+            summary="Four issues",
+            agent_count=1,
+            review_quality_score=0.9,
+            total_review_time_ms=1000,
+        )
+        delta = ReviewDelta(
+            new_findings=findings,
+            fixed_findings=[],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.head.sha = "new_sha"
+
+        mock_gh = MagicMock()
+        mock_gh.get_pull_request.return_value = mock_pr
+        mock_gh.get_review_metadata.return_value = None
+        mock_gh.compute_review_delta.return_value = delta
+        mock_gh.get_postable_inline_findings.return_value = postable_findings
+
+        with (
+            patch("ai_reviewer.cli.load_config") as mock_load,
+            patch("ai_reviewer.cli.validate_config", return_value=[]),
+            patch("ai_reviewer.cli.GitHubClient", return_value=mock_gh),
+            patch("ai_reviewer.cli.review_pr_with_cursor_agent", return_value=review),
+        ):
+            mock_config = MagicMock()
+            mock_config.cursor.api_key = "cursor-token"
+            mock_config.cursor.base_url = "https://cursor.example"
+            mock_config.cursor.timeout_seconds = 30
+            mock_config.github.token = "github-token"
+            mock_config.output.max_total_findings = 50
+            mock_config.output.max_findings_per_file = 10
+            mock_load.return_value = mock_config
+
+            asyncio.run(
+                review_pr_async(
+                    repo="test/repo",
+                    pr_number=42,
+                    output="github",
+                    force_review=False,
+                )
+            )
+
+            post_args = mock_gh.post_review.call_args
+            assert post_args is not None
+            assert "🆕 2 new" in post_args.args[1]
+            assert "🆕 4 new" not in post_args.args[1]
+            assert post_args.kwargs["inline_findings"] == postable_findings
 
     def test_cli_skips_on_already_reviewed(self):
         """CLI returns early when commit SHA was already reviewed."""
@@ -1655,3 +1871,72 @@ class TestCLIPreAgentChecks:
             )
 
             mock_gh_cls.assert_not_called()
+
+
+class TestWebhookCompactSummaryCounts:
+    """Tests that webhook compact summaries match postable inline comments."""
+
+    @pytest.mark.asyncio
+    async def test_webhook_compact_delta_body_uses_postable_new_finding_count(self):
+        """Webhook compact delta body counts only inline findings that will be posted."""
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        findings = [_finding(title=f"Issue {i}", line_start=10 + i) for i in range(4)]
+        postable_findings = findings[:2]
+        review = ConsolidatedReview(
+            id="r1",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=findings,
+            summary="Four issues",
+            agent_count=1,
+            review_quality_score=0.9,
+            total_review_time_ms=1000,
+        )
+        delta = ReviewDelta(
+            new_findings=findings,
+            fixed_findings=[],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.head.sha = "new_sha"
+        mock_pr.get_labels.return_value = []
+
+        mock_gh = MagicMock()
+        mock_gh.get_pull_request.return_value = mock_pr
+        mock_gh.get_review_metadata.return_value = None
+        mock_gh.compute_review_delta.return_value = delta
+        mock_gh.get_postable_inline_findings.return_value = postable_findings
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "CURSOR_API_KEY": "test",
+                    "GITHUB_TOKEN": "test",
+                },
+            ),
+            patch("ai_reviewer.config.load_config"),
+            patch(
+                "ai_reviewer.review.review_pr_with_cursor_agent",
+                return_value=review,
+            ),
+            patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
+        ):
+            from ai_reviewer.github import webhook
+            from ai_reviewer.github.webhook import _setup_default_review_handler
+
+            _setup_default_review_handler()
+
+            handler = webhook._review_handler
+            assert handler is not None
+            await handler(repo="test/repo", pr_number=42)
+
+            post_args = mock_gh.post_review.call_args
+            assert post_args is not None
+            assert "🆕 2 new" in post_args.args[1]
+            assert "🆕 4 new" not in post_args.args[1]
+            assert post_args.kwargs["inline_findings"] == postable_findings

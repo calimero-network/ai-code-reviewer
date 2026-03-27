@@ -214,18 +214,26 @@ def _setup_default_review_handler() -> None:
                         repo,
                         pr_number,
                     )
-                    recheck_review = await review_pr_with_cursor_agent(
-                        repo=repo,
-                        pr_number=pr_number,
-                        cursor_config=cursor_config,
-                        github_token=github_token,
-                        num_agents=1,
-                        enable_cross_review=False,
-                        min_validation_agreement=min_agreement,
-                        config=webhook_config,
-                    )
+                    try:
+                        recheck_review = await review_pr_with_cursor_agent(
+                            repo=repo,
+                            pr_number=pr_number,
+                            cursor_config=cursor_config,
+                            github_token=github_token,
+                            num_agents=1,
+                            enable_cross_review=False,
+                            min_validation_agreement=min_agreement,
+                            config=webhook_config,
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            "LGTM re-check failed for %s PR #%d; falling back to normal review: %s",
+                            repo,
+                            pr_number,
+                            e,
+                        )
 
-                    if not recheck_review.findings:
+                    if recheck_review is not None and not recheck_review.findings:
                         lgtm_review_count = meta.review_count + 1
                         new_meta = ReviewMeta.build(
                             commit_sha=current_sha,
@@ -247,12 +255,13 @@ def _setup_default_review_handler() -> None:
                         )
                         return
 
-                    logger.info(
-                        "Re-check found %d issue(s) for %s PR #%d — falling back to normal flow",
-                        len(recheck_review.findings),
-                        repo,
-                        pr_number,
-                    )
+                    if recheck_review is not None:
+                        logger.info(
+                            "Re-check found %d issue(s) for %s PR #%d — falling back to normal flow",
+                            len(recheck_review.findings),
+                            repo,
+                            pr_number,
+                        )
 
             if recheck_review is not None and recheck_review.findings:
                 review = recheck_review
@@ -305,19 +314,38 @@ def _setup_default_review_handler() -> None:
                 finding_hashes=finding_hashes,
             )
 
-            new_findings = delta.new_findings if delta.previous_comments else review.findings
-            use_compact_body = len(new_findings) > 0
+            max_total = _get_env_int("MAX_TOTAL_FINDINGS", 50)
+            max_per_file = _get_env_int("MAX_FINDINGS_PER_FILE", 10)
+            candidate_inline_findings = (
+                delta.new_findings if delta.previous_comments else review.findings
+            )
+            postable_inline_findings = gh.get_postable_inline_findings(
+                pr,
+                inline_findings=candidate_inline_findings,
+                max_total=max_total,
+                max_per_file=max_per_file,
+            )
+            use_compact_body = len(postable_inline_findings) > 0
 
             if delta.previous_comments:
                 body = (
-                    formatter.format_review_with_delta_compact(review, delta, meta=new_meta)
+                    formatter.format_review_with_delta_compact(
+                        review,
+                        delta,
+                        meta=new_meta,
+                        inline_new_findings=postable_inline_findings,
+                    )
                     if use_compact_body
                     else formatter.format_review_with_delta(review, delta, meta=new_meta)
                 )
                 action = formatter.get_review_action_with_delta(review, delta, allow_approve=False)
             else:
                 body = (
-                    formatter.format_review_compact(review, meta=new_meta)
+                    formatter.format_review_compact(
+                        review,
+                        meta=new_meta,
+                        inline_findings=postable_inline_findings,
+                    )
                     if use_compact_body
                     else formatter.format_review(review, meta=new_meta)
                 )
@@ -327,13 +355,11 @@ def _setup_default_review_handler() -> None:
                 resolved = gh.resolve_fixed_comments(pr, delta)
                 logger.info(f"Resolved {resolved} comments")
 
-            max_total = _get_env_int("MAX_TOTAL_FINDINGS", 50)
-            max_per_file = _get_env_int("MAX_FINDINGS_PER_FILE", 10)
             posted = gh.post_review(
                 pr,
                 body,
                 action,
-                inline_findings=new_findings or None,
+                inline_findings=postable_inline_findings or None,
                 max_total=max_total,
                 max_per_file=max_per_file,
             )

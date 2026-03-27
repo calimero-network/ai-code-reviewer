@@ -88,7 +88,10 @@ class GitHubFormatter:
         return "\n".join(lines)
 
     def format_review_compact(
-        self, review: ConsolidatedReview, meta: ReviewMeta | None = None
+        self,
+        review: ConsolidatedReview,
+        meta: ReviewMeta | None = None,
+        inline_findings: list | None = None,
     ) -> str:
         """Format a minimal top-level body when inline comments are posted.
 
@@ -96,10 +99,11 @@ class GitHubFormatter:
         comment stays short; details live on the code.
         """
         header = self._format_header(review)
-        if not review.findings:
+        findings_for_inline = review.findings if inline_findings is None else inline_findings
+        if not findings_for_inline:
             body = "✅ No issues found. LGTM!"
         else:
-            by_sev = review.findings_by_severity
+            by_sev = self._count_findings_by_severity(findings_for_inline)
             parts = []
             if by_sev.get(Severity.CRITICAL, 0) > 0:
                 parts.append(f"🔴 {by_sev[Severity.CRITICAL]} critical")
@@ -131,17 +135,19 @@ class GitHubFormatter:
         review: ConsolidatedReview,
         delta: ReviewDelta,
         meta: ReviewMeta | None = None,
+        inline_new_findings: list | None = None,
     ) -> str:
         """Format a minimal top-level body when inline comments are posted (with delta)."""
         header = self._format_header(review)
         if delta.all_issues_resolved:
             body = "✅ All issues resolved. Ready to merge!"
         else:
+            new_findings = delta.new_findings if inline_new_findings is None else inline_new_findings
             parts = []
             if delta.fixed_findings:
                 parts.append(f"✅ {len(delta.fixed_findings)} fixed")
-            if delta.new_findings:
-                parts.append(f"🆕 {len(delta.new_findings)} new")
+            if new_findings:
+                parts.append(f"🆕 {len(new_findings)} new")
             if delta.open_findings:
                 parts.append(f"⏳ {len(delta.open_findings)} open")
             body = (
@@ -416,6 +422,13 @@ class GitHubFormatter:
                 groups[finding.severity] = []
             groups[finding.severity].append(finding)
         return groups
+
+    def _count_findings_by_severity(self, findings: list) -> dict[Severity, int]:
+        """Count findings by severity for compact summaries."""
+        counts: dict[Severity, int] = dict.fromkeys(Severity, 0)
+        for finding in findings:
+            counts[finding.severity] += 1
+        return counts
 
     def get_review_action_with_delta(
         self,
