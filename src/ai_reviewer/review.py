@@ -1074,7 +1074,14 @@ async def review_pr_with_cursor_agent(
             len(secret_findings),
         )
 
-    ignore_patterns = (context.repo_config or {}).get("ignore", [])
+    raw_ignore = (context.repo_config or {}).get("ignore", [])
+    ignore_patterns = (
+        raw_ignore
+        if isinstance(raw_ignore, list)
+        else [raw_ignore]
+        if isinstance(raw_ignore, str)
+        else []
+    )
     if ignore_patterns:
         pre_file_count = len(files)
         files = filter_by_ignore_patterns(files, ignore_patterns)
