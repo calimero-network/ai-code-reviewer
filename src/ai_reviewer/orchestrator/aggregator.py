@@ -13,6 +13,7 @@ from ai_reviewer.models.findings import (
     Severity,
 )
 from ai_reviewer.models.review import AgentReview, ConsolidatedReview
+from ai_reviewer.review import compute_quality_score
 
 logger = logging.getLogger(__name__)
 
@@ -81,8 +82,9 @@ class ReviewAggregator:
         # Generate summary
         summary = self._generate_summary(consolidated_findings, len(reviews))
 
-        # Compute quality score
-        quality_score = self._compute_quality_score(reviews, consolidated_findings)
+        quality_score, score_breakdown = compute_quality_score(
+            consolidated_findings, len(reviews), total_lines=0
+        )
 
         # Calculate total review time
         total_time = sum(r.review_time_ms for r in reviews)
@@ -98,6 +100,7 @@ class ReviewAggregator:
             review_quality_score=quality_score,
             total_review_time_ms=total_time,
             agent_reviews=reviews,
+            score_breakdown=score_breakdown,
         )
 
     def _extract_tagged_findings(
@@ -261,25 +264,6 @@ class ReviewAggregator:
 
         return f"Found {', '.join(parts)} across {len(findings)} unique issues."
 
-    def _compute_quality_score(
-        self, reviews: list[AgentReview], findings: list[ConsolidatedFinding]
-    ) -> float:
-        """Compute overall review quality score."""
-        if not reviews:
-            return 0.0
-
-        if not findings:
-            # Clean review with multiple agents = high confidence
-            return round(min(0.95, 0.7 + (len(reviews) * 0.1)), 2)
-
-        # Average consensus across findings
-        avg_consensus = sum(f.consensus_score for f in findings) / len(findings)
-
-        # Factor in number of agents
-        agent_factor = min(1.0, len(reviews) / 3)  # Optimal at 3+ agents
-
-        return round(avg_consensus * agent_factor, 2)
-
     def _empty_review(self, repo: str, pr_number: int) -> ConsolidatedReview:
         """Create an empty review (no agents)."""
         return ConsolidatedReview(
@@ -299,6 +283,7 @@ class ReviewAggregator:
     ) -> ConsolidatedReview:
         """Create a clean review (no findings)."""
         total_time = sum(r.review_time_ms for r in reviews)
+        clean_score, score_breakdown = compute_quality_score([], len(reviews), total_lines=0)
         return ConsolidatedReview(
             id=f"review-{uuid.uuid4().hex[:8]}",
             created_at=datetime.now(),
@@ -307,7 +292,8 @@ class ReviewAggregator:
             findings=[],
             summary=f"✅ No issues found by {len(reviews)} agents. LGTM!",
             agent_count=len(reviews),
-            review_quality_score=round(min(0.95, 0.7 + (len(reviews) * 0.1)), 2),
+            review_quality_score=clean_score,
             total_review_time_ms=total_time,
             agent_reviews=reviews,
+            score_breakdown=score_breakdown,
         )

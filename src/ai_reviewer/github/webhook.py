@@ -131,7 +131,11 @@ def _setup_default_review_handler() -> None:
     """
     from ai_reviewer.agents.cursor_client import CursorConfig
     from ai_reviewer.config import load_config
-    from ai_reviewer.github.client import GitHubClient
+    from ai_reviewer.github.client import (
+        GitHubClient,
+        estimate_review_count,
+        should_skip_review,
+    )
     from ai_reviewer.github.formatter import GitHubFormatter
     from ai_reviewer.review import review_pr_with_cursor_agent
 
@@ -199,6 +203,24 @@ def _setup_default_review_handler() -> None:
             formatter = GitHubFormatter("AI Code Reviewer")
 
             delta = gh.compute_review_delta(pr, review.findings)
+
+            force_review = any(label.name.lower() == "force-review" for label in pr.get_labels())
+
+            if delta.previous_comments and not force_review:
+                review_count = estimate_review_count(delta)
+                if should_skip_review(review_count, delta):
+                    logger.info(
+                        "Convergence detected for %s PR #%d — skipping post "
+                        "(review_count=%d, open=%d, new=%d, fixed=%d)",
+                        repo,
+                        pr_number,
+                        review_count,
+                        len(delta.open_findings),
+                        len(delta.new_findings),
+                        len(delta.fixed_findings),
+                    )
+                    return
+
             new_findings = delta.new_findings if delta.previous_comments else review.findings
             use_compact_body = len(new_findings) > 0
 

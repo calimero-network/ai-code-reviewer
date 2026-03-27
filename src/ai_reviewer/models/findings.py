@@ -1,7 +1,25 @@
 """Finding models for code review results."""
 
+import hashlib
+import re
 from dataclasses import dataclass, field
 from enum import Enum
+
+_FUZZY_WORD_RE = re.compile(r"\b\w{4,}\b")
+
+
+def compute_fuzzy_hash(file_path: str, title: str) -> str | None:
+    """12-char hex SHA256 key from file path and title keywords for fuzzy matching.
+
+    Returns None when file_path or title is empty. Uses words of 4+ characters
+    from the title; when none match, falls back to the lowercased stripped title.
+    """
+    if not file_path or not title:
+        return None
+    words = sorted(set(_FUZZY_WORD_RE.findall(title.lower())))
+    word_key = ":".join(words[:5]) if words else title.lower().strip()
+    key = f"{file_path}:{word_key}"
+    return hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
 class Severity(Enum):
@@ -87,11 +105,19 @@ class ConsolidatedFinding:
         hash stays stable when AI-generated titles vary in casing/whitespace or
         when severity is re-assessed between runs.
         """
-        import hashlib
-
         normalized_title = self.title.lower().strip()
         key = f"{self.file_path or ''}:{self.line_start or 0}:{normalized_title}"
         return hashlib.sha256(key.encode()).hexdigest()[:12]
+
+    @property
+    def finding_hash_fuzzy(self) -> str | None:
+        """Fuzzy hash ignoring line number and category for cross-run matching.
+
+        Uses file_path + sorted title keywords (4+ chars) so the hash stays
+        stable when a finding drifts lines or gets recategorized between runs.
+        Returns None when file_path or title is empty (mirrors PreviousComment).
+        """
+        return compute_fuzzy_hash(self.file_path, self.title)
 
     @property
     def priority_score(self) -> float:

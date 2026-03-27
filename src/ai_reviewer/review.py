@@ -16,10 +16,13 @@ Severity semantics: see ai_reviewer.models.findings.Severity.
 """
 
 import asyncio
+import fnmatch
 import json
 import logging
 import re
+from collections import defaultdict
 from collections.abc import Callable
+from copy import deepcopy
 from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any
@@ -29,7 +32,7 @@ from ai_reviewer.agents.cursor_client import CursorClient, CursorConfig
 from ai_reviewer.github.client import GitHubClient
 from ai_reviewer.models.context import ReviewContext
 from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
-from ai_reviewer.models.review import ConsolidatedReview
+from ai_reviewer.models.review import ConsolidatedReview, ScoreBreakdown
 from ai_reviewer.security.scanner import scan_for_secrets
 
 logger = logging.getLogger(__name__)
@@ -119,6 +122,168 @@ def _detect_pr_type(changed_paths: list[str]) -> str:
     return "code"
 
 
+def classify_pr(
+    changed_paths: list[str],
+    additions: int = 0,
+    deletions: int = 0,
+) -> tuple[str, str]:
+    """Classify a PR by type (docs/ci/code) and size (trivial/small/medium/large).
+
+    Reuses ``_detect_pr_type`` for the type half and buckets
+    ``additions + deletions`` for size:
+      < 50  → trivial
+      < 200 → small
+      < 1000 → medium
+      ≥ 1000 → large
+    """
+    pr_type = _detect_pr_type(changed_paths)
+    total = additions + deletions
+    if total < 50:
+        pr_size = "trivial"
+    elif total < 200:
+        pr_size = "small"
+    elif total < 1000:
+        pr_size = "medium"
+    else:
+        pr_size = "large"
+    return pr_type, pr_size
+
+
+_DIFF_FILE_HEADER_RE = re.compile(r"^diff --git a/.+ b/(.+)$")
+
+
+def _compile_ignore_patterns(patterns: list[str]) -> list[re.Pattern[str]]:
+    """Pre-compile fnmatch patterns into regex for efficient repeated matching."""
+    return [re.compile(fnmatch.translate(p)) for p in patterns]
+
+
+def filter_by_ignore_patterns(files: dict[str, str], patterns: list[str]) -> dict[str, str]:
+    """Remove entries whose path matches any of the fnmatch *patterns*."""
+    if not patterns:
+        return files
+    compiled = _compile_ignore_patterns(patterns)
+    return {
+        path: content for path, content in files.items() if not any(c.match(path) for c in compiled)
+    }
+
+
+def filter_diff_by_ignore_patterns(diff: str, patterns: list[str]) -> str:
+    """Drop entire file sections from a unified diff when the path matches *patterns*.
+
+    Splits on ``diff --git`` boundaries and reassembles only non-matching sections.
+    """
+    if not patterns:
+        return diff
+
+    compiled = _compile_ignore_patterns(patterns)
+    sections: list[str] = []
+    current_section: list[str] = []
+    current_file: str | None = None
+
+    for line in diff.splitlines(keepends=True):
+        header_match = _DIFF_FILE_HEADER_RE.match(line.rstrip("\n"))
+        if header_match:
+            if (
+                current_section
+                and current_file is not None
+                and not any(c.match(current_file) for c in compiled)
+            ):
+                sections.append("".join(current_section))
+            current_section = [line]
+            current_file = header_match.group(1)
+        else:
+            current_section.append(line)
+
+    if (
+        current_section
+        and current_file is not None
+        and not any(c.match(current_file) for c in compiled)
+    ):
+        sections.append("".join(current_section))
+
+    return "".join(sections)
+
+
+_LANGUAGE_RULES: dict[str, str] = {
+    "python": (
+        "For Python:\n"
+        "- Mutable default arguments (e.g. `def f(x=[])`) — flag every occurrence.\n"
+        "- Bare `except:` or `except Exception:` without re-raise — require specific exception types.\n"
+        "- Missing type hints on public function signatures.\n"
+        '- f-string injection in `logging.info(f"...")` — use `logging.info("...", arg)` instead.\n'
+        "- Missing context managers (`with`) for file handles, DB connections, locks.\n"
+        "- `subprocess` calls with `shell=True` — flag as security risk.\n"
+        "- Shadowing built-in names (`id`, `type`, `list`, `dict`, `input`, `hash`).\n"
+        "- `import *` usage — require explicit imports.\n"
+        "- Missing `__all__` in library/package modules that define a public API.\n"
+        "- `os.path` usage where `pathlib.Path` is preferred in modern Python."
+    ),
+    "rust": (
+        "For Rust:\n"
+        "- `.unwrap()` / `.expect()` in non-test code — require proper error propagation with `?` or `match`.\n"
+        "- `unsafe` blocks without a `// SAFETY:` comment justifying invariants.\n"
+        "- Unnecessary `.clone()` — flag when borrowing or references would suffice.\n"
+        "- Unbounded allocations: `Vec::new()` in loops without pre-allocated capacity, or "
+        "`collect()` on unbounded iterators without size hints.\n"
+        "- Missing lifetime annotations where the compiler cannot elide them.\n"
+        "- `panic!()` / `todo!()` / `unimplemented!()` in library code — should return `Result`.\n"
+        "- Mutex poisoning: using `.lock().unwrap()` without handling `PoisonError`.\n"
+        "- Large types on the stack — suggest `Box<T>` for types > ~1KB.\n"
+        "- Missing `#[must_use]` on functions returning `Result` or important values.\n"
+        "- `String` vs `&str` in function parameters — prefer `&str` / `impl AsRef<str>` for inputs."
+    ),
+    "javascript": (
+        "For JavaScript:\n"
+        "- Prototype pollution via unguarded `Object.assign` or bracket notation from user input.\n"
+        "- `==` vs `===` — require strict equality everywhere.\n"
+        "- Unhandled Promise rejections: missing `.catch()` or `try/catch` around `await`.\n"
+        "- `eval()`, `new Function()`, `innerHTML` — flag as security risks.\n"
+        "- Missing input sanitization on user-facing data (XSS vectors).\n"
+        "- `var` usage — require `const`/`let`.\n"
+        "- Callback hell — suggest async/await refactoring when nesting > 2 levels.\n"
+        "- Missing `AbortController` for fetch calls that should be cancellable.\n"
+        "- `JSON.parse()` without try/catch.\n"
+        "- Regex denial-of-service (ReDoS) — flag catastrophic backtracking patterns."
+    ),
+    "typescript": (
+        "For TypeScript:\n"
+        "- `any` type escapes — flag every `any` that isn't explicitly justified.\n"
+        "- Type assertions (`as T`) that bypass type safety — prefer type guards.\n"
+        "- `@ts-ignore` / `@ts-expect-error` without justification comment.\n"
+        "- Missing error boundaries in React components (when JSX is present).\n"
+        "- `==` vs `===` — require strict equality everywhere.\n"
+        "- Unhandled Promise rejections: missing `.catch()` or `try/catch` around `await`.\n"
+        "- `eval()`, `new Function()`, `innerHTML` — flag as security risks.\n"
+        "- Missing input sanitization on user-facing data (XSS vectors).\n"
+        "- `JSON.parse()` without try/catch.\n"
+        "- Regex denial-of-service (ReDoS) — flag catastrophic backtracking patterns."
+    ),
+    "go": (
+        "For Go:\n"
+        "- Unchecked errors: every returned `error` must be checked or explicitly ignored with `_`.\n"
+        "- SQL string concatenation — use parameterized queries to prevent injection.\n"
+        "- Goroutine leaks: ensure goroutines have a termination path (context, done channel, timeout).\n"
+        "- Missing `defer` for resource cleanup (files, connections, locks).\n"
+        "- Nil pointer dereference: check interface/pointer values before use after type assertions.\n"
+        "- `sync.Mutex` without matching `Unlock` (prefer `defer mu.Unlock()` immediately after `Lock`).\n"
+        "- Unbuffered channel sends in goroutines without a receiver — can block forever.\n"
+        "- `init()` functions with side effects — prefer explicit initialization.\n"
+        "- Exported functions missing doc comments.\n"
+        "- `context.Background()` in request handlers — propagate the request context instead."
+    ),
+}
+
+
+def get_language_rules(languages: list[str]) -> str:
+    """Return language-specific review rules for the given languages."""
+    rules = []
+    for lang in languages:
+        rule = _LANGUAGE_RULES.get(lang.lower(), "")
+        if rule:
+            rules.append(rule)
+    return "\n\n".join(rules)
+
+
 def get_base_prompt(
     context: ReviewContext,
     diff: str,
@@ -126,13 +291,20 @@ def get_base_prompt(
     changed_paths: list[str] | None = None,
 ) -> str:
     """Build the base review prompt."""
-    pr_type = _detect_pr_type(changed_paths or list(file_contents.keys()))
+    paths = changed_paths or list(file_contents.keys())
+    pr_type, pr_size = classify_pr(paths, context.additions, context.deletions)
 
     pr_type_instruction = ""
     if pr_type == "docs":
         pr_type_instruction = "\n**This PR is docs-only (markdown).** Only report factual errors, broken links, or security-sensitive content. Do not suggest code style, tests, or nitpicks.\n"
     elif pr_type == "ci":
         pr_type_instruction = "\n**This PR is CI/workflow-only.** Focus on workflow correctness (paths, steps, secrets). Do not report code style or nitpicks.\n"
+
+    pr_size_instruction = ""
+    if pr_size in ("trivial", "small"):
+        pr_size_instruction = "\n**Small change — prioritize precision.** Only report findings you are confident about. Do not pad the review with low-value suggestions.\n"
+    elif pr_size == "large":
+        pr_size_instruction = "\n**Large change — prioritize high-severity issues.** Focus on architectural concerns, correctness, and security over minor style or nitpicks.\n"
 
     files_context = ""
     if file_contents:
@@ -149,11 +321,35 @@ def get_base_prompt(
     design_principles = """
 **Design principles to consider (when relevant):** SOLID (single responsibility, open/closed, Liskov substitution, interface segregation, dependency inversion); DRY (no duplicate logic—extract and reuse); KISS (keep it simple; avoid over-engineering); YAGNI (don't add code for hypothetical future needs); Composition over Inheritance (prefer composing over deep hierarchies); Law of Demeter (talk to immediate collaborators only, avoid long chains); Convention over Configuration where it fits. Only flag violations that meaningfully hurt maintainability or clarity—use "Nit:" for minor style preferences.
 """
+    conventions_section = ""
+    if context.conventions:
+        conventions_section = f"\n## Repository Conventions\n{context.conventions}\n"
+
+    _MAX_CUSTOM_RULES = 20
+    _MAX_RULE_LENGTH = 500
+
+    custom_rules_section = ""
+    if context.repo_config and context.repo_config.get("custom_rules"):
+        raw_rules = context.repo_config["custom_rules"]
+        validated = [
+            str(r)[:_MAX_RULE_LENGTH]
+            for r in raw_rules[:_MAX_CUSTOM_RULES]
+            if isinstance(r, (str, int, float))
+        ]
+        if validated:
+            rules_list = "\n".join(f"- {r}" for r in validated)
+            custom_rules_section = f"\n## Repository-Specific Rules\n{rules_list}\n"
+
+    lang_rules_section = ""
+    lang_rules = get_language_rules(context.repo_languages)
+    if lang_rules:
+        lang_rules_section = f"\n## Language-specific guidance\n{lang_rules}\n"
+
     return f"""You are performing a **code review** of a pull request.
 {review_standard}
 {what_to_look_for}
 {design_principles}
-{pr_type_instruction}
+{pr_type_instruction}{pr_size_instruction}
 ## Pull Request Information
 - **Repository**: {context.repo_name}
 - **PR #{context.pr_number}**: {context.pr_title}
@@ -164,7 +360,7 @@ def get_base_prompt(
 
 ## PR Description
 {context.pr_description or "No description provided."}
-
+{conventions_section}{custom_rules_section}{lang_rules_section}
 ## Code Changes (Diff)
 ```diff
 {diff[:50000]}
@@ -401,13 +597,9 @@ def apply_cross_review(
     remaining_original_order = [f.id for f in review.findings if f.id in set(new_ids)]
     order_changed = remaining_original_order != new_ids
 
-    # Recompute quality score from cross-review valid_ratio (findings filtered/reordered)
-    agent_factor = min(1.0, review.agent_count / 3)
-    if not new_findings:
-        quality_score = round(min(0.95, 0.7 + review.agent_count * 0.1), 2)
-    else:
-        avg_valid_ratio = sum(x[1] for x in kept) / len(kept)
-        quality_score = round(avg_valid_ratio * agent_factor, 2)
+    quality_score, score_breakdown = compute_quality_score(
+        new_findings, review.agent_count, total_lines=0
+    )
 
     summary = review.summary
     if n_dropped > 0 or order_changed:
@@ -429,6 +621,7 @@ def apply_cross_review(
         review_quality_score=quality_score,
         total_review_time_ms=review.total_review_time_ms,
         failed_agents=review.failed_agents,
+        score_breakdown=score_breakdown,
     )
 
 
@@ -556,11 +749,108 @@ CONFIDENCE_THRESHOLDS: dict[Severity, float] = {
 }
 
 
+_CROSS_FILE_ALSO_FOUND_CAP = 5
+
+
+def dedup_cross_file(
+    findings: list[ConsolidatedFinding],
+) -> list[ConsolidatedFinding]:
+    """Collapse repeated cross-file findings that share the same (category, title).
+
+    Groups of 1–2 are left unchanged.  Groups of 3+ are collapsed to a single
+    representative (the one with the highest ``priority_score``).  The
+    representative's description gets an appended "Also found in: …" note
+    listing the other file paths (capped to ``_CROSS_FILE_ALSO_FOUND_CAP``).
+    """
+    groups: dict[tuple[str, str], list[ConsolidatedFinding]] = defaultdict(list)
+    for f in findings:
+        key = (f.category.value.lower().strip(), f.title.lower().strip())
+        groups[key].append(f)
+
+    result: list[ConsolidatedFinding] = []
+    for group in groups.values():
+        if len(group) < 3:
+            result.extend(group)
+            continue
+
+        group.sort(key=lambda f: f.priority_score, reverse=True)
+        representative = deepcopy(group[0])
+
+        other_paths = [f.file_path for f in group[1:]]
+        if len(other_paths) > _CROSS_FILE_ALSO_FOUND_CAP:
+            shown = other_paths[:_CROSS_FILE_ALSO_FOUND_CAP]
+            note = ", ".join(shown) + f", and {len(other_paths) - _CROSS_FILE_ALSO_FOUND_CAP} more"
+        else:
+            note = ", ".join(other_paths)
+        representative.description = representative.description.rstrip()
+        representative.description += f"\n\nAlso found in: {note}"
+
+        result.append(representative)
+
+    return result
+
+
+def compute_quality_score(
+    findings: list[ConsolidatedFinding],
+    agent_count: int,
+    total_lines: int,
+) -> tuple[float, ScoreBreakdown]:
+    """Composite quality score factoring severity, density, consensus, and agents.
+
+    Returns a score between 0.0 and 0.95 and a component breakdown.
+
+    When ``total_lines`` is 0, density normalization is skipped (density penalty is 0).
+    """
+    if not findings:
+        raw_score = 0.85
+        agent_bonus = max(0.0, min(0.10, (agent_count - 1) * 0.05))
+        agent_factor = (raw_score + agent_bonus) / raw_score
+        combined = round(min(0.95, raw_score * agent_factor), 2)
+        breakdown = ScoreBreakdown(
+            severity_penalty=0.0,
+            density_penalty=0.0,
+            consensus_factor=1.0,
+            agent_factor=round(agent_factor, 4),
+            raw_score=raw_score,
+        )
+        return combined, breakdown
+
+    severity_weights = {
+        Severity.CRITICAL: 0.20,
+        Severity.WARNING: 0.06,
+        Severity.SUGGESTION: 0.02,
+        Severity.NITPICK: 0.005,
+    }
+    severity_penalty = sum(severity_weights.get(f.severity, 0.02) * f.confidence for f in findings)
+
+    if total_lines > 0:
+        density = len(findings) / max(total_lines / 100, 1)
+        density_penalty = min(0.15, density * 0.03)
+    else:
+        density_penalty = 0.0
+
+    avg_consensus = sum(f.consensus_score for f in findings) / len(findings)
+    consensus_factor = 0.8 + (avg_consensus * 0.2)
+    agent_factor = min(1.0, agent_count / 3)
+
+    raw_score = max(0.0, 1.0 - severity_penalty - density_penalty)
+    combined = raw_score * consensus_factor * agent_factor
+    breakdown = ScoreBreakdown(
+        severity_penalty=severity_penalty,
+        density_penalty=density_penalty,
+        consensus_factor=consensus_factor,
+        agent_factor=agent_factor,
+        raw_score=raw_score,
+    )
+    return round(min(0.95, combined), 2), breakdown
+
+
 def aggregate_findings(
     all_findings: list[tuple[str, list[dict], str]],
     repo: str,
     pr_number: int,
     confidence_thresholds: dict[Severity, float] | None = None,
+    total_lines: int = 0,
 ) -> ConsolidatedReview:
     """Aggregate findings from multiple agents."""
 
@@ -632,19 +922,17 @@ def aggregate_findings(
     if filtered_count > 0:
         logger.info("Confidence filter dropped %d finding(s)", filtered_count)
 
+    pre_dedup_count = len(consolidated)
+    consolidated = dedup_cross_file(consolidated)
+    dedup_count = pre_dedup_count - len(consolidated)
+    if dedup_count > 0:
+        logger.info("Cross-file dedup collapsed %d finding(s)", dedup_count)
+
     # Build combined summary
     combined_summary = "\n".join(summaries) if summaries else "Review completed"
 
-    # Compute quality score from consensus and agent count
     total_agents = len(all_findings)
-    if not consolidated:
-        # No findings: higher score for more agents (max 0.95)
-        quality_score = min(0.95, 0.7 + total_agents * 0.1)
-    else:
-        # With findings: score based on average consensus weighted by agent coverage
-        avg_consensus = sum(f.consensus_score for f in consolidated) / len(consolidated)
-        agent_factor = min(1.0, total_agents / 3)  # Full credit at 3+ agents
-        quality_score = round(avg_consensus * agent_factor, 2)
+    quality_score, score_breakdown = compute_quality_score(consolidated, total_agents, total_lines)
 
     return ConsolidatedReview(
         id=f"review-{uuid4().hex[:8]}",
@@ -657,6 +945,7 @@ def aggregate_findings(
         review_quality_score=quality_score,
         total_review_time_ms=0,
         failed_agents=failed_agents,
+        score_breakdown=score_breakdown,
     )
 
 
@@ -774,12 +1063,32 @@ async def review_pr_with_cursor_agent(
     files = gh.get_changed_files(pr)
     context = gh.build_review_context(pr, repo_obj)
 
+    context.repo_config = gh.load_repo_config(repo, ref=pr.head.sha)
+    context.conventions = gh.load_repo_conventions(repo, ref=pr.head.sha)
+
     secret_scan_exclude = config.review_policy.secret_scan_exclude if config else []
     secret_findings = scan_for_secrets(diff, exclude_patterns=secret_scan_exclude)
     if secret_findings:
         logger.warning(
             "Secret scanner detected %d potential secret(s) — these bypass aggregation/cross-review",
             len(secret_findings),
+        )
+
+    raw_ignore = (context.repo_config or {}).get("ignore", [])
+    ignore_patterns = (
+        raw_ignore
+        if isinstance(raw_ignore, list)
+        else [raw_ignore]
+        if isinstance(raw_ignore, str)
+        else []
+    )
+    if ignore_patterns:
+        pre_file_count = len(files)
+        files = filter_by_ignore_patterns(files, ignore_patterns)
+        diff = filter_diff_by_ignore_patterns(diff, ignore_patterns)
+        logger.info(
+            "Ignore patterns filtered %d file(s) from prompt inputs",
+            pre_file_count - len(files),
         )
 
     logger.info(f"Reviewing PR #{pr_number}: {context.pr_title}")
@@ -797,7 +1106,7 @@ async def review_pr_with_cursor_agent(
         enable_cross_review = False
 
     changed_paths = list(files.keys())
-    pr_type = _detect_pr_type(changed_paths)
+    pr_type, _pr_size = classify_pr(changed_paths, context.additions, context.deletions)
     if pr_type != "code":
         logger.info(f"PR type: {pr_type} – using context-aware review rules")
 
@@ -869,8 +1178,13 @@ async def review_pr_with_cursor_agent(
             Severity.SUGGESTION: config.aggregator.min_confidence_suggestion,
             Severity.NITPICK: config.aggregator.min_confidence_nitpick,
         }
+    total_lines = context.additions + context.deletions
     review = aggregate_findings(
-        list(all_findings), repo, pr_number, confidence_thresholds=confidence_thresholds
+        list(all_findings),
+        repo,
+        pr_number,
+        confidence_thresholds=confidence_thresholds,
+        total_lines=total_lines,
     )
 
     # Optional: cross-review round (agents validate and rank findings).

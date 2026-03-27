@@ -9,6 +9,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 import requests
+import yaml
 from github import Github
 from github.GithubException import GithubException
 from github.PullRequest import PullRequest
@@ -16,7 +17,7 @@ from github.PullRequestComment import PullRequestComment
 from github.Repository import Repository
 
 from ai_reviewer.models.context import ReviewContext
-from ai_reviewer.models.findings import ConsolidatedFinding
+from ai_reviewer.models.findings import ConsolidatedFinding, Severity, compute_fuzzy_hash
 from ai_reviewer.models.review import ConsolidatedReview
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,65 @@ def _raise_if_forbidden(exc: Exception) -> None:
 
 _RESOLVE_COMMENT_DELAY_S: float = float(os.environ.get("AI_REVIEWER_RESOLVE_DELAY", "0.2"))
 _MAX_RESOLVE_COMMENTS: int = int(os.environ.get("AI_REVIEWER_MAX_RESOLVE", "100"))
+_NO_LONGER_DETECTED_REPLY = (
+    "✅ **No longer detected** - This issue was not re-detected after the latest changes."
+)
+
+_RESOLVED_REPLY_MARKERS = (
+    _NO_LONGER_DETECTED_REPLY,
+    "✅ **Resolved**",
+    "✅ **No longer detected**",
+)
+
+
+def _is_resolved_reply(body: str) -> bool:
+    return any(marker in body for marker in _RESOLVED_REPLY_MARKERS)
+
+
+_SEVERITY_ORDER: list[Severity] = [
+    Severity.CRITICAL,
+    Severity.WARNING,
+    Severity.SUGGESTION,
+    Severity.NITPICK,
+]
+
+
+def _parse_severity(severity_str: str) -> Severity | None:
+    """Convert a severity string (from a previous comment) to a Severity enum.
+
+    Returns None for unrecognised values so callers can skip stabilization
+    rather than guessing.
+    """
+    try:
+        return Severity(severity_str.lower())
+    except ValueError:
+        return None
+
+
+def stabilize_severity(
+    current: Severity,
+    previous: Severity,
+    review_count: int,
+) -> Severity:
+    """Decide the effective severity for a matched finding.
+
+    * Same severity → keep current.
+    * Upgrade (more severe) → always allowed.
+    * Downgrade (less severe) → blocked once ``review_count >= 2``.
+    """
+    if current is previous:
+        return current
+
+    cur_idx = _SEVERITY_ORDER.index(current)
+    prev_idx = _SEVERITY_ORDER.index(previous)
+
+    is_upgrade = cur_idx < prev_idx
+    if is_upgrade:
+        return current
+
+    if review_count >= 2:
+        return previous
+    return current
 
 
 def apply_comment_limits(
@@ -90,6 +150,16 @@ class PreviousComment:
     is_resolved: bool = False
     finding_hash: str | None = None  # Embedded hash for stable cross-run matching
 
+    @property
+    def finding_hash_fuzzy(self) -> str | None:
+        """Fuzzy hash for cross-run matching (ignores line, category).
+
+        Mirrors ConsolidatedFinding.finding_hash_fuzzy so that a previous
+        comment can be matched to a current finding even when the line number
+        or category has drifted between review runs.
+        """
+        return compute_fuzzy_hash(self.file_path, self.title)
+
 
 @dataclass
 class ReviewDelta:
@@ -104,6 +174,52 @@ class ReviewDelta:
     def all_issues_resolved(self) -> bool:
         """Check if all previously found issues are now resolved."""
         return len(self.open_findings) == 0 and len(self.new_findings) == 0
+
+
+def has_converged(delta: ReviewDelta) -> bool:
+    """Return True when the issue set is unchanged since the last review.
+
+    "Converged" means no new findings appeared and no previously-reported
+    findings were fixed — the delta is stable.  Open findings may still exist;
+    convergence is *not* the same as ``ReviewDelta.all_issues_resolved``.
+    """
+    return len(delta.new_findings) == 0 and len(delta.fixed_findings) == 0
+
+
+def should_skip_review(review_count: int, delta: ReviewDelta) -> bool:
+    """Decide whether to skip posting a review for this run.
+
+    Rules:
+    * review_count <= 1  → never skip (first review always posts).
+    * review_count >= 2  → skip when ``has_converged(delta)`` is True.
+    * review_count >= 3  → also skip when the only new findings are NITPICKs
+      (the issue set is "effectively" unchanged).
+    """
+    if review_count <= 1:
+        return False
+
+    if has_converged(delta):
+        return True
+
+    if review_count >= 3 and delta.new_findings and not delta.fixed_findings:
+        all_nitpicks = all(f.severity == Severity.NITPICK for f in delta.new_findings)
+        if all_nitpicks:
+            return True
+
+    return False
+
+
+def estimate_review_count(delta: ReviewDelta) -> int:
+    """Approximate how many review rounds have occurred.
+
+    Uses the number of previous comments as a proxy.  Zero previous comments
+    means this is the first review (count=1).  Any previous comments imply at
+    least a second review (count=2+).  The exact count is intentionally coarse;
+    refine later without changing the gate interface.
+    """
+    if not delta.previous_comments:
+        return 1
+    return max(2, len(delta.previous_comments) // 3 + 1)
 
 
 class GitHubClient:
@@ -269,6 +385,71 @@ class GitHubClient:
             repo_languages=languages,
         )
 
+    _CONVENTION_FILES = [
+        "AGENTS.md",
+        "CLAUDE.md",
+        "CONTRIBUTING.md",
+        ".cursor/rules/README.md",
+    ]
+    _CONVENTION_PER_FILE_LIMIT = 10000
+    _CONVENTION_TOTAL_LIMIT = 30000
+
+    def load_repo_config(self, repo_name: str, ref: str) -> dict | None:
+        """Best-effort load of ``.ai-reviewer.yaml`` from the repo at *ref*.
+
+        Returns the parsed dict on success, or ``None`` when the file is
+        missing or contains invalid YAML.  403 Forbidden is re-raised via
+        ``_raise_if_forbidden`` so callers surface permission problems.
+        """
+        repo = self._gh.get_repo(repo_name)
+        try:
+            content = repo.get_contents(".ai-reviewer.yaml", ref=ref)
+            if isinstance(content, list):
+                logger.warning(".ai-reviewer.yaml resolved to multiple entries; ignoring")
+                return None
+            parsed = yaml.safe_load(content.decoded_content)
+            if isinstance(parsed, dict):
+                return parsed
+            logger.warning(".ai-reviewer.yaml did not parse to a dict; ignoring")
+            return None
+        except Exception as e:
+            _raise_if_forbidden(e)
+            logger.debug("Could not load .ai-reviewer.yaml: %s", e)
+            return None
+
+    def load_repo_conventions(self, repo_name: str, ref: str) -> str | None:
+        """Best-effort load and concatenation of convention docs from the repo.
+
+        Reads each file in ``_CONVENTION_FILES`` (in order), truncates each to
+        ``_CONVENTION_PER_FILE_LIMIT`` chars, joins them with a header, and
+        truncates the combined result to ``_CONVENTION_TOTAL_LIMIT`` chars.
+
+        Returns ``None`` when no convention files are found.
+        """
+        repo = self._gh.get_repo(repo_name)
+        parts: list[str] = []
+        for path in self._CONVENTION_FILES:
+            try:
+                content = repo.get_contents(path, ref=ref)
+                if isinstance(content, list):
+                    logger.debug("Convention path %s resolved to multiple entries; skipping", path)
+                    continue
+                text = content.decoded_content.decode("utf-8", errors="replace")
+                if len(text) > self._CONVENTION_PER_FILE_LIMIT:
+                    text = text[: self._CONVENTION_PER_FILE_LIMIT] + "\n…(truncated)"
+                parts.append(f"### {path}\n{text}")
+            except Exception as e:
+                _raise_if_forbidden(e)
+                logger.debug("Convention file %s not found or unreadable: %s", path, e)
+
+        if not parts:
+            return None
+
+        combined = "\n\n".join(parts)
+        if len(combined) > self._CONVENTION_TOTAL_LIMIT:
+            combined = combined[: self._CONVENTION_TOTAL_LIMIT] + "\n…(truncated)"
+        return combined
+
     def _dismiss_pending_reviews(self, pr: PullRequest) -> bool:
         """Dismiss any pending reviews from the current user.
 
@@ -414,8 +595,8 @@ class GitHubClient:
 
         # Get review comments (inline comments on code)
         for comment in pr.get_review_comments():
-            # Skip our own "Resolved" replies - they are not findings
-            if "✅ **Resolved**" in comment.body:
+            # Skip our own resolved / "no longer detected" replies - they are not findings
+            if _is_resolved_reply(comment.body):
                 continue
 
             user_login = comment.user.login
@@ -495,27 +676,39 @@ class GitHubClient:
         previous_comments = self.get_previous_review_comments(pr)
         delta = ReviewDelta(previous_comments=previous_comments)
 
-        # Build two lookups: hash-based (preferred) and title-based (fallback for old comments)
+        # Build three lookups: strict hash, fuzzy hash, and title-based (legacy fallback)
         hash_lookup: dict[str, PreviousComment] = {}
+        fuzzy_lookup: dict[str, PreviousComment] = {}
         title_lookup: dict[tuple[str, int, str], PreviousComment] = {}
         for comment in previous_comments:
             if comment.finding_hash:
                 hash_lookup[comment.finding_hash] = comment
+            fuzzy = comment.finding_hash_fuzzy
+            if fuzzy:
+                fuzzy_lookup[fuzzy] = comment
             key = (comment.file_path, comment.line, self._normalize_title(comment.title))
             title_lookup[key] = comment
 
         # Track which previous comments are still open
         matched_previous: set[int] = set()
 
+        review_count = estimate_review_count(delta)
+
         for finding in current_findings:
-            # Prefer hash match (stable across title/line drift) then fall back to title match
+            # Three-tier matching: strict hash → fuzzy hash → title+line
             matched_comment = hash_lookup.get(finding.finding_hash)
+            if matched_comment is None:
+                fuzzy_hash = finding.finding_hash_fuzzy
+                if fuzzy_hash is not None:
+                    matched_comment = fuzzy_lookup.get(fuzzy_hash)
             if matched_comment is None:
                 key = (finding.file_path, finding.line_start, self._normalize_title(finding.title))
                 matched_comment = title_lookup.get(key)
 
             if matched_comment is not None:
-                # This finding was already reported - it's still OPEN
+                prev_sev = _parse_severity(matched_comment.severity)
+                if prev_sev is not None:
+                    finding.severity = stabilize_severity(finding.severity, prev_sev, review_count)
                 delta.open_findings.append(finding)
                 matched_previous.add(matched_comment.id)
             else:
@@ -528,7 +721,8 @@ class GitHubClient:
         # 2. The file was deleted (status=removed) - no patch for binary/large files, OR
         # 3. The commented line was modified AND the AI didn't find the issue again
         #
-        # This avoids false "Resolved" on unmodified code while still detecting
+        # This avoids false "no longer detected" replies on unmodified code while
+        # still detecting
         # actual fixes when the relevant lines were changed.
         pr_files = list(pr.get_files())
         changed_files = {f.filename for f in pr_files}
@@ -865,7 +1059,8 @@ class GitHubClient:
             )
 
         for fixed in findings_to_process:
-            # Skip if we've already marked this as resolved (avoid duplicate "Resolved" on re-review)
+            # Skip if we've already marked this as no longer detected
+            # (avoid duplicate replies on re-review)
             if fixed.id in existing_replies:
                 logger.debug(f"Comment {fixed.id} already has resolved reply, skipping")
                 continue
@@ -878,17 +1073,17 @@ class GitHubClient:
                 with contextlib.suppress(Exception):
                     comment.create_reaction("hooray")  # 🎉 reaction
 
-                # Post a reply indicating it's fixed
+                # Post a reply indicating the issue was not re-detected.
                 pr.create_review_comment_reply(
                     comment_id=fixed.id,
-                    body="✅ **Resolved** - This issue has been addressed in the latest changes.",
+                    body=_NO_LONGER_DETECTED_REPLY,
                 )
 
                 # Hand-in-hand: also resolve the thread in GitHub UI (collapse the conversation).
                 # Without this, the reply would show but the thread would stay "open".
                 if not self._resolve_thread_for_comment(fixed.id, thread_mapping):
                     logger.warning(
-                        f"Posted 'Resolved' reply on comment {fixed.id} but could not "
+                        f"Posted 'no longer detected' reply on comment {fixed.id} but could not "
                         "resolve the thread (GraphQL resolve failed or thread not found). "
                         "Thread may still appear open in the PR."
                     )
@@ -905,7 +1100,7 @@ class GitHubClient:
     def _get_resolved_comment_ids(
         self, pr: PullRequest, raw_comments: list | None = None
     ) -> set[int]:
-        """Get IDs of comments that already have a 'Resolved' reply from us.
+        """Get IDs of comments that already have a "no longer detected" reply from us.
 
         Args:
             pr: Pull request object
@@ -920,8 +1115,8 @@ class GitHubClient:
         comments = raw_comments if raw_comments is not None else pr.get_review_comments()
 
         for comment in comments:
-            # Check if this is a "Resolved" reply with a parent
-            if "✅ **Resolved**" not in comment.body:
+            # Check if this is our resolved / "no longer detected" reply with a parent
+            if not _is_resolved_reply(comment.body):
                 continue
 
             # Safely get in_reply_to_id (may be NotSet, None, or 0)
