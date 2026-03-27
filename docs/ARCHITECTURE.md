@@ -13,7 +13,6 @@
 6. [Convergence and "Stop Reviewing" Logic](#6-convergence-and-stop-reviewing-logic)
 7. [Prompt Engineering](#7-prompt-engineering)
 8. [Security](#8-security)
-9. [Phase Roadmap](#9-phase-roadmap)
 
 ---
 
@@ -392,53 +391,3 @@ In `apply_cross_review()`, findings with `severity == CRITICAL` and `category ==
 ### Webhook Security
 
 `verify_signature()` validates incoming webhook payloads using HMAC SHA-256 with the configured `GITHUB_WEBHOOK_SECRET`. The request body is read once and reused for both signature verification and JSON parsing.
-
----
-
-## 9. Phase Roadmap
-
-### Phase 1: Quick Wins — **Completed**
-
-| # | Item | Section |
-|---|------|---------|
-| 1 | Confidence-based filtering | 2a |
-| 2 | Adaptive agent count for small PRs | 2b |
-| 3 | Enforce max_total/max_per_file from config | 5c |
-| 4 | Secret detection pre-scan (regex + entropy) | 9a, 9b |
-| 5 | Few-shot examples in prompt | 1d |
-| 6 | Enhanced security agent prompt (OWASP) | 9d |
-| 7 | Adaptive max findings per agent | 2c |
-| 8 | Critical security bypass in cross-review | 9e |
-
-### Phase 2: Medium Effort — **Completed**
-
-| # | Item | Implementation Location |
-|---|------|------------------------|
-| 1 | Load `.ai-reviewer.yaml` from target repo | `client.py:load_repo_config()`, `load_repo_conventions()` |
-| 2 | New quality scoring formula | `review.py:compute_quality_score()`, `models/review.py:ScoreBreakdown` |
-| 3 | Multi-tier finding hash | `findings.py:compute_fuzzy_hash()`, `client.py:compute_review_delta()` 3-tier matching |
-| 4 | Cross-file deduplication | `review.py:dedup_cross_file()` |
-| 5 | Convergence detection | `client.py:has_converged()`, `should_skip_review()`, `estimate_review_count()` |
-| 6 | Severity stabilization across runs | `client.py:stabilize_severity()` |
-| 7 | PR size classification + adaptive prompts | `review.py:classify_pr()` |
-| 8 | Language-specific prompt rules | `review.py:_LANGUAGE_RULES`, `get_language_rules()` |
-
-### Phase 3: Architectural — **Planned**
-
-| # | Item | Depends On | Effort |
-|---|------|------------|--------|
-| 1 | Commit-aware incremental diffing | P2-3 | 1 week |
-| 2 | Large PR tiered review (architecture pass + hotspot detail) | — | 1 week |
-| 3 | Embedding-based semantic similarity (`sentence-transformers`) | — | 1 week |
-| 4 | Full `ReviewHistory` + re-open prevention | P2-3, P2-6 | 1 week |
-| 5 | Score damping with rolling average | P2-2, P3-4 | 3 days |
-| 6 | Consolidate dual aggregation paths | P2-2 | 3 days |
-
-### Convergence Improvements (Phase 3 Focus)
-
-The convergence system (Phase 2) provides the foundation. Phase 3 extends it with:
-
-- **Review metadata embedding**: Richer `<!-- ai-reviewer-meta: {...} -->` with review count, commit SHA, and timestamp — enabling pre-agent convergence checks.
-- **Pre-agent convergence check**: `should_skip_before_agents()` detects same-SHA and debounce scenarios before spending API calls on agents.
-- **LGTM fast path**: When `review_count ≥ 2` and all issues are resolved, post an `APPROVE` review without running agents.
-- **Debouncing**: Skip reviews within a configurable window (default 120s) of the last review on the same PR.
