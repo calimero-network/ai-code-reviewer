@@ -360,8 +360,6 @@ def _setup_default_review_handler() -> None:
                 body,
                 action,
                 inline_findings=postable_inline_findings or None,
-                max_total=max_total,
-                max_per_file=max_per_file,
             )
             logger.info(
                 "Posted review to %s PR #%d (%s, %d inline comments)",

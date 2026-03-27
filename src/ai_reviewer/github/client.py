@@ -614,23 +614,16 @@ class GitHubClient:
         body: str,
         event: str = "COMMENT",
         inline_findings: list[ConsolidatedFinding] | None = None,
-        max_total: int = 50,
-        max_per_file: int = 10,
     ) -> int:
         """Post a review to a PR, optionally with inline comments in a single API call.
 
-        When *inline_findings* is provided the top-level body and all inline
-        comments are submitted atomically via one ``create_review`` call.  This
-        prevents partial posting when a CI run is cancelled mid-flight.
+        When *inline_findings* is provided they must already be filtered via
+        ``get_postable_inline_findings``.  The top-level body and all inline
+        comments are submitted atomically via one ``create_review`` call.
 
         Returns the number of inline comments included in the review.
         """
-        comments = self._build_review_comments(
-            pr,
-            inline_findings=inline_findings,
-            max_total=max_total,
-            max_per_file=max_per_file,
-        )
+        comments = self._build_review_comments(inline_findings)
 
         logger.info(
             "Posting review to PR #%d: %s (%d inline comments)",
@@ -675,25 +668,22 @@ class GitHubClient:
 
         return len(comments)
 
+    @staticmethod
     def _build_review_comments(
-        self,
-        pr: PullRequest,
         inline_findings: list[ConsolidatedFinding] | None,
-        max_total: int,
-        max_per_file: int,
     ) -> list[ReviewComment]:
-        """Build atomic review comments, skipping lines not resolvable in the diff.
+        """Build atomic review comments from pre-filtered findings.
 
-        Each entry matches PyGithub's review comment shape: ``path``, ``line``, and ``body``,
-        suitable for ``PullRequest.create_review(..., comments=...)``.
+        Callers are responsible for filtering via ``get_postable_inline_findings``
+        before passing findings here.  Each entry matches PyGithub's review
+        comment shape: ``path``, ``line``, and ``body``, suitable for
+        ``PullRequest.create_review(..., comments=...)``.
         """
+        if not inline_findings:
+            return []
+
         comments: list[ReviewComment] = []
-        for finding in self.get_postable_inline_findings(
-            pr,
-            inline_findings=inline_findings,
-            max_total=max_total,
-            max_per_file=max_per_file,
-        ):
+        for finding in inline_findings:
             severity_emoji = {
                 "critical": "🔴",
                 "warning": "🟡",
@@ -780,10 +770,10 @@ class GitHubClient:
     def get_review_metadata(self, pr: PullRequest) -> ReviewMeta | None:
         """Extract ReviewMeta from the most recent bot review on this PR.
 
-        Iterates PR reviews in reverse chronological order, looking for the
-        ``<!-- ai-reviewer-meta: {...} -->`` HTML comment tag embedded by the
-        formatter.  Returns the parsed metadata or None when no metadata is
-        found (legacy reviews or first review).
+        Only checks the *most recent* review (and issue comment) from allowed
+        users.  If that review/comment lacks embedded metadata (legacy format),
+        returns ``None`` rather than searching older entries — this prevents
+        returning stale metadata from a much earlier review run.
         """
         allowed_users = self._get_allowed_users()
         try:
@@ -805,8 +795,13 @@ class GitHubClient:
                     meta.review_count,
                 )
                 return meta
+            logger.debug(
+                "Most recent bot review (id=%s) has no metadata; not searching older reviews",
+                review.id,
+            )
+            break
 
-        # Fallback: also check issue comments (posted via _post_as_comment fallback)
+        # Fallback: check the most recent issue comment from allowed users
         try:
             for comment in pr.get_issue_comments().reversed:
                 if comment.user is None or comment.user.login not in allowed_users:
@@ -819,6 +814,11 @@ class GitHubClient:
                         meta.review_count,
                     )
                     return meta
+                logger.debug(
+                    "Most recent bot issue comment (id=%s) has no metadata; not searching older comments",
+                    comment.id,
+                )
+                break
         except Exception as e:
             _raise_if_forbidden(e)
             logger.warning("Could not fetch issue comments for metadata: %s", e)

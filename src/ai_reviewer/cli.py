@@ -424,8 +424,6 @@ async def review_pr_async(
                 body,
                 action,
                 inline_findings=postable_inline_findings or None,
-                max_total=max_total,
-                max_per_file=max_per_file,
             )
             console.print(f"📝 Posted review to GitHub ({action}, {posted} inline comments)")
 

@@ -1202,9 +1202,6 @@ class TestPostReviewPendingRetry:
 
         mock_pr = MagicMock()
         mock_pr.number = 1
-        mock_pr.get_files.return_value = [
-            self._mock_pr_file("src/foo.py", "@@ -9,1 +9,2 @@\n old\n+new")
-        ]
 
         with patch("ai_reviewer.github.client.Github"):
             client = GitHubClient(token="test-token")
@@ -1214,8 +1211,8 @@ class TestPostReviewPendingRetry:
         assert count == 1
         mock_pr.create_review.assert_called_once()
 
-    def test_skips_inline_comments_not_resolvable_in_diff(self):
-        """Only diff-resolvable inline comments should be bundled into create_review."""
+    def test_get_postable_inline_findings_filters_non_resolvable(self):
+        """Only diff-resolvable inline comments are returned by get_postable_inline_findings."""
         from ai_reviewer.github.client import GitHubClient
 
         valid_finding = self._make_inline_finding()
@@ -1230,16 +1227,15 @@ class TestPostReviewPendingRetry:
 
         with patch("ai_reviewer.github.client.Github"):
             client = GitHubClient(token="test-token")
-            count = client.post_review(
+            postable = client.get_postable_inline_findings(
                 mock_pr,
-                "body",
                 inline_findings=[valid_finding, invalid_finding],
+                max_total=50,
+                max_per_file=10,
             )
 
-        assert count == 1
-        posted_comments = mock_pr.create_review.call_args.kwargs["comments"]
-        assert len(posted_comments) == 1
-        assert posted_comments[0]["line"] == 10
+        assert len(postable) == 1
+        assert postable[0].line_start == 10
 
     def test_dismisses_pending_and_retries_on_422(self):
         """On 422 pending review, dismiss and retry the same atomic create_review."""
@@ -1247,9 +1243,6 @@ class TestPostReviewPendingRetry:
 
         mock_pr = MagicMock()
         mock_pr.number = 1
-        mock_pr.get_files.return_value = [
-            self._mock_pr_file("src/foo.py", "@@ -9,1 +9,2 @@\n old\n+new")
-        ]
         mock_pr.create_review.side_effect = [
             self._pending_review_422(),
             None,  # retry succeeds
@@ -1272,9 +1265,6 @@ class TestPostReviewPendingRetry:
 
         mock_pr = MagicMock()
         mock_pr.number = 1
-        mock_pr.get_files.return_value = [
-            self._mock_pr_file("src/foo.py", "@@ -9,1 +9,2 @@\n old\n+new")
-        ]
         mock_pr.create_review.side_effect = [
             self._pending_review_422(),
             None,
@@ -1298,9 +1288,6 @@ class TestPostReviewPendingRetry:
 
         mock_pr = MagicMock()
         mock_pr.number = 1
-        mock_pr.get_files.return_value = [
-            self._mock_pr_file("src/foo.py", "@@ -9,1 +9,2 @@\n old\n+new")
-        ]
         mock_pr.create_review.side_effect = [
             self._pending_review_422(),
             self._pending_review_422(),  # retry also fails
@@ -1324,9 +1311,6 @@ class TestPostReviewPendingRetry:
 
         mock_pr = MagicMock()
         mock_pr.number = 1
-        mock_pr.get_files.return_value = [
-            self._mock_pr_file("src/foo.py", "@@ -9,1 +9,2 @@\n old\n+new")
-        ]
         mock_pr.create_review.side_effect = [
             self._pending_review_422(),
             self._pending_review_422(),
@@ -1410,9 +1394,6 @@ class TestPostReviewPendingRetry:
 
         mock_pr = MagicMock()
         mock_pr.number = 1
-        mock_pr.get_files.return_value = [
-            self._mock_pr_file("src/foo.py", "@@ -9,1 +9,2 @@\n old\n+new")
-        ]
         mock_pr.create_review.side_effect = [
             self._pending_review_422(),
             self._pending_review_422(),
