@@ -23,7 +23,10 @@ AI Code Reviewer orchestrates multiple LLM agents — each with a specialized fo
 ```mermaid
 flowchart LR
     PR["PR Event / CLI"]
-    PR --> Pipeline["review_pr_with_cursor_agent()"]
+    PR --> PreAgent["Metadata + Pre-Agent Gate"]
+    PreAgent -->|"same SHA"| Skip["Skip"]
+    PreAgent -->|"LGTM fast path"| LGTM["Zero-Agent LGTM Review"]
+    PreAgent -->|"needs agents"| Pipeline["review_pr_with_cursor_agent()"]
     Pipeline --> A1["Security Agent"]
     Pipeline --> A2["Performance Agent"]
     Pipeline --> A3["Quality Agent"]
@@ -32,8 +35,9 @@ flowchart LR
     A3 --> Agg
     Agg --> Delta["Delta Tracking"]
     Delta --> Conv{"Converged?"}
-    Conv -- yes --> Skip["Skip / LGTM"]
-    Conv -- no --> Post["Format + Post to GitHub"]
+    Conv -- yes --> Silent["Skip Posting"]
+    Conv -- no --> Post["Atomic GitHub Review Post"]
+    LGTM --> Post
 ```
 
 ### Module Map
@@ -75,6 +79,7 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     participant Trigger as Webhook / CLI
+    participant Meta as ReviewMeta + Pre-Agent Checks
     participant Review as review_pr_with_cursor_agent()
     participant Secret as scan_for_secrets()
     participant Agent as run_single_agent() × N
@@ -85,6 +90,8 @@ sequenceDiagram
     participant Fmt as GitHubFormatter
     participant GH as GitHubClient
 
+    Trigger->>Meta: get_review_metadata()
+    Meta-->>Trigger: same-SHA skip? / LGTM candidate?
     Trigger->>Review: repo, pr_number, config
     Review->>GH: get_pull_request, get_pr_diff, get_changed_files
     Review->>GH: load_repo_config, load_repo_conventions
@@ -103,7 +110,8 @@ sequenceDiagram
     Trigger->>Conv: should_skip_review(count, delta)
     Conv-->>Trigger: skip? (unless --force-review)
     Trigger->>Fmt: format_review_compact / format_review_delta
-    Trigger->>GH: post_review, resolve_fixed_comments, post_inline_comments
+    Trigger->>GH: resolve_fixed_comments()
+    Trigger->>GH: post_review(body + inline comments in one create_review call)
 ```
 
 ### Key Functions
@@ -111,7 +119,8 @@ sequenceDiagram
 - **`review_pr_with_cursor_agent()`** (`review.py`): Core orchestration. Fetches PR data, builds context, spawns agents in parallel, aggregates, cross-reviews, prepends secret findings, returns `ConsolidatedReview`.
 - **`run_single_agent()`** (`review.py`): Sends a prompt to one Cursor Background Agent, parses JSON response into findings.
 - **`aggregate_findings()`** (`review.py`): Clusters raw findings by similarity, computes consensus scores, applies confidence filtering and cross-file dedup.
-- **`default_review_handler()`** (`webhook.py`): Webhook's async handler — includes pre-agent skip checks, LGTM fast path, metadata embedding, and the full post flow.
+- **`default_review_handler()`** (`webhook.py`): Webhook's async handler — includes same-SHA pre-agent skip, diff-backed LGTM fast path, metadata embedding, and the full post flow.
+- **`GitHubClient.post_review()`** (`github/client.py`): Posts the top-level review body and optional inline comments atomically through a single `create_review()` call.
 
 ---
 
@@ -237,7 +246,13 @@ flowchart TD
 | **Fuzzy** | `SHA256(file_path:sorted_keywords_4+_chars)[:12]` | Line shifts, title rewording |
 | **Legacy** | `(file_path, line, normalized_title)` tuple | Fallback for pre-hash comments |
 
-Unmatched previous comments become `fixed_findings`.
+Unmatched previous comments become `fixed_findings` only when the diff suggests the old issue was actually touched:
+
+- the file is no longer in the diff
+- the file was deleted
+- the commented line falls inside the modified line ranges for that file
+
+`get_previous_review_comments()` is cached per-PR inside `GitHubClient` so the LGTM candidate check and later delta computation do not refetch the same review comments in a single run.
 
 ### Severity Stabilization
 
@@ -265,13 +280,13 @@ Top-level review comments embed structured metadata:
 <!-- ai-reviewer-meta: {"review_count": 2, "commit_sha": "abc123", "timestamp": "..."} -->
 ```
 
-Used by `should_skip_before_agents()` for same-SHA detection and debouncing, and by `check_lgtm_fast_path()` for the LGTM approval path.
+Used by `should_skip_before_agents()` for same-SHA detection and by `check_lgtm_fast_path()` for the LGTM path.
 
 ---
 
 ## 6. Convergence and "Stop Reviewing" Logic
 
-The convergence system prevents redundant reviews when findings have stabilized.
+The convergence system prevents redundant reviews when findings have stabilized, while still ensuring new commits are not skipped just because a recent review was posted.
 
 ### Decision Flowchart
 
@@ -283,16 +298,14 @@ flowchart TD
     Force -- no --> PreAgent["should_skip_before_agents()"]
     PreAgent --> SameSHA{"Same SHA as\nlast review?"}
     SameSHA -- yes --> SkipAlready["Skip: ALREADY_REVIEWED"]
-    SameSHA -- no --> Debounce{"Within debounce\nwindow (120s)?"}
-    Debounce -- yes --> SkipDebounce["Skip: DEBOUNCED"]
-    Debounce -- no --> LGTM{"LGTM fast path?\n(review_count ≥ 2,\nall issues resolved)"}
-    LGTM -- yes --> Approve["Post APPROVE, skip agents"]
+    SameSHA -- no --> LGTM{"LGTM fast path candidate?\n(review_count ≥ 2,\nprevious comments exist,\ndelta says all resolved)"}
+    LGTM -- yes --> Approve["Post zero-agent LGTM review"]
     LGTM -- no --> RunAgents
     RunAgents --> Delta["compute_review_delta()"]
     Delta --> EstCount["estimate_review_count()"]
     EstCount --> ShouldSkip{"should_skip_review()?"}
     ShouldSkip -- skip --> Silent["Skip posting (log only)"]
-    ShouldSkip -- post --> Format["Format + post review"]
+    ShouldSkip -- post --> Format["Resolve fixed + atomic post_review()"]
 ```
 
 ### Functions
@@ -302,8 +315,18 @@ flowchart TD
 | `has_converged(delta)` | `github/client.py` | `True` when `new_findings == 0` and `fixed_findings == 0` |
 | `should_skip_review(count, delta)` | `github/client.py` | Never skip first review; skip if converged on 2nd+; on 3rd+, also skip if only new findings are all NITPICK |
 | `estimate_review_count(delta)` | `github/client.py` | 1 if no previous comments; else `max(2, len(previous_comments) // 3 + 1)` |
-| `should_skip_before_agents(meta, sha, force)` | `github/client.py` | Same-SHA → `ALREADY_REVIEWED`; within debounce → `DEBOUNCED` |
-| `check_lgtm_fast_path(meta, delta)` | `github/client.py` | `review_count ≥ 2`, empty findings delta, `all_issues_resolved` |
+| `should_skip_before_agents(meta, sha, force)` | `github/client.py` | Same-SHA → `ALREADY_REVIEWED`; otherwise continue |
+| `check_lgtm_fast_path(pr, meta)` | `github/client.py` | `review_count ≥ 2`, previous comments exist, diff-backed empty-findings delta reports `all_issues_resolved` |
+
+### Current LGTM Fast Path Semantics
+
+The LGTM path currently posts a synthetic zero-agent review built by `lgtm_placeholder_review()` when all previously reported issues are inferred fixed. That inference is based on:
+
+- previous inline comments from prior AI reviews
+- current PR diff metadata (`pr.get_files()` patches and modified line ranges)
+- an empty current findings set passed into `compute_review_delta()`
+
+This means the current LGTM path is a lightweight convergence shortcut, not a fresh multi-agent re-review. The guard added in `check_lgtm_fast_path()` requires `delta.previous_comments` to be non-empty, preventing the previous vacuous case where "all issues resolved" could trigger even when there were no prior issues.
 
 ### Overrides
 
