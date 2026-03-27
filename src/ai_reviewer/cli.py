@@ -196,6 +196,7 @@ async def review_pr_async(
                         github_token=config.github.token,
                         num_agents=1,
                         enable_cross_review=False,
+                        min_validation_agreement=min_validation_agreement,
                         config=config,
                     )
                 except Exception as e:

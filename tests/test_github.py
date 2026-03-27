@@ -1157,6 +1157,225 @@ class TestResolveFixedComments:
         assert not any("secret internal detail" in m for m in warning_msgs)
 
 
+class TestPostReviewPendingRetry:
+    """Tests for dismiss-and-retry logic when post_review hits a 422 pending review."""
+
+    @staticmethod
+    def _make_inline_finding():
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        return ConsolidatedFinding(
+            id="f1",
+            file_path="src/foo.py",
+            line_start=10,
+            line_end=None,
+            severity=Severity.WARNING,
+            category=Category.LOGIC,
+            title="Bug",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+    @staticmethod
+    def _pending_review_422():
+        from github.GithubException import GithubException
+
+        return GithubException(
+            status=422,
+            data={"message": "Could not create review: pending review exists"},
+            headers={},
+        )
+
+    def test_success_on_first_try(self):
+        """Happy path: create_review succeeds, no retry needed."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            finding = self._make_inline_finding()
+            count = client.post_review(mock_pr, "body", inline_findings=[finding])
+
+        assert count == 1
+        mock_pr.create_review.assert_called_once()
+
+    def test_dismisses_pending_and_retries_on_422(self):
+        """On 422 pending review, dismiss and retry the same atomic create_review."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.create_review.side_effect = [
+            self._pending_review_422(),
+            None,  # retry succeeds
+        ]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._dismiss_pending_reviews = MagicMock(return_value=True)
+
+            finding = self._make_inline_finding()
+            count = client.post_review(mock_pr, "body", inline_findings=[finding])
+
+        assert count == 1
+        client._dismiss_pending_reviews.assert_called_once_with(mock_pr)
+        assert mock_pr.create_review.call_count == 2
+
+    def test_inline_comments_preserved_on_retry(self):
+        """Inline comments must be included in the retry call, not dropped."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.create_review.side_effect = [
+            self._pending_review_422(),
+            None,
+        ]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._dismiss_pending_reviews = MagicMock(return_value=True)
+
+            finding = self._make_inline_finding()
+            client.post_review(mock_pr, "body", inline_findings=[finding])
+
+        retry_call = mock_pr.create_review.call_args_list[1]
+        assert "comments" in retry_call.kwargs or len(retry_call.args) > 2
+        if "comments" in retry_call.kwargs:
+            assert len(retry_call.kwargs["comments"]) == 1
+
+    def test_fallback_with_warning_when_retry_also_fails(self):
+        """When dismiss+retry still fails, fall back to issue comment with warning."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.create_review.side_effect = [
+            self._pending_review_422(),
+            self._pending_review_422(),  # retry also fails
+        ]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._dismiss_pending_reviews = MagicMock(return_value=True)
+
+            finding = self._make_inline_finding()
+            count = client.post_review(mock_pr, "body", inline_findings=[finding])
+
+        mock_pr.create_issue_comment.assert_called_once()
+        posted_body = mock_pr.create_issue_comment.call_args[0][0]
+        assert "inline comments" in posted_body.lower() or "could not" in posted_body.lower()
+        assert count == 1
+
+    def test_fallback_when_dismiss_fails(self):
+        """When dismiss returns False, still retry once, then fall back."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.create_review.side_effect = [
+            self._pending_review_422(),
+            self._pending_review_422(),
+        ]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._dismiss_pending_reviews = MagicMock(return_value=False)
+
+            finding = self._make_inline_finding()
+            count = client.post_review(mock_pr, "body", inline_findings=[finding])
+
+        mock_pr.create_issue_comment.assert_called_once()
+        assert count == 1
+
+    def test_no_inline_comments_still_falls_back_to_issue_comment(self):
+        """Body-only review (no inline) on 422 also does dismiss-and-retry."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.create_review.side_effect = [
+            self._pending_review_422(),
+            None,
+        ]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._dismiss_pending_reviews = MagicMock(return_value=True)
+
+            count = client.post_review(mock_pr, "body")
+
+        assert count == 0
+        client._dismiss_pending_reviews.assert_called_once_with(mock_pr)
+        assert mock_pr.create_review.call_count == 2
+
+    def test_non_pending_422_still_raises(self):
+        """A 422 that is NOT about pending review should still raise."""
+        from github.GithubException import GithubException
+
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.create_review.side_effect = GithubException(
+            status=422,
+            data={"message": "Validation Failed: some other error"},
+            headers={},
+        )
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+
+            with pytest.raises(GithubException):
+                client.post_review(mock_pr, "body")
+
+    def test_non_422_error_still_raises(self):
+        """A non-422 GithubException should propagate unchanged."""
+        from github.GithubException import GithubException
+
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.create_review.side_effect = GithubException(
+            status=500,
+            data={"message": "Internal Server Error"},
+            headers={},
+        )
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+
+            with pytest.raises(GithubException):
+                client.post_review(mock_pr, "body")
+
+    def test_fallback_body_warns_about_lost_inline_comments(self):
+        """The fallback issue comment must explicitly warn that inline comments were lost."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.create_review.side_effect = [
+            self._pending_review_422(),
+            self._pending_review_422(),
+        ]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._dismiss_pending_reviews = MagicMock(return_value=True)
+
+            finding = self._make_inline_finding()
+            client.post_review(mock_pr, "body", inline_findings=[finding])
+
+        posted_body = mock_pr.create_issue_comment.call_args[0][0]
+        assert "inline" in posted_body.lower()
+
+
 class TestApplyCommentLimits:
     """Tests for the apply_comment_limits utility function."""
 
