@@ -10,7 +10,7 @@ import logging
 import os
 import re
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -385,7 +385,8 @@ class GitHubClient:
         self._current_user_login: str | None = None
         self._allowed_users: set[str] | None = None
         self._extra_reviewer_users: set[str] = set(extra_reviewer_users or [])
-        self._previous_comments_cache: dict[int, list[PreviousComment]] = {}
+        self._previous_comments_cache: OrderedDict[int, list[PreviousComment]] = OrderedDict()
+        self._previous_comments_cache_max = 50
 
         if base_url:
             self._gh = Github(token, base_url=base_url)
@@ -886,31 +887,28 @@ class GitHubClient:
             List of previous comments from AI reviewers
         """
         if pr.number in self._previous_comments_cache:
+            self._previous_comments_cache.move_to_end(pr.number)
             return self._previous_comments_cache[pr.number]
         comments: list[PreviousComment] = []
         allowed_users = self._get_allowed_users()
 
-        # Get review comments (inline comments on code)
         for comment in pr.get_review_comments():
-            # Skip our own resolved / "no longer detected" replies - they are not findings
             if _is_resolved_reply(comment.body):
                 continue
 
             user_login = comment.user.login
 
-            # Only process comments authored by our bot - never human or other bot comments.
-            # Using format-based matching (has_ai_format) caused false positives where we
-            # would reply "Resolved" to human comments that happened to use similar formatting.
             if user_login not in allowed_users:
                 continue
 
-            # Parse the comment to extract title and severity
             parsed = self._parse_review_comment(comment)
             if parsed:
                 comments.append(parsed)
 
         logger.info(f"Found {len(comments)} previous AI review comments")
         self._previous_comments_cache[pr.number] = comments
+        if len(self._previous_comments_cache) > self._previous_comments_cache_max:
+            self._previous_comments_cache.popitem(last=False)
         return comments
 
     def _parse_review_comment(self, comment: PullRequestComment) -> PreviousComment | None:

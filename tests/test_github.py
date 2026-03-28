@@ -2348,3 +2348,66 @@ class TestGetReviewMetadata:
 
         assert result is not None
         assert result.commit_sha == "custom"
+
+
+class TestPreviousCommentsCacheLRU:
+    """Tests for the LRU-bounded _previous_comments_cache."""
+
+    def _make_client(self, max_size=3):
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+        client._previous_comments_cache_max = max_size
+        return client
+
+    def _make_pr(self, number, comments=None):
+        pr = MagicMock()
+        pr.number = number
+        pr.get_review_comments.return_value = comments or []
+        return pr
+
+    def test_cache_evicts_oldest_when_full(self):
+        """When cache exceeds max size, the oldest entry is evicted."""
+        client = self._make_client(max_size=3)
+
+        for i in range(4):
+            client.get_previous_review_comments(self._make_pr(i))
+
+        assert 0 not in client._previous_comments_cache
+        assert list(client._previous_comments_cache.keys()) == [1, 2, 3]
+
+    def test_cache_hit_promotes_entry(self):
+        """Accessing a cached entry moves it to the end (most-recent)."""
+        client = self._make_client(max_size=3)
+
+        for i in range(3):
+            client.get_previous_review_comments(self._make_pr(i))
+
+        client.get_previous_review_comments(self._make_pr(0))
+
+        client.get_previous_review_comments(self._make_pr(99))
+
+        assert 1 not in client._previous_comments_cache
+        assert 0 in client._previous_comments_cache
+        assert list(client._previous_comments_cache.keys()) == [2, 0, 99]
+
+    def test_cache_returns_same_result_on_hit(self):
+        """Cache hit returns the same list without calling the API again."""
+        client = self._make_client()
+        pr = self._make_pr(42)
+
+        result1 = client.get_previous_review_comments(pr)
+        result2 = client.get_previous_review_comments(pr)
+
+        assert result1 is result2
+        pr.get_review_comments.assert_called_once()
+
+    def test_cache_size_never_exceeds_max(self):
+        """After many insertions the cache never grows beyond the max."""
+        client = self._make_client(max_size=5)
+
+        for i in range(20):
+            client.get_previous_review_comments(self._make_pr(i))
+
+        assert len(client._previous_comments_cache) == 5
