@@ -352,11 +352,7 @@ def should_skip_before_agents(
     if meta.commit_sha == current_sha:
         return SkipReason.ALREADY_REVIEWED
 
-    if (
-        meta.findings_hash
-        and diff_files is not None
-        and previous_comments is not None
-    ):
+    if meta.findings_hash and diff_files is not None and previous_comments is not None:
         previous_files = {c.file_path for c in previous_comments}
         if not diff_files & previous_files:
             return SkipReason.FINDINGS_UNCHANGED

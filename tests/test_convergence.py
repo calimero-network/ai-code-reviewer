@@ -674,13 +674,20 @@ class TestShouldSkipBeforeAgents:
         )
         previous = [
             PreviousComment(
-                id=1, file_path="src/foo.py", line=10,
-                title="Bug", severity="warning", body="x",
+                id=1,
+                file_path="src/foo.py",
+                line=10,
+                title="Bug",
+                severity="warning",
+                body="x",
             ),
         ]
         diff_files = {"README.md", "docs/guide.md"}
         result = should_skip_before_agents(
-            meta, "new_sha", diff_files=diff_files, previous_comments=previous,
+            meta,
+            "new_sha",
+            diff_files=diff_files,
+            previous_comments=previous,
         )
         assert result == SkipReason.FINDINGS_UNCHANGED
 
@@ -694,13 +701,20 @@ class TestShouldSkipBeforeAgents:
         )
         previous = [
             PreviousComment(
-                id=1, file_path="src/foo.py", line=10,
-                title="Bug", severity="warning", body="x",
+                id=1,
+                file_path="src/foo.py",
+                line=10,
+                title="Bug",
+                severity="warning",
+                body="x",
             ),
         ]
         diff_files = {"src/foo.py", "README.md"}
         result = should_skip_before_agents(
-            meta, "new_sha", diff_files=diff_files, previous_comments=previous,
+            meta,
+            "new_sha",
+            diff_files=diff_files,
+            previous_comments=previous,
         )
         assert result is None
 
@@ -714,14 +728,21 @@ class TestShouldSkipBeforeAgents:
         )
         previous = [
             PreviousComment(
-                id=1, file_path="src/foo.py", line=10,
-                title="Bug", severity="warning", body="x",
+                id=1,
+                file_path="src/foo.py",
+                line=10,
+                title="Bug",
+                severity="warning",
+                body="x",
             ),
         ]
         diff_files = {"README.md"}
         result = should_skip_before_agents(
-            meta, "new_sha", force_review=True,
-            diff_files=diff_files, previous_comments=previous,
+            meta,
+            "new_sha",
+            force_review=True,
+            diff_files=diff_files,
+            previous_comments=previous,
         )
         assert result is None
 
@@ -735,13 +756,20 @@ class TestShouldSkipBeforeAgents:
         )
         previous = [
             PreviousComment(
-                id=1, file_path="src/foo.py", line=10,
-                title="Bug", severity="warning", body="x",
+                id=1,
+                file_path="src/foo.py",
+                line=10,
+                title="Bug",
+                severity="warning",
+                body="x",
             ),
         ]
         diff_files = {"README.md"}
         result = should_skip_before_agents(
-            meta, "new_sha", diff_files=diff_files, previous_comments=previous,
+            meta,
+            "new_sha",
+            diff_files=diff_files,
+            previous_comments=previous,
         )
         assert result is None
 
@@ -755,7 +783,10 @@ class TestShouldSkipBeforeAgents:
         )
         diff_files = {"src/foo.py"}
         result = should_skip_before_agents(
-            meta, "new_sha", diff_files=diff_files, previous_comments=[],
+            meta,
+            "new_sha",
+            diff_files=diff_files,
+            previous_comments=[],
         )
         assert result == SkipReason.FINDINGS_UNCHANGED
 
