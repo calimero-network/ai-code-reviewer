@@ -1235,7 +1235,7 @@ class TestLgtmLightweightRecheck:
             mock_gh.resolve_fixed_comments.assert_called_once()
 
     def test_cli_lgtm_recheck_with_findings_falls_back_to_normal(self):
-        """When re-check finds issues, fall back to normal review posting."""
+        """When re-check finds issues, discard it and run the full agent set."""
         import asyncio
 
         from ai_reviewer.cli import review_pr_async
@@ -1268,8 +1268,21 @@ class TestLgtmLightweightRecheck:
             total_review_time_ms=500,
         )
 
+        full_finding = _finding(title="Full review bug")
+        full_review = ConsolidatedReview(
+            id="full",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[full_finding],
+            summary="One issue (full)",
+            agent_count=3,
+            review_quality_score=0.9,
+            total_review_time_ms=2000,
+        )
+
         normal_delta = ReviewDelta(
-            new_findings=[recheck_finding],
+            new_findings=[full_finding],
             fixed_findings=[],
             open_findings=[],
             previous_comments=[_prev_comment()],
@@ -1294,7 +1307,8 @@ class TestLgtmLightweightRecheck:
             patch("ai_reviewer.cli.GitHubClient", return_value=mock_gh),
             patch(
                 "ai_reviewer.cli.review_pr_with_cursor_agent",
-                return_value=recheck_review,
+                new_callable=AsyncMock,
+                side_effect=[recheck_review, full_review],
             ) as mock_agent,
         ):
             mock_config = MagicMock()
@@ -1309,7 +1323,7 @@ class TestLgtmLightweightRecheck:
                 )
             )
 
-            mock_agent.assert_called_once()
+            assert mock_agent.await_count == 2
             mock_gh.post_review.assert_called_once()
 
     def test_cli_lgtm_recheck_error_falls_back_to_normal(self):
@@ -1471,7 +1485,7 @@ class TestLgtmLightweightRecheck:
 
     @pytest.mark.asyncio
     async def test_webhook_lgtm_recheck_with_findings_falls_back(self):
-        """Webhook falls back to normal review when re-check finds issues."""
+        """Webhook discards re-check and runs full agent set when re-check finds issues."""
         from ai_reviewer.models.review import ConsolidatedReview
 
         meta = ReviewMeta(
@@ -1501,8 +1515,21 @@ class TestLgtmLightweightRecheck:
             total_review_time_ms=500,
         )
 
+        full_finding = _finding(title="Full review bug")
+        full_review = ConsolidatedReview(
+            id="full",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[full_finding],
+            summary="One issue (full)",
+            agent_count=3,
+            review_quality_score=0.9,
+            total_review_time_ms=2000,
+        )
+
         normal_delta = ReviewDelta(
-            new_findings=[recheck_finding],
+            new_findings=[full_finding],
             fixed_findings=[],
             open_findings=[],
             previous_comments=[_prev_comment()],
@@ -1530,7 +1557,8 @@ class TestLgtmLightweightRecheck:
             patch("ai_reviewer.config.load_config"),
             patch(
                 "ai_reviewer.review.review_pr_with_cursor_agent",
-                return_value=recheck_review,
+                new_callable=AsyncMock,
+                side_effect=[recheck_review, full_review],
             ) as mock_agent,
             patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
             patch("ai_reviewer.github.formatter.GitHubFormatter"),
@@ -1544,7 +1572,7 @@ class TestLgtmLightweightRecheck:
             assert handler is not None
             await handler(repo="test/repo", pr_number=42)
 
-            mock_agent.assert_called_once()
+            assert mock_agent.await_count == 2
             mock_gh.post_review.assert_called_once()
 
     @pytest.mark.asyncio

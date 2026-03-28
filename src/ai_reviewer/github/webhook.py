@@ -271,19 +271,16 @@ def _setup_default_review_handler() -> None:
                             pr_number,
                         )
 
-            if recheck_review is not None and recheck_review.findings:
-                review = recheck_review
-            else:
-                review = await review_pr_with_cursor_agent(
-                    repo=repo,
-                    pr_number=pr_number,
-                    cursor_config=cursor_config,
-                    github_token=github_token,
-                    num_agents=num_agents,
-                    enable_cross_review=enable_cross_review,
-                    min_validation_agreement=min_agreement,
-                    config=webhook_config,
-                )
+            review = await review_pr_with_cursor_agent(
+                repo=repo,
+                pr_number=pr_number,
+                cursor_config=cursor_config,
+                github_token=github_token,
+                num_agents=num_agents,
+                enable_cross_review=enable_cross_review,
+                min_validation_agreement=min_agreement,
+                config=webhook_config,
+            )
 
             if review.all_agents_failed:
                 logger.error(f"All agents failed for {repo} PR #{pr_number}")

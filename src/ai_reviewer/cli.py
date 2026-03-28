@@ -258,27 +258,21 @@ async def review_pr_async(
             console.print(f"  → Agent status: [cyan]{status}[/cyan]")
             last_status[0] = status
 
-    # If we already ran a re-check that found issues, reuse that result
-    # instead of launching another duplicate agent pass.
-    if recheck_review is not None and recheck_review.findings:
-        review = recheck_review
-        console.print("[dim]Reusing re-check result as the review[/dim]")
-    else:
-        try:
-            review = await review_pr_with_cursor_agent(
-                repo=repo,
-                pr_number=pr_number,
-                cursor_config=cursor_config,
-                github_token=config.github.token,
-                on_status=on_status,
-                num_agents=num_agents,
-                enable_cross_review=enable_cross_review,
-                min_validation_agreement=min_validation_agreement,
-                config=config,
-            )
-        except Exception as e:
-            console.print(f"[red]Error:[/red] {e}")
-            sys.exit(1)
+    try:
+        review = await review_pr_with_cursor_agent(
+            repo=repo,
+            pr_number=pr_number,
+            cursor_config=cursor_config,
+            github_token=config.github.token,
+            on_status=on_status,
+            num_agents=num_agents,
+            enable_cross_review=enable_cross_review,
+            min_validation_agreement=min_validation_agreement,
+            config=config,
+        )
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
 
     # Check if all agents failed
     if review.all_agents_failed:
