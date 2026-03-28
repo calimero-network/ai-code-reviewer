@@ -21,14 +21,14 @@ class DocSuggestion:
     priority: str = "normal"
 
 
-CONVENTION_FILES = [
+DEFAULT_CONVENTION_FILES = [
     "AGENTS.md",
     "CLAUDE.md",
     "CONTRIBUTING.md",
     ".cursor/rules/README.md",
 ]
 
-ARCHITECTURE_DIRS = ["architecture/", "docs/", "doc/"]
+DEFAULT_ARCHITECTURE_DIRS = ["architecture/", "docs/", "doc/"]
 
 _MANIFEST_FILES = {
     "pyproject.toml",
@@ -67,40 +67,74 @@ def _is_entry_point(path: str) -> bool:
     return name in _ENTRY_POINT_BASENAMES
 
 
-def _has_new_top_level_dir(changed_paths_with_status: dict[str, str]) -> bool:
-    """True if any added file introduces a previously-unseen top-level directory."""
-    existing_dirs: set[str] = set()
-    added_dirs: set[str] = set()
+def _has_new_top_level_dir(
+    changed_paths_with_status: dict[str, str],
+    existing_repo_paths: set[str],
+) -> bool:
+    """True if any added file introduces a genuinely new top-level directory.
+
+    Uses *existing_repo_paths* (probed from the repo) to know which
+    directories already exist, avoiding false positives when a PR only adds
+    files to an existing directory without modifying other files there.
+    """
+    known_dirs: set[str] = set()
+    for p in existing_repo_paths:
+        stripped = p.rstrip("/")
+        if "/" not in stripped:
+            known_dirs.add(stripped)
+
     for path, status in changed_paths_with_status.items():
         parts = path.split("/")
         if len(parts) < 2:
             continue
         top = parts[0]
-        if status == "added":
-            added_dirs.add(top)
-        else:
-            existing_dirs.add(top)
-    return bool(added_dirs - existing_dirs)
+        if status != "added":
+            known_dirs.add(top)
+
+    for path, status in changed_paths_with_status.items():
+        parts = path.split("/")
+        if len(parts) < 2:
+            continue
+        if status == "added" and parts[0] not in known_dirs:
+            return True
+    return False
 
 
-def _has_removed_top_level_dir(changed_paths_with_status: dict[str, str]) -> bool:
-    """True if every file under some top-level dir was removed."""
+def _has_removed_top_level_dir(
+    changed_paths_with_status: dict[str, str],
+    existing_repo_paths: set[str],
+) -> bool:
+    """True if a top-level dir appears only with 'removed' status in the diff
+    AND is not known to still exist in the repo via *existing_repo_paths*.
+    """
+    known_dirs: set[str] = set()
+    for p in existing_repo_paths:
+        stripped = p.rstrip("/")
+        if "/" not in stripped:
+            known_dirs.add(stripped)
+
     dir_statuses: dict[str, set[str]] = {}
     for path, status in changed_paths_with_status.items():
         parts = path.split("/")
         if len(parts) < 2:
             continue
         dir_statuses.setdefault(parts[0], set()).add(status)
-    return any(statuses == {"removed"} for statuses in dir_statuses.values())
+
+    return any(
+        statuses == {"removed"} and top_dir not in known_dirs
+        for top_dir, statuses in dir_statuses.items()
+    )
 
 
 def is_architecture_impacting(
     changed_paths: list[str],
     changed_paths_with_status: dict[str, str],
+    existing_repo_paths: set[str] | None = None,
 ) -> bool:
-    if _has_new_top_level_dir(changed_paths_with_status):
+    repo_paths = existing_repo_paths or set()
+    if _has_new_top_level_dir(changed_paths_with_status, repo_paths):
         return True
-    if _has_removed_top_level_dir(changed_paths_with_status):
+    if _has_removed_top_level_dir(changed_paths_with_status, repo_paths):
         return True
     for path in changed_paths:
         basename = os.path.basename(path)
@@ -124,14 +158,18 @@ class DocAnalyzer:
         changed_paths_with_status: dict[str, str],
         existing_repo_paths: set[str],
         doc_config: dict | None = None,
+        architecture_dirs: list[str] | None = None,
+        convention_files: list[str] | None = None,
     ) -> None:
         self.changed_paths = changed_paths
         self.changed_paths_with_status = changed_paths_with_status
         self.existing_repo_paths = existing_repo_paths
         self.doc_config = doc_config
+        self.architecture_dirs = architecture_dirs or DEFAULT_ARCHITECTURE_DIRS
+        self.convention_files = convention_files or DEFAULT_CONVENTION_FILES
 
     def check_architecture_folder(self) -> list[DocSuggestion]:
-        for d in ARCHITECTURE_DIRS:
+        for d in self.architecture_dirs:
             if d in self.existing_repo_paths:
                 return []
         return [
@@ -147,12 +185,16 @@ class DocAnalyzer:
         ]
 
     def check_convention_files(self) -> list[DocSuggestion]:
-        if not is_architecture_impacting(self.changed_paths, self.changed_paths_with_status):
+        if not is_architecture_impacting(
+            self.changed_paths,
+            self.changed_paths_with_status,
+            self.existing_repo_paths,
+        ):
             return []
 
         suggestions: list[DocSuggestion] = []
         changed_set = set(self.changed_paths)
-        for conv_file in CONVENTION_FILES:
+        for conv_file in self.convention_files:
             if conv_file in self.existing_repo_paths and conv_file not in changed_set:
                 suggestions.append(
                     DocSuggestion(

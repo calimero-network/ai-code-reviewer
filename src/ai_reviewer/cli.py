@@ -510,6 +510,8 @@ def _run_doc_review(
         changed_paths_with_status=changed_paths_with_status,
         existing_repo_paths=existing_repo_paths,
         doc_config=doc_config,
+        architecture_dirs=doc_settings.architecture_paths,
+        convention_files=doc_settings.convention_files,
     )
     suggestions = analyzer.run()
 

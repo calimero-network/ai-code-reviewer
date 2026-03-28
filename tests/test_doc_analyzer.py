@@ -18,12 +18,26 @@ class TestIsArchitectureImpacting:
     def test_new_top_level_directory(self):
         paths = ["newpkg/main.py"]
         status = {"newpkg/main.py": "added"}
-        assert is_architecture_impacting(paths, status)
+        assert is_architecture_impacting(paths, status, existing_repo_paths=set())
+
+    def test_adding_file_to_existing_dir_not_impacting(self):
+        """Adding a file to an already-existing top-level dir is NOT a new dir."""
+        paths = ["src/new_module.py"]
+        status = {"src/new_module.py": "added"}
+        existing = {"src/"}
+        assert not is_architecture_impacting(paths, status, existing_repo_paths=existing)
 
     def test_removed_top_level_directory(self):
         paths = ["oldpkg/util.py"]
         status = {"oldpkg/util.py": "removed"}
-        assert is_architecture_impacting(paths, status)
+        assert is_architecture_impacting(paths, status, existing_repo_paths=set())
+
+    def test_removing_file_from_existing_dir_not_impacting(self):
+        """Removing one file from a dir that still exists is NOT a removed dir."""
+        paths = ["oldpkg/util.py"]
+        status = {"oldpkg/util.py": "removed"}
+        existing = {"oldpkg/"}
+        assert not is_architecture_impacting(paths, status, existing_repo_paths=existing)
 
     def test_manifest_file_pyproject(self):
         paths = ["pyproject.toml"]
@@ -156,6 +170,27 @@ class TestCheckArchitectureFolder:
         )
         assert analyzer.check_architecture_folder() == []
 
+    def test_custom_architecture_dirs(self):
+        """User-configured architecture_dirs are respected."""
+        analyzer = DocAnalyzer(
+            changed_paths=["src/foo.py"],
+            changed_paths_with_status={"src/foo.py": "modified"},
+            existing_repo_paths={"design/"},
+            architecture_dirs=["design/", "specs/"],
+        )
+        assert analyzer.check_architecture_folder() == []
+
+    def test_custom_architecture_dirs_missing(self):
+        analyzer = DocAnalyzer(
+            changed_paths=["src/foo.py"],
+            changed_paths_with_status={"src/foo.py": "modified"},
+            existing_repo_paths=set(),
+            architecture_dirs=["design/"],
+        )
+        suggestions = analyzer.check_architecture_folder()
+        assert len(suggestions) == 1
+        assert suggestions[0].priority == "high"
+
 
 class TestCheckConventionFiles:
     """Tier 1: convention file freshness checks."""
@@ -163,8 +198,8 @@ class TestCheckConventionFiles:
     def test_impacting_pr_with_stale_claude_md(self):
         """Architecture-impacting PR + CLAUDE.md exists but not changed -> suggestion."""
         analyzer = DocAnalyzer(
-            changed_paths=["newpkg/main.py"],
-            changed_paths_with_status={"newpkg/main.py": "added"},
+            changed_paths=["pyproject.toml"],
+            changed_paths_with_status={"pyproject.toml": "modified"},
             existing_repo_paths={"CLAUDE.md", "docs/"},
         )
         suggestions = analyzer.check_convention_files()
@@ -175,9 +210,9 @@ class TestCheckConventionFiles:
     def test_impacting_pr_with_updated_agents_md(self):
         """Architecture-impacting PR + AGENTS.md exists and IS changed -> no suggestion."""
         analyzer = DocAnalyzer(
-            changed_paths=["newpkg/main.py", "AGENTS.md"],
+            changed_paths=["pyproject.toml", "AGENTS.md"],
             changed_paths_with_status={
-                "newpkg/main.py": "added",
+                "pyproject.toml": "modified",
                 "AGENTS.md": "modified",
             },
             existing_repo_paths={"AGENTS.md", "docs/"},
@@ -197,8 +232,8 @@ class TestCheckConventionFiles:
     def test_convention_file_not_in_repo(self):
         """Convention file doesn't exist in repo -> no suggestion even if PR is impacting."""
         analyzer = DocAnalyzer(
-            changed_paths=["newpkg/main.py"],
-            changed_paths_with_status={"newpkg/main.py": "added"},
+            changed_paths=["pyproject.toml"],
+            changed_paths_with_status={"pyproject.toml": "modified"},
             existing_repo_paths={"docs/"},
         )
         assert analyzer.check_convention_files() == []
@@ -231,6 +266,18 @@ class TestCheckConventionFiles:
         suggestions = analyzer.check_convention_files()
         assert len(suggestions) == 1
         assert suggestions[0].file == "CLAUDE.md"
+
+    def test_custom_convention_files(self):
+        """User-configured convention_files are respected."""
+        analyzer = DocAnalyzer(
+            changed_paths=["Dockerfile"],
+            changed_paths_with_status={"Dockerfile": "modified"},
+            existing_repo_paths={"CUSTOM_RULES.md", "docs/"},
+            convention_files=["CUSTOM_RULES.md"],
+        )
+        suggestions = analyzer.check_convention_files()
+        assert len(suggestions) == 1
+        assert suggestions[0].file == "CUSTOM_RULES.md"
 
 
 class TestCheckSourceToDocsMapping:
@@ -358,8 +405,8 @@ class TestDocAnalyzerRun:
     def test_enabled_true_runs_checks(self):
         doc_config = {"enabled": True}
         analyzer = DocAnalyzer(
-            changed_paths=["newpkg/main.py"],
-            changed_paths_with_status={"newpkg/main.py": "added"},
+            changed_paths=["pyproject.toml"],
+            changed_paths_with_status={"pyproject.toml": "modified"},
             existing_repo_paths=set(),
             doc_config=doc_config,
         )
@@ -368,8 +415,8 @@ class TestDocAnalyzerRun:
 
     def test_no_doc_config_runs_tier1(self):
         analyzer = DocAnalyzer(
-            changed_paths=["newpkg/main.py"],
-            changed_paths_with_status={"newpkg/main.py": "added"},
+            changed_paths=["pyproject.toml"],
+            changed_paths_with_status={"pyproject.toml": "modified"},
             existing_repo_paths={"CLAUDE.md"},
             doc_config=None,
         )
@@ -391,7 +438,7 @@ class TestDocAnalyzerRun:
             doc_config=doc_config,
         )
         suggestions = analyzer.run()
-        file_counts = {}
+        file_counts: dict[str, int] = {}
         for s in suggestions:
             file_counts[s.file] = file_counts.get(s.file, 0) + 1
         assert all(c == 1 for c in file_counts.values()), (
@@ -400,8 +447,8 @@ class TestDocAnalyzerRun:
 
     def test_high_priority_sorted_first(self):
         analyzer = DocAnalyzer(
-            changed_paths=["newpkg/main.py"],
-            changed_paths_with_status={"newpkg/main.py": "added"},
+            changed_paths=["pyproject.toml"],
+            changed_paths_with_status={"pyproject.toml": "modified"},
             existing_repo_paths={"CLAUDE.md"},
             doc_config=None,
         )
@@ -427,10 +474,10 @@ class TestDocAnalyzerRun:
             }
         }
         analyzer = DocAnalyzer(
-            changed_paths=["src/api/routes.py", "newpkg/init.py"],
+            changed_paths=["src/api/routes.py", "pyproject.toml"],
             changed_paths_with_status={
                 "src/api/routes.py": "modified",
-                "newpkg/init.py": "added",
+                "pyproject.toml": "modified",
             },
             existing_repo_paths={"CLAUDE.md"},
             doc_config=doc_config,
