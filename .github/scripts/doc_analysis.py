@@ -74,12 +74,8 @@ with open(output_file, "a") as f:
     if unique:
         f.write("<!-- AI-CODE-REVIEWER-DOC-BOT -->\n")
         f.write("## 📚 Documentation Check\n\n")
-        f.write(
-            "The following documentation files may need updates based on code changes:\n\n"
-        )
+        f.write("The following documentation files may need updates based on code changes:\n\n")
         for s in unique:
             f.write(f"- **{s['file']}**: {s['reason']} [{s['priority']}]\n")
-        f.write(
-            "\n*Please review these suggestions and update documentation if needed.*\n"
-        )
+        f.write("\n*Please review these suggestions and update documentation if needed.*\n")
     f.write("EOF\n")
