@@ -773,8 +773,8 @@ class TestShouldSkipBeforeAgents:
         )
         assert result is None
 
-    def test_findings_unchanged_no_previous_comments_proceeds(self):
-        """No previous comments with a findings_hash → no overlap, skip."""
+    def test_findings_unchanged_empty_previous_comments_proceeds(self):
+        """An empty previous comment list must not trigger a findings-hash skip."""
         meta = ReviewMeta(
             commit_sha="old_sha",
             review_count=2,
@@ -788,7 +788,7 @@ class TestShouldSkipBeforeAgents:
             diff_files=diff_files,
             previous_comments=[],
         )
-        assert result == SkipReason.FINDINGS_UNCHANGED
+        assert result is None
 
     def test_findings_unchanged_backward_compat_no_diff_files(self):
         """When diff_files is not provided, the hash check is skipped."""
