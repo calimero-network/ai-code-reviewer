@@ -9,13 +9,14 @@ from pathlib import Path
 
 import click
 import uvicorn
+from github.PullRequest import PullRequest
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
 from ai_reviewer import __version__
 from ai_reviewer.agents.cursor_client import CursorConfig
-from ai_reviewer.config import DocReviewSettings, load_config, validate_config
+from ai_reviewer.config import Config, DocReviewSettings, load_config, validate_config
 from ai_reviewer.docs.analyzer import DocAnalyzer, format_doc_comment
 from ai_reviewer.github.client import (
     GitHubClient,
@@ -173,7 +174,7 @@ async def review_pr_async(
 
     # Pre-agent checks (github output only — json/markdown always run agents)
     gh: GitHubClient | None = None
-    pr = None
+    pr: PullRequest | None = None
     meta: ReviewMeta | None = None
     recheck_review: ConsolidatedReview | None = None
 
@@ -459,9 +460,9 @@ async def review_pr_async(
 def _run_doc_review(
     *,
     gh: GitHubClient | None,
-    pr: object | None,
+    pr: PullRequest | None,
     repo: str,
-    config: object,
+    config: Config,
     doc_check: bool | None,
     dry_run: bool,
 ) -> None:
