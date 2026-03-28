@@ -105,6 +105,49 @@ class TestGitHubClient:
             assert context.author == "testuser"
             assert "Python" in context.repo_languages
 
+    def test_build_review_comments_uses_plain_dict_payloads(self):
+        """Inline review payloads should not depend on PyGithub's internal ReviewComment type."""
+        from ai_reviewer.github import client as github_client
+        from ai_reviewer.github.client import GitHubClient
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        finding = ConsolidatedFinding(
+            id="f1",
+            file_path="src/foo.py",
+            line_start=10,
+            line_end=10,
+            severity=Severity.WARNING,
+            category=Category.LOGIC,
+            title="Guard clause missing",
+            description="Add a guard clause before dereferencing the value.",
+            suggested_fix="if value is None:\n    return",
+            consensus_score=1.0,
+            agreeing_agents=["agent-1"],
+            confidence=0.9,
+        )
+
+        with patch.object(
+            github_client,
+            "ReviewComment",
+            create=True,
+            side_effect=AssertionError("internal ReviewComment type should not be used"),
+        ):
+            comments = GitHubClient._build_review_comments([finding])
+
+        assert comments == [
+            {
+                "path": "src/foo.py",
+                "line": 10,
+                "body": (
+                    "🟡 **Guard clause missing**\n\n"
+                    "Add a guard clause before dereferencing the value.\n\n"
+                    "**Suggested fix:**\n```\nif value is None:\n    return\n```\n\n"
+                    "<!-- ai-reviewer-id: "
+                    f"{finding.finding_hash} -->"
+                ),
+            }
+        ]
+
 
 class TestGitHubPRHandler:
     """Tests for PR event handling."""

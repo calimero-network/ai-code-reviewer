@@ -13,12 +13,13 @@ import time
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import Any
 
 import requests
 import yaml
 from github import Github
 from github.GithubException import GithubException
-from github.PullRequest import PullRequest, ReviewComment
+from github.PullRequest import PullRequest
 from github.PullRequestComment import PullRequestComment
 from github.Repository import Repository
 
@@ -685,7 +686,7 @@ class GitHubClient:
     @staticmethod
     def _build_review_comments(
         inline_findings: list[ConsolidatedFinding] | None,
-    ) -> list[ReviewComment]:
+    ) -> list[dict[str, Any]]:
         """Build atomic review comments from pre-filtered findings.
 
         Callers are responsible for filtering via ``get_postable_inline_findings``
@@ -696,7 +697,7 @@ class GitHubClient:
         if not inline_findings:
             return []
 
-        comments: list[ReviewComment] = []
+        comments: list[dict[str, Any]] = []
         for finding in inline_findings:
             severity_emoji = {
                 "critical": "🔴",
@@ -711,11 +712,11 @@ class GitHubClient:
             comment_body += f"\n\n<!-- ai-reviewer-id: {finding.finding_hash} -->"
 
             comments.append(
-                ReviewComment(
-                    path=finding.file_path,
-                    line=finding.line_start,
-                    body=comment_body,
-                )
+                {
+                    "path": finding.file_path,
+                    "line": finding.line_start,
+                    "body": comment_body,
+                }
             )
 
         return comments
