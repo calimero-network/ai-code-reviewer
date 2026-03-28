@@ -5,8 +5,6 @@ from __future__ import annotations
 import pytest
 
 from ai_reviewer.docs.analyzer import (
-    ARCHITECTURE_DIRS,
-    CONVENTION_FILES,
     DocAnalyzer,
     DocSuggestion,
     format_doc_comment,

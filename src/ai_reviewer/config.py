@@ -281,16 +281,12 @@ def _parse_config(raw: dict[str, Any]) -> Config:
     doc_raw = raw.get("doc_review", {})
     doc_review = DocReviewSettings(
         enabled=doc_raw.get("enabled", True),
-        architecture_paths=doc_raw.get(
-            "architecture_paths", ["architecture/", "docs/", "doc/"]
-        ),
+        architecture_paths=doc_raw.get("architecture_paths", ["architecture/", "docs/", "doc/"]),
         convention_files=doc_raw.get(
             "convention_files",
             ["AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", ".cursor/rules/README.md"],
         ),
-        comment_marker=doc_raw.get(
-            "comment_marker", "<!-- AI-CODE-REVIEWER-DOC-BOT -->"
-        ),
+        comment_marker=doc_raw.get("comment_marker", "<!-- AI-CODE-REVIEWER-DOC-BOT -->"),
     )
 
     return Config(

@@ -1501,9 +1501,7 @@ class GitHubClient:
             logger.warning("Could not search issue comments for doc-bot marker: %s", e)
         return None
 
-    def post_or_update_doc_comment(
-        self, pr: PullRequest, body: str, marker: str
-    ) -> None:
+    def post_or_update_doc_comment(self, pr: PullRequest, body: str, marker: str) -> None:
         """Create or update the doc-bot issue comment on a PR.
 
         If a comment with *marker* already exists it is updated in-place;

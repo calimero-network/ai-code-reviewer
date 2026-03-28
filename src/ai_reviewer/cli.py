@@ -16,6 +16,7 @@ from rich.table import Table
 from ai_reviewer import __version__
 from ai_reviewer.agents.cursor_client import CursorConfig
 from ai_reviewer.config import DocReviewSettings, load_config, validate_config
+from ai_reviewer.docs.analyzer import DocAnalyzer, format_doc_comment
 from ai_reviewer.github.client import (
     GitHubClient,
     ReviewMeta,
@@ -24,7 +25,6 @@ from ai_reviewer.github.client import (
     should_skip_before_agents,
     should_skip_review,
 )
-from ai_reviewer.docs.analyzer import DocAnalyzer, format_doc_comment
 from ai_reviewer.github.formatter import GitHubFormatter, format_review_as_json
 from ai_reviewer.github.webhook import create_webhook_app, set_review_handler
 from ai_reviewer.models.review import ConsolidatedReview
@@ -494,9 +494,7 @@ def _run_doc_review(
     # Build changed paths with status from PR files
     pr_files = list(pr.get_files())
     changed_paths = [f.filename for f in pr_files]
-    changed_paths_with_status = {
-        f.filename: getattr(f, "status", "modified") for f in pr_files
-    }
+    changed_paths_with_status = {f.filename: getattr(f, "status", "modified") for f in pr_files}
 
     # Load doc_config from repo's .ai-reviewer.yaml if present
     repo_config = gh.load_repo_config(repo, pr.head.sha)

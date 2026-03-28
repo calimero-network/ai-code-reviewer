@@ -58,10 +58,7 @@ _INFRA_PATTERNS = [
 
 
 def _matches_any_glob(path: str, patterns: list[str]) -> bool:
-    for pattern in patterns:
-        if fnmatch.fnmatch(path, pattern):
-            return True
-    return False
+    return any(fnmatch.fnmatch(path, pattern) for pattern in patterns)
 
 
 def _is_entry_point(path: str) -> bool:
@@ -150,9 +147,7 @@ class DocAnalyzer:
         ]
 
     def check_convention_files(self) -> list[DocSuggestion]:
-        if not is_architecture_impacting(
-            self.changed_paths, self.changed_paths_with_status
-        ):
+        if not is_architecture_impacting(self.changed_paths, self.changed_paths_with_status):
             return []
 
         suggestions: list[DocSuggestion] = []
@@ -173,9 +168,7 @@ class DocAnalyzer:
     def check_source_to_docs_mapping(self) -> list[DocSuggestion]:
         if self.doc_config is None:
             return []
-        mapping: dict[str, list[str]] = self.doc_config.get(
-            "source_to_docs_mapping", {}
-        )
+        mapping: dict[str, list[str]] = self.doc_config.get("source_to_docs_mapping", {})
         if not mapping:
             return []
 
@@ -183,9 +176,7 @@ class DocAnalyzer:
         unupdated_targets: dict[str, str] = {}
 
         for glob_pattern, doc_targets in mapping.items():
-            matched_sources = [
-                p for p in self.changed_paths if fnmatch.fnmatch(p, glob_pattern)
-            ]
+            matched_sources = [p for p in self.changed_paths if fnmatch.fnmatch(p, glob_pattern)]
             if not matched_sources:
                 continue
             for target in doc_targets:
@@ -226,14 +217,10 @@ class DocAnalyzer:
 def format_doc_comment(suggestions: list[DocSuggestion], marker: str) -> str:
     lines = [marker, "", "## Documentation Review", ""]
     if not suggestions:
-        lines.append(
-            "All documentation looks current — no updates needed for this PR."
-        )
+        lines.append("All documentation looks current — no updates needed for this PR.")
         return "\n".join(lines)
 
-    lines.append(
-        "The following documentation may need updates based on the changes in this PR:"
-    )
+    lines.append("The following documentation may need updates based on the changes in this PR:")
     lines.append("")
     for s in suggestions:
         icon = "\U0001f534" if s.priority == "high" else "\U0001f7e1"
