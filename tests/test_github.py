@@ -105,6 +105,49 @@ class TestGitHubClient:
             assert context.author == "testuser"
             assert "Python" in context.repo_languages
 
+    def test_build_review_comments_uses_plain_dict_payloads(self):
+        """Inline review payloads should not depend on PyGithub's internal ReviewComment type."""
+        from ai_reviewer.github import client as github_client
+        from ai_reviewer.github.client import GitHubClient
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        finding = ConsolidatedFinding(
+            id="f1",
+            file_path="src/foo.py",
+            line_start=10,
+            line_end=10,
+            severity=Severity.WARNING,
+            category=Category.LOGIC,
+            title="Guard clause missing",
+            description="Add a guard clause before dereferencing the value.",
+            suggested_fix="if value is None:\n    return",
+            consensus_score=1.0,
+            agreeing_agents=["agent-1"],
+            confidence=0.9,
+        )
+
+        with patch.object(
+            github_client,
+            "ReviewComment",
+            create=True,
+            side_effect=AssertionError("internal ReviewComment type should not be used"),
+        ):
+            comments = GitHubClient._build_review_comments([finding])
+
+        assert comments == [
+            {
+                "path": "src/foo.py",
+                "line": 10,
+                "body": (
+                    "🟡 **Guard clause missing**\n\n"
+                    "Add a guard clause before dereferencing the value.\n\n"
+                    "**Suggested fix:**\n```\nif value is None:\n    return\n```\n\n"
+                    "<!-- ai-reviewer-id: "
+                    f"{finding.finding_hash} -->"
+                ),
+            }
+        ]
+
 
 class TestGitHubPRHandler:
     """Tests for PR event handling."""
@@ -1157,6 +1200,259 @@ class TestResolveFixedComments:
         assert not any("secret internal detail" in m for m in warning_msgs)
 
 
+class TestPostReviewPendingRetry:
+    """Tests for dismiss-and-retry logic when post_review hits a 422 pending review."""
+
+    @staticmethod
+    def _make_inline_finding():
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        return ConsolidatedFinding(
+            id="f1",
+            file_path="src/foo.py",
+            line_start=10,
+            line_end=None,
+            severity=Severity.WARNING,
+            category=Category.LOGIC,
+            title="Bug",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+    @staticmethod
+    def _pending_review_422():
+        from github.GithubException import GithubException
+
+        return GithubException(
+            status=422,
+            data={"message": "Could not create review: pending review exists"},
+            headers={},
+        )
+
+    @staticmethod
+    def _mock_pr_file(filename: str, patch: str | None):
+        mock_file = MagicMock()
+        mock_file.filename = filename
+        mock_file.patch = patch
+        return mock_file
+
+    def test_success_on_first_try(self):
+        """Happy path: create_review succeeds, no retry needed."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            finding = self._make_inline_finding()
+            count = client.post_review(mock_pr, "body", inline_findings=[finding])
+
+        assert count == 1
+        mock_pr.create_review.assert_called_once()
+
+    def test_get_postable_inline_findings_filters_non_resolvable(self):
+        """Only diff-resolvable inline comments are returned by get_postable_inline_findings."""
+        from ai_reviewer.github.client import GitHubClient
+
+        valid_finding = self._make_inline_finding()
+        invalid_finding = self._make_inline_finding()
+        invalid_finding.line_start = 999
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.get_files.return_value = [
+            self._mock_pr_file("src/foo.py", "@@ -9,1 +9,2 @@\n old\n+new")
+        ]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            postable = client.get_postable_inline_findings(
+                mock_pr,
+                inline_findings=[valid_finding, invalid_finding],
+                max_total=50,
+                max_per_file=10,
+            )
+
+        assert len(postable) == 1
+        assert postable[0].line_start == 10
+
+    def test_dismisses_pending_and_retries_on_422(self):
+        """On 422 pending review, dismiss and retry the same atomic create_review."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.create_review.side_effect = [
+            self._pending_review_422(),
+            None,  # retry succeeds
+        ]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._dismiss_pending_reviews = MagicMock(return_value=True)
+
+            finding = self._make_inline_finding()
+            count = client.post_review(mock_pr, "body", inline_findings=[finding])
+
+        assert count == 1
+        client._dismiss_pending_reviews.assert_called_once_with(mock_pr)
+        assert mock_pr.create_review.call_count == 2
+
+    def test_inline_comments_preserved_on_retry(self):
+        """Inline comments must be included in the retry call, not dropped."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.create_review.side_effect = [
+            self._pending_review_422(),
+            None,
+        ]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._dismiss_pending_reviews = MagicMock(return_value=True)
+
+            finding = self._make_inline_finding()
+            client.post_review(mock_pr, "body", inline_findings=[finding])
+
+        retry_call = mock_pr.create_review.call_args_list[1]
+        assert "comments" in retry_call.kwargs or len(retry_call.args) > 2
+        if "comments" in retry_call.kwargs:
+            assert len(retry_call.kwargs["comments"]) == 1
+
+    def test_fallback_with_warning_when_retry_also_fails(self):
+        """Fallback reports zero inline comments when they were dropped."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.create_review.side_effect = [
+            self._pending_review_422(),
+            self._pending_review_422(),  # retry also fails
+        ]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._dismiss_pending_reviews = MagicMock(return_value=True)
+
+            finding = self._make_inline_finding()
+            count = client.post_review(mock_pr, "body", inline_findings=[finding])
+
+        mock_pr.create_issue_comment.assert_called_once()
+        posted_body = mock_pr.create_issue_comment.call_args[0][0]
+        assert "inline comments" in posted_body.lower() or "could not" in posted_body.lower()
+        assert count == 0
+
+    def test_fallback_when_dismiss_fails(self):
+        """Dismiss failure still falls back and reports zero inline comments."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.create_review.side_effect = [
+            self._pending_review_422(),
+            self._pending_review_422(),
+        ]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._dismiss_pending_reviews = MagicMock(return_value=False)
+
+            finding = self._make_inline_finding()
+            count = client.post_review(mock_pr, "body", inline_findings=[finding])
+
+        mock_pr.create_issue_comment.assert_called_once()
+        assert count == 0
+
+    def test_no_inline_comments_still_falls_back_to_issue_comment(self):
+        """Body-only review (no inline) on 422 also does dismiss-and-retry."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.get_files.return_value = []
+        mock_pr.create_review.side_effect = [
+            self._pending_review_422(),
+            None,
+        ]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._dismiss_pending_reviews = MagicMock(return_value=True)
+
+            count = client.post_review(mock_pr, "body")
+
+        assert count == 0
+        client._dismiss_pending_reviews.assert_called_once_with(mock_pr)
+        assert mock_pr.create_review.call_count == 2
+
+    def test_non_pending_422_still_raises(self):
+        """A 422 that is NOT about pending review should still raise."""
+        from github.GithubException import GithubException
+
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.create_review.side_effect = GithubException(
+            status=422,
+            data={"message": "Validation Failed: some other error"},
+            headers={},
+        )
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+
+            with pytest.raises(GithubException):
+                client.post_review(mock_pr, "body")
+
+    def test_non_422_error_still_raises(self):
+        """A non-422 GithubException should propagate unchanged."""
+        from github.GithubException import GithubException
+
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.create_review.side_effect = GithubException(
+            status=500,
+            data={"message": "Internal Server Error"},
+            headers={},
+        )
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+
+            with pytest.raises(GithubException):
+                client.post_review(mock_pr, "body")
+
+    def test_fallback_body_warns_about_lost_inline_comments(self):
+        """The fallback issue comment must explicitly warn that inline comments were lost."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        mock_pr.number = 1
+        mock_pr.create_review.side_effect = [
+            self._pending_review_422(),
+            self._pending_review_422(),
+        ]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._dismiss_pending_reviews = MagicMock(return_value=True)
+
+            finding = self._make_inline_finding()
+            client.post_review(mock_pr, "body", inline_findings=[finding])
+
+        posted_body = mock_pr.create_issue_comment.call_args[0][0]
+        assert "inline" in posted_body.lower()
+
+
 class TestApplyCommentLimits:
     """Tests for the apply_comment_limits utility function."""
 
@@ -1668,3 +1964,493 @@ class TestComputeReviewDeltaFuzzyMatching:
 
         assert len(delta.new_findings) == 1
         assert len(delta.open_findings) == 0
+
+
+class TestFixZoneSuppression:
+    """Tests for graduated suppression of low-severity findings on fix-zone lines."""
+
+    def _make_delta_with_fix_zone(self, current_findings, fixed_line=10):
+        """Helper: build a delta where line `fixed_line` in src/foo.py is a fix zone."""
+        from ai_reviewer.github.client import GitHubClient, PreviousComment
+
+        mock_pr = MagicMock()
+        mock_file = MagicMock()
+        mock_file.filename = "src/foo.py"
+        mock_file.patch = (
+            f"@@ -{fixed_line - 2},7 +{fixed_line - 2},7 @@\n"
+            f" context\n context\n-old line {fixed_line}\n+new line {fixed_line}\n context\n context"
+        )
+        mock_file.status = "modified"
+        mock_pr.get_files.return_value = [mock_file]
+
+        prev_comment = PreviousComment(
+            id=1,
+            file_path="src/foo.py",
+            line=fixed_line,
+            title="Old issue on fix line",
+            severity="warning",
+            body="🟡 **Old issue on fix line**\n\ndesc",
+        )
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client.get_previous_review_comments = MagicMock(return_value=[prev_comment])
+            delta = client.compute_review_delta(mock_pr, current_findings)
+
+        return delta
+
+    def test_suggestion_on_fix_zone_suppressed(self):
+        """A SUGGESTION on a fix-zone line is suppressed."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        finding = ConsolidatedFinding(
+            id="new-1",
+            file_path="src/foo.py",
+            line_start=10,
+            line_end=None,
+            severity=Severity.SUGGESTION,
+            category=Category.STYLE,
+            title="Style nit on fixed code",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+        delta = self._make_delta_with_fix_zone([finding])
+
+        assert len(delta.suppressed_findings) == 1
+        assert delta.suppressed_findings[0].id == "new-1"
+        assert len(delta.new_findings) == 0
+
+    def test_nitpick_on_fix_zone_suppressed(self):
+        """A NITPICK on a fix-zone line is suppressed."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        finding = ConsolidatedFinding(
+            id="new-1",
+            file_path="src/foo.py",
+            line_start=11,
+            line_end=None,
+            severity=Severity.NITPICK,
+            category=Category.STYLE,
+            title="Minor style issue",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+        delta = self._make_delta_with_fix_zone([finding])
+
+        assert len(delta.suppressed_findings) == 1
+        assert len(delta.new_findings) == 0
+
+    def test_warning_on_fix_zone_not_suppressed(self):
+        """A WARNING on a fix-zone line is NOT suppressed."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        finding = ConsolidatedFinding(
+            id="new-1",
+            file_path="src/foo.py",
+            line_start=10,
+            line_end=None,
+            severity=Severity.WARNING,
+            category=Category.LOGIC,
+            title="Real bug on fixed code",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+        delta = self._make_delta_with_fix_zone([finding])
+
+        assert len(delta.new_findings) == 1
+        assert len(delta.suppressed_findings) == 0
+
+    def test_critical_on_fix_zone_not_suppressed(self):
+        """A CRITICAL on a fix-zone line is NOT suppressed."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        finding = ConsolidatedFinding(
+            id="new-1",
+            file_path="src/foo.py",
+            line_start=10,
+            line_end=None,
+            severity=Severity.CRITICAL,
+            category=Category.SECURITY,
+            title="Security issue on fixed code",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+        delta = self._make_delta_with_fix_zone([finding])
+
+        assert len(delta.new_findings) == 1
+        assert len(delta.suppressed_findings) == 0
+
+    def test_suggestion_outside_fix_zone_not_suppressed(self):
+        """A SUGGESTION on a non-fix line is NOT suppressed."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        finding = ConsolidatedFinding(
+            id="new-1",
+            file_path="src/foo.py",
+            line_start=50,
+            line_end=None,
+            severity=Severity.SUGGESTION,
+            category=Category.STYLE,
+            title="Style nit on new code",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+        delta = self._make_delta_with_fix_zone([finding])
+
+        assert len(delta.new_findings) == 1
+        assert len(delta.suppressed_findings) == 0
+
+    def test_suggestion_in_different_file_not_suppressed(self):
+        """A SUGGESTION in a different file from the fix zone is NOT suppressed."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        finding = ConsolidatedFinding(
+            id="new-1",
+            file_path="src/bar.py",
+            line_start=10,
+            line_end=None,
+            severity=Severity.SUGGESTION,
+            category=Category.STYLE,
+            title="Style nit in other file",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+        delta = self._make_delta_with_fix_zone([finding])
+
+        assert len(delta.new_findings) == 1
+        assert len(delta.suppressed_findings) == 0
+
+    def test_fix_zone_tolerance_boundary(self):
+        """Findings within tolerance (3 lines) of fix line are suppressed."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        within_tolerance = ConsolidatedFinding(
+            id="within",
+            file_path="src/foo.py",
+            line_start=13,
+            line_end=None,
+            severity=Severity.SUGGESTION,
+            category=Category.STYLE,
+            title="Within tolerance",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+        outside_tolerance = ConsolidatedFinding(
+            id="outside",
+            file_path="src/foo.py",
+            line_start=14,
+            line_end=None,
+            severity=Severity.SUGGESTION,
+            category=Category.STYLE,
+            title="Outside tolerance",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+        delta = self._make_delta_with_fix_zone([within_tolerance, outside_tolerance])
+
+        suppressed_ids = {f.id for f in delta.suppressed_findings}
+        new_ids = {f.id for f in delta.new_findings}
+        assert "within" in suppressed_ids
+        assert "outside" in new_ids
+
+    def test_mixed_findings_partitioned_correctly(self):
+        """Multiple findings with different severities and locations are partitioned correctly."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        findings = [
+            ConsolidatedFinding(
+                id="suppressed-suggestion",
+                file_path="src/foo.py",
+                line_start=10,
+                line_end=None,
+                severity=Severity.SUGGESTION,
+                category=Category.STYLE,
+                title="Suggestion on fix zone",
+                description="desc",
+                suggested_fix=None,
+                consensus_score=1.0,
+                agreeing_agents=["a1"],
+                confidence=0.9,
+            ),
+            ConsolidatedFinding(
+                id="kept-warning",
+                file_path="src/foo.py",
+                line_start=10,
+                line_end=None,
+                severity=Severity.WARNING,
+                category=Category.LOGIC,
+                title="Warning on fix zone",
+                description="desc",
+                suggested_fix=None,
+                consensus_score=1.0,
+                agreeing_agents=["a1"],
+                confidence=0.9,
+            ),
+            ConsolidatedFinding(
+                id="kept-suggestion-elsewhere",
+                file_path="src/foo.py",
+                line_start=50,
+                line_end=None,
+                severity=Severity.SUGGESTION,
+                category=Category.STYLE,
+                title="Suggestion elsewhere",
+                description="desc",
+                suggested_fix=None,
+                consensus_score=1.0,
+                agreeing_agents=["a1"],
+                confidence=0.9,
+            ),
+        ]
+
+        delta = self._make_delta_with_fix_zone(findings)
+
+        suppressed_ids = {f.id for f in delta.suppressed_findings}
+        new_ids = {f.id for f in delta.new_findings}
+
+        assert suppressed_ids == {"suppressed-suggestion"}
+        assert new_ids == {"kept-warning", "kept-suggestion-elsewhere"}
+
+
+class TestGetReviewMetadata:
+    """Tests for get_review_metadata() parsing from mock PR reviews."""
+
+    def test_extracts_metadata_from_bot_review(self):
+        """Metadata is extracted from the most recent bot review."""
+        from ai_reviewer.github.client import GitHubClient
+
+        meta_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"abc123","review_count":2,'
+            '"timestamp":"2026-03-27T12:00:00Z","findings_hash":"deadbeef"} -->'
+        )
+
+        mock_review = MagicMock()
+        mock_review.user.login = "github-actions[bot]"
+        mock_review.body = f"Review body\n\n{meta_tag}"
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = [mock_review]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is not None
+        assert result.commit_sha == "abc123"
+        assert result.review_count == 2
+
+    def test_returns_none_for_legacy_reviews_without_metadata(self):
+        """Returns None when bot reviews have no metadata tag."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_review = MagicMock()
+        mock_review.user.login = "github-actions[bot]"
+        mock_review.body = "Old review without metadata"
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = [mock_review]
+        mock_pr.get_issue_comments.return_value = MagicMock(reversed=[])
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is None
+
+    def test_picks_most_recent_bot_review(self):
+        """When multiple bot reviews exist, picks the most recent one."""
+        from ai_reviewer.github.client import GitHubClient
+
+        old_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"old","review_count":1,'
+            '"timestamp":"2026-01-01T00:00:00Z","findings_hash":"aa"} -->'
+        )
+        new_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"new","review_count":3,'
+            '"timestamp":"2026-03-27T12:00:00Z","findings_hash":"bb"} -->'
+        )
+
+        old_review = MagicMock()
+        old_review.user.login = "github-actions[bot]"
+        old_review.body = f"Old review\n{old_tag}"
+
+        new_review = MagicMock()
+        new_review.user.login = "github-actions[bot]"
+        new_review.body = f"New review\n{new_tag}"
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = [old_review, new_review]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is not None
+        assert result.commit_sha == "new"
+        assert result.review_count == 3
+
+    def test_ignores_human_reviews(self):
+        """Human reviews are skipped even if they contain metadata-like text."""
+        from ai_reviewer.github.client import GitHubClient
+
+        human_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"spoofed","review_count":99,'
+            '"timestamp":"2026-01-01T00:00:00Z","findings_hash":"xx"} -->'
+        )
+
+        human_review = MagicMock()
+        human_review.user.login = "human-dev"
+        human_review.body = f"LGTM\n{human_tag}"
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = [human_review]
+        mock_pr.get_issue_comments.return_value = MagicMock(reversed=[])
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is None
+
+    def test_falls_back_to_issue_comments(self):
+        """Metadata is found in issue comments (fallback for _post_as_comment)."""
+        from ai_reviewer.github.client import GitHubClient
+
+        meta_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"fallback","review_count":1,'
+            '"timestamp":"2026-03-27T12:00:00Z","findings_hash":"cc"} -->'
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = []
+
+        mock_comment = MagicMock()
+        mock_comment.user.login = "github-actions[bot]"
+        mock_comment.body = f"Fallback comment\n{meta_tag}"
+        mock_pr.get_issue_comments.return_value = MagicMock(reversed=[mock_comment])
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is not None
+        assert result.commit_sha == "fallback"
+
+    def test_extra_reviewer_users_recognized(self):
+        """Reviews from extra_reviewer_users are also checked for metadata."""
+        from ai_reviewer.github.client import GitHubClient
+
+        meta_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"custom","review_count":2,'
+            '"timestamp":"2026-03-27T12:00:00Z","findings_hash":"dd"} -->'
+        )
+
+        mock_review = MagicMock()
+        mock_review.user.login = "custom-bot[bot]"
+        mock_review.body = f"Review\n{meta_tag}"
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = [mock_review]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(
+                token="test-token",
+                extra_reviewer_users=["custom-bot[bot]"],
+            )
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is not None
+        assert result.commit_sha == "custom"
+
+
+class TestPreviousCommentsCacheLRU:
+    """Tests for the LRU-bounded _previous_comments_cache."""
+
+    def _make_client(self, max_size=3):
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+        client._previous_comments_cache_max = max_size
+        return client
+
+    def _make_pr(self, number, comments=None):
+        pr = MagicMock()
+        pr.number = number
+        pr.get_review_comments.return_value = comments or []
+        return pr
+
+    def test_cache_evicts_oldest_when_full(self):
+        """When cache exceeds max size, the oldest entry is evicted."""
+        client = self._make_client(max_size=3)
+
+        for i in range(4):
+            client.get_previous_review_comments(self._make_pr(i))
+
+        assert 0 not in client._previous_comments_cache
+        assert list(client._previous_comments_cache.keys()) == [1, 2, 3]
+
+    def test_cache_hit_promotes_entry(self):
+        """Accessing a cached entry moves it to the end (most-recent)."""
+        client = self._make_client(max_size=3)
+
+        for i in range(3):
+            client.get_previous_review_comments(self._make_pr(i))
+
+        client.get_previous_review_comments(self._make_pr(0))
+
+        client.get_previous_review_comments(self._make_pr(99))
+
+        assert 1 not in client._previous_comments_cache
+        assert 0 in client._previous_comments_cache
+        assert list(client._previous_comments_cache.keys()) == [2, 0, 99]
+
+    def test_cache_returns_same_result_on_hit(self):
+        """Cache hit returns the same list without calling the API again."""
+        client = self._make_client()
+        pr = self._make_pr(42)
+
+        result1 = client.get_previous_review_comments(pr)
+        result2 = client.get_previous_review_comments(pr)
+
+        assert result1 is result2
+        pr.get_review_comments.assert_called_once()
+
+    def test_cache_size_never_exceeds_max(self):
+        """After many insertions the cache never grows beyond the max."""
+        client = self._make_client(max_size=5)
+
+        for i in range(20):
+            client.get_previous_review_comments(self._make_pr(i))
+
+        assert len(client._previous_comments_cache) == 5

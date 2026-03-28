@@ -16,9 +16,17 @@ from rich.table import Table
 from ai_reviewer import __version__
 from ai_reviewer.agents.cursor_client import CursorConfig
 from ai_reviewer.config import load_config, validate_config
-from ai_reviewer.github.client import GitHubClient, estimate_review_count, should_skip_review
+from ai_reviewer.github.client import (
+    GitHubClient,
+    ReviewMeta,
+    estimate_review_count,
+    lgtm_placeholder_review,
+    should_skip_before_agents,
+    should_skip_review,
+)
 from ai_reviewer.github.formatter import GitHubFormatter, format_review_as_json
 from ai_reviewer.github.webhook import create_webhook_app, set_review_handler
+from ai_reviewer.models.review import ConsolidatedReview
 from ai_reviewer.review import review_pr_with_cursor_agent
 
 console = Console()
@@ -148,6 +156,100 @@ async def review_pr_async(
         f"[dim]Requested {num_agents} agent(s); actual count may be reduced for small PRs[/dim]"
     )
 
+    cursor_config = CursorConfig(
+        api_key=config.cursor.api_key,
+        base_url=config.cursor.base_url,
+        timeout=config.cursor.timeout_seconds,
+    )
+
+    # Pre-agent checks (github output only — json/markdown always run agents)
+    gh: GitHubClient | None = None
+    pr = None
+    meta: ReviewMeta | None = None
+    recheck_review: ConsolidatedReview | None = None
+
+    if output == "github":
+        gh = GitHubClient(config.github.token)
+        pr = gh.get_pull_request(repo, pr_number)
+        current_sha = pr.head.sha
+
+        meta = gh.get_review_metadata(pr)
+        diff_files = {f.filename for f in pr.get_files()}
+        previous_comments = gh.get_previous_review_comments(pr) if meta else []
+        skip_reason = should_skip_before_agents(
+            meta,
+            current_sha,
+            force_review,
+            diff_files=diff_files,
+            previous_comments=previous_comments,
+        )
+        if skip_reason is not None:
+            console.print(
+                f"[dim]⏭️  Skipping review: {skip_reason.value} "
+                f"(use --force-review to override)[/dim]"
+            )
+            return
+
+        if meta is not None and not force_review:
+            lgtm_delta = gh.check_lgtm_fast_path(pr, meta)
+            if lgtm_delta is not None:
+                console.print(
+                    "[dim]🔍 LGTM candidate detected — running lightweight 1-agent re-check…[/dim]"
+                )
+                try:
+                    recheck_review = await review_pr_with_cursor_agent(
+                        repo=repo,
+                        pr_number=pr_number,
+                        cursor_config=cursor_config,
+                        github_token=config.github.token,
+                        num_agents=1,
+                        enable_cross_review=False,
+                        min_validation_agreement=min_validation_agreement,
+                        config=config,
+                    )
+                except Exception as e:
+                    console.print(f"[red]Error during LGTM re-check:[/red] {e}")
+                    console.print(
+                        "[yellow]Falling back to normal review flow after re-check failure[/yellow]"
+                    )
+
+                if recheck_review is not None and not recheck_review.findings:
+                    formatter = GitHubFormatter(reviewer_name)
+                    lgtm_review_count = meta.review_count + 1
+                    new_meta = ReviewMeta.build(
+                        commit_sha=current_sha,
+                        review_count=lgtm_review_count,
+                        finding_hashes=[],
+                    )
+                    lgtm_review = lgtm_placeholder_review(repo, pr_number)
+                    if dry_run:
+                        console.print(
+                            "\n[yellow]Dry run - LGTM (verified by 1-agent re-check)[/yellow]"
+                        )
+                        print(
+                            formatter.format_review_with_delta(
+                                lgtm_review, lgtm_delta, meta=new_meta
+                            )
+                        )
+                    else:
+                        body = formatter.format_review_with_delta_compact(
+                            lgtm_review, lgtm_delta, meta=new_meta
+                        )
+                        gh.post_review(pr, body, "COMMENT")
+                        if lgtm_delta.fixed_findings:
+                            resolved = gh.resolve_fixed_comments(pr, lgtm_delta)
+                            console.print(f"✅ LGTM: resolved {resolved} comments")
+                        console.print(
+                            "[green]🎉 LGTM — all issues resolved (verified by re-check)[/green]"
+                        )
+                    return
+
+                if recheck_review is not None:
+                    console.print(
+                        f"[yellow]Re-check found {len(recheck_review.findings)} issue(s) "
+                        f"— proceeding with normal review flow[/yellow]"
+                    )
+
     # Status callback
     last_status: list[str | None] = [None]
 
@@ -155,13 +257,6 @@ async def review_pr_async(
         if status != last_status[0]:
             console.print(f"  → Agent status: [cyan]{status}[/cyan]")
             last_status[0] = status
-
-    # Run review with Cursor agent
-    cursor_config = CursorConfig(
-        api_key=config.cursor.api_key,
-        base_url=config.cursor.base_url,
-        timeout=config.cursor.timeout_seconds,
-    )
 
     try:
         review = await review_pr_with_cursor_agent(
@@ -229,13 +324,14 @@ async def review_pr_async(
         formatter = GitHubFormatter(reviewer_name)
         print(formatter.format_review(review))
     else:  # github
-        gh = GitHubClient(config.github.token)
-        pr = gh.get_pull_request(repo, pr_number)
+        assert gh is not None and pr is not None
         formatter = GitHubFormatter(reviewer_name)
+        current_sha = pr.head.sha
 
         # Compute delta from previous reviews
         console.print("🔄 Checking for previous review comments...")
-        delta = gh.compute_review_delta(pr, review.findings)
+        meta_review_count = (meta.review_count + 1) if meta is not None else None
+        delta = gh.compute_review_delta(pr, review.findings, review_count=meta_review_count)
 
         # Show delta summary
         if delta.previous_comments:
@@ -248,9 +344,15 @@ async def review_pr_async(
         else:
             console.print("   No previous review comments found (first run)")
 
+        # Accurate review count: prefer metadata, fall back to heuristic
+        review_count: int
+        if meta_review_count is not None:
+            review_count = meta_review_count
+        else:
+            review_count = estimate_review_count(delta)
+
         # Convergence gate: skip posting when findings are unchanged
         if delta.previous_comments and not force_review:
-            review_count = estimate_review_count(delta)
             if should_skip_review(review_count, delta):
                 console.print(
                     "[dim]⏭️  Findings unchanged since last review — skipping post "
@@ -260,66 +362,72 @@ async def review_pr_async(
         elif force_review and delta.previous_comments:
             console.print("[dim]⚡ --force-review: bypassing convergence check[/dim]")
 
+        # Build metadata to embed in the review comment
+        finding_hashes = [f.finding_hash for f in review.findings]
+        new_meta = ReviewMeta.build(
+            commit_sha=current_sha,
+            review_count=review_count,
+            finding_hashes=finding_hashes,
+        )
+
         if dry_run:
             console.print("\n[yellow]Dry run - not posting to GitHub[/yellow]")
             if delta.previous_comments:
-                print(formatter.format_review_with_delta(review, delta))
+                print(formatter.format_review_with_delta(review, delta, meta=new_meta))
             else:
-                print(formatter.format_review(review))
+                print(formatter.format_review(review, meta=new_meta))
         else:
-            # Post inline comments only for NEW findings (compute first to choose body format)
-            new_findings_to_post = (
+            max_total = config.output.max_total_findings
+            max_per_file = config.output.max_findings_per_file
+
+            # Pre-filter inline findings so the compact body matches what GitHub will accept.
+            candidate_inline_findings = (
                 delta.new_findings if delta.previous_comments else review.findings
             )
-            use_compact_body = len(new_findings_to_post) > 0
+            postable_inline_findings = gh.get_postable_inline_findings(
+                pr,
+                inline_findings=candidate_inline_findings,
+                max_total=max_total,
+                max_per_file=max_per_file,
+            )
+            use_compact_body = len(postable_inline_findings) > 0
 
-            # Use minimal top-level body when posting inline comments (P0: inline-first)
             if delta.previous_comments:
                 body = (
-                    formatter.format_review_with_delta_compact(review, delta)
+                    formatter.format_review_with_delta_compact(
+                        review,
+                        delta,
+                        meta=new_meta,
+                        inline_new_findings=postable_inline_findings,
+                    )
                     if use_compact_body
-                    else formatter.format_review_with_delta(review, delta)
+                    else formatter.format_review_with_delta(review, delta, meta=new_meta)
                 )
                 action = formatter.get_review_action_with_delta(review, delta, allow_approve)
             else:
                 body = (
-                    formatter.format_review_compact(review)
+                    formatter.format_review_compact(
+                        review,
+                        meta=new_meta,
+                        inline_findings=postable_inline_findings,
+                    )
                     if use_compact_body
-                    else formatter.format_review(review)
+                    else formatter.format_review(review, meta=new_meta)
                 )
                 action = formatter.get_review_action(review, allow_approve=allow_approve)
 
-            gh.post_review(pr, review, body, action)
-            console.print(f"📝 Posted review to GitHub ({action})")
+            posted = gh.post_review(
+                pr,
+                body,
+                action,
+                inline_findings=postable_inline_findings or None,
+            )
+            console.print(f"📝 Posted review to GitHub ({action}, {posted} inline comments)")
 
-            # Resolve fixed comments
             if delta.fixed_findings:
                 console.print(f"✅ Marking {len(delta.fixed_findings)} fixed issues as resolved...")
                 resolved = gh.resolve_fixed_comments(pr, delta)
                 console.print(f"   Resolved {resolved} comments")
-
-            if new_findings_to_post:
-                # Create a temporary review with only new findings for inline comments
-                from ai_reviewer.models.review import ConsolidatedReview as CR
-
-                new_only_review = CR(
-                    id=review.id,
-                    created_at=review.created_at,
-                    repo=review.repo,
-                    pr_number=review.pr_number,
-                    findings=new_findings_to_post,
-                    summary=review.summary,
-                    agent_count=review.agent_count,
-                    review_quality_score=review.review_quality_score,
-                    total_review_time_ms=review.total_review_time_ms,
-                )
-                max_total = config.output.max_total_findings
-                max_per_file = config.output.max_findings_per_file
-                console.print(f"💬 Posting inline comments for up to {max_total} new findings...")
-                posted = gh.post_inline_comments(
-                    pr, new_only_review, max_total=max_total, max_per_file=max_per_file
-                )
-                console.print(f"   Posted {posted} inline comments")
 
             # Final status
             if delta.all_issues_resolved:

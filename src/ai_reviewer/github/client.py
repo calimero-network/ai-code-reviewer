@@ -1,18 +1,24 @@
 """GitHub API client for PR operations."""
 
+from __future__ import annotations
+
 import contextlib
+import enum
+import hashlib
+import json
 import logging
 import os
 import re
 import time
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 
 import requests
 import yaml
 from github import Github
 from github.GithubException import GithubException
-from github.PullRequest import PullRequest
+from github.PullRequest import PullRequest, ReviewComment
 from github.PullRequestComment import PullRequestComment
 from github.Repository import Repository
 
@@ -75,6 +81,79 @@ def _parse_severity(severity_str: str) -> Severity | None:
         return Severity(severity_str.lower())
     except ValueError:
         return None
+
+
+def compute_findings_hash(finding_hashes: list[str]) -> str:
+    """Deterministic hash of a sorted list of finding hashes.
+
+    Enables quick convergence checks: if the findings_hash from the previous
+    review matches the current one, the issue set is identical.
+    """
+    key = ":".join(sorted(finding_hashes))
+    return hashlib.sha256(key.encode()).hexdigest()[:16]
+
+
+_REVIEW_META_RE = re.compile(r"<!-- ai-reviewer-meta: ({.*?}) -->")
+
+
+@dataclass
+class ReviewMeta:
+    """Metadata embedded in top-level review comments for cross-run tracking."""
+
+    commit_sha: str
+    review_count: int
+    timestamp: str  # ISO 8601
+    findings_hash: str  # hash of sorted finding hashes for quick equality check
+
+    def to_html_comment(self) -> str:
+        payload = json.dumps(
+            {
+                "commit_sha": self.commit_sha,
+                "review_count": self.review_count,
+                "timestamp": self.timestamp,
+                "findings_hash": self.findings_hash,
+            },
+            separators=(",", ":"),
+        )
+        return f"<!-- ai-reviewer-meta: {payload} -->"
+
+    @classmethod
+    def parse(cls, body: str) -> ReviewMeta | None:
+        """Extract ReviewMeta from a comment body containing the HTML comment tag.
+
+        Returns None when the tag is missing or the JSON is malformed.
+        """
+        match = _REVIEW_META_RE.search(body)
+        if not match:
+            return None
+        try:
+            data = json.loads(match.group(1))
+        except (json.JSONDecodeError, TypeError):
+            return None
+        try:
+            return cls(
+                commit_sha=str(data["commit_sha"]),
+                review_count=int(data["review_count"]),
+                timestamp=str(data["timestamp"]),
+                findings_hash=str(data["findings_hash"]),
+            )
+        except (KeyError, ValueError, TypeError):
+            return None
+
+    @classmethod
+    def build(
+        cls,
+        commit_sha: str,
+        review_count: int,
+        finding_hashes: list[str],
+    ) -> ReviewMeta:
+        """Construct a ReviewMeta for the current review run."""
+        return cls(
+            commit_sha=commit_sha,
+            review_count=review_count,
+            timestamp=datetime.now(UTC).isoformat(),
+            findings_hash=compute_findings_hash(finding_hashes),
+        )
 
 
 def stabilize_severity(
@@ -169,6 +248,7 @@ class ReviewDelta:
     fixed_findings: list[PreviousComment] = field(default_factory=list)
     open_findings: list[ConsolidatedFinding] = field(default_factory=list)
     previous_comments: list[PreviousComment] = field(default_factory=list)
+    suppressed_findings: list[ConsolidatedFinding] = field(default_factory=list)
 
     @property
     def all_issues_resolved(self) -> bool:
@@ -222,6 +302,64 @@ def estimate_review_count(delta: ReviewDelta) -> int:
     return max(2, len(delta.previous_comments) // 3 + 1)
 
 
+def lgtm_placeholder_review(repo: str, pr_number: int) -> ConsolidatedReview:
+    """Build a minimal ConsolidatedReview for the LGTM fast path."""
+    return ConsolidatedReview(
+        id="lgtm-fast-path",
+        created_at=datetime.now(UTC),
+        repo=repo,
+        pr_number=pr_number,
+        findings=[],
+        summary="All previously identified issues addressed",
+        agent_count=0,
+        review_quality_score=1.0,
+        total_review_time_ms=0,
+    )
+
+
+class SkipReason(enum.Enum):
+    """Reason for skipping a review before running agents."""
+
+    ALREADY_REVIEWED = "already_reviewed"
+    FINDINGS_UNCHANGED = "findings_unchanged"
+
+
+def should_skip_before_agents(
+    meta: ReviewMeta | None,
+    current_sha: str,
+    force_review: bool = False,
+    diff_files: set[str] | None = None,
+    previous_comments: list[PreviousComment] | None = None,
+) -> SkipReason | None:
+    """Decide whether to skip the review entirely before running agents.
+
+    Returns a ``SkipReason`` when the review should be skipped, or ``None``
+    when agents should proceed.  The LGTM fast path is **not** handled here
+    (it requires a lightweight delta computation); see the webhook/CLI callers.
+
+    Checks (in order):
+    * ``force_review`` → never skip.
+    * Same ``commit_sha`` → ``ALREADY_REVIEWED``.
+    * ``findings_hash`` available and diff doesn't touch any file with previous
+      findings → ``FINDINGS_UNCHANGED``.
+    """
+    if force_review:
+        return None
+
+    if meta is None:
+        return None
+
+    if meta.commit_sha == current_sha:
+        return SkipReason.ALREADY_REVIEWED
+
+    if meta.findings_hash and diff_files is not None and previous_comments is not None:
+        previous_files = {c.file_path for c in previous_comments}
+        if previous_comments and not diff_files & previous_files:
+            return SkipReason.FINDINGS_UNCHANGED
+
+    return None
+
+
 class GitHubClient:
     """Client for GitHub API operations."""
 
@@ -243,6 +381,8 @@ class GitHubClient:
         self._current_user_login: str | None = None
         self._allowed_users: set[str] | None = None
         self._extra_reviewer_users: set[str] = set(extra_reviewer_users or [])
+        self._previous_comments_cache: OrderedDict[int, list[PreviousComment]] = OrderedDict()
+        self._previous_comments_cache_max = 50
 
         if base_url:
             self._gh = Github(token, base_url=base_url)
@@ -483,29 +623,133 @@ class GitHubClient:
     def post_review(
         self,
         pr: PullRequest,
-        review: ConsolidatedReview,  # noqa: ARG002
         body: str,
         event: str = "COMMENT",
-    ) -> None:
-        """Post a review to a PR.
+        inline_findings: list[ConsolidatedFinding] | None = None,
+    ) -> int:
+        """Post a review to a PR, optionally with inline comments in a single API call.
 
-        Args:
-            pr: Pull request to review
-            review: Consolidated review data (kept for API compatibility)
-            body: Review body text
-            event: Review event type (APPROVE, REQUEST_CHANGES, COMMENT)
+        When *inline_findings* is provided they must already be filtered via
+        ``get_postable_inline_findings``.  The top-level body and all inline
+        comments are submitted atomically via one ``create_review`` call.
+
+        Returns the number of inline comments included in the review.
         """
-        logger.info(f"Posting review to PR #{pr.number}: {event}")
+        comments = self._build_review_comments(inline_findings)
+        inline_comments_posted = len(comments)
+
+        logger.info(
+            "Posting review to PR #%d: %s (%d inline comments)",
+            pr.number,
+            event,
+            len(comments),
+        )
 
         try:
-            pr.create_review(body=body, event=event)
+            if comments:
+                pr.create_review(body=body, event=event, comments=comments)
+            else:
+                pr.create_review(body=body, event=event)
         except GithubException as e:
             if e.status == 422 and "pending review" in str(e.data).lower():
-                logger.warning("User has a pending review, falling back to issue comment")
-                # Fall back to posting as a regular comment
-                self._post_as_comment(pr, body)
+                logger.warning(
+                    "Pending review detected on PR #%d, attempting dismiss-and-retry",
+                    pr.number,
+                )
+                self._dismiss_pending_reviews(pr)
+                try:
+                    if comments:
+                        pr.create_review(body=body, event=event, comments=comments)
+                    else:
+                        pr.create_review(body=body, event=event)
+                except GithubException as retry_exc:
+                    if retry_exc.status == 422 and "pending review" in str(retry_exc.data).lower():
+                        if comments:
+                            logger.warning(
+                                "Retry failed — posting body as issue comment. "
+                                "%d inline comment(s) could not be posted.",
+                                len(comments),
+                            )
+                            inline_comments_posted = 0
+                            self._post_as_comment_with_inline_warning(pr, body, len(comments))
+                        else:
+                            logger.warning("Retry failed — posting body as issue comment")
+                            self._post_as_comment(pr, body)
+                    else:
+                        raise
             else:
                 raise
+
+        return inline_comments_posted
+
+    @staticmethod
+    def _build_review_comments(
+        inline_findings: list[ConsolidatedFinding] | None,
+    ) -> list[ReviewComment]:
+        """Build atomic review comments from pre-filtered findings.
+
+        Callers are responsible for filtering via ``get_postable_inline_findings``
+        before passing findings here.  Each entry matches PyGithub's review
+        comment shape: ``path``, ``line``, and ``body``, suitable for
+        ``PullRequest.create_review(..., comments=...)``.
+        """
+        if not inline_findings:
+            return []
+
+        severity_emoji = {
+            "critical": "🔴",
+            "warning": "🟡",
+            "suggestion": "💡",
+            "nitpick": "📝",
+        }
+
+        comments: list[ReviewComment] = []
+        for finding in inline_findings:
+            emoji = severity_emoji.get(finding.severity.value, "ℹ️")
+            comment_body = f"{emoji} **{finding.title}**\n\n{finding.description}"
+            if finding.suggested_fix:
+                comment_body += f"\n\n**Suggested fix:**\n```\n{finding.suggested_fix}\n```"
+            comment_body += f"\n\n<!-- ai-reviewer-id: {finding.finding_hash} -->"
+
+            entry: ReviewComment = {
+                "path": finding.file_path,
+                "line": finding.line_start,
+                "body": comment_body,
+            }
+            comments.append(entry)
+
+        return comments
+
+    def get_postable_inline_findings(
+        self,
+        pr: PullRequest,
+        inline_findings: list[ConsolidatedFinding] | None,
+        max_total: int,
+        max_per_file: int,
+    ) -> list[ConsolidatedFinding]:
+        """Return inline findings that can actually be posted on this PR diff."""
+        if not inline_findings:
+            return []
+
+        file_modified_lines: dict[str, set[int]] = {}
+        for pr_file in pr.get_files():
+            if pr_file.patch:
+                file_modified_lines[pr_file.filename] = self._parse_modified_lines(pr_file.patch)
+
+        postable_findings: list[ConsolidatedFinding] = []
+        for finding in apply_comment_limits(inline_findings, max_total, max_per_file):
+            modified_lines = file_modified_lines.get(finding.file_path)
+            if not modified_lines or finding.line_start not in modified_lines:
+                logger.warning(
+                    "Skipping inline comment on %s:%d because the line is not resolvable in the PR diff",
+                    finding.file_path,
+                    finding.line_start,
+                )
+                continue
+
+            postable_findings.append(finding)
+
+        return postable_findings
 
     def _post_as_comment(self, pr: PullRequest, body: str) -> None:
         """Post review as a regular issue comment (fallback).
@@ -514,75 +758,125 @@ class GitHubClient:
             pr: Pull request object
             body: Comment body
         """
-        # Add a note that this is posted as a comment due to pending review
         comment_body = (
             f"⚠️ *Posted as comment because you have a pending review on this PR.*\n\n---\n\n{body}"
         )
         pr.create_issue_comment(comment_body)
         logger.info(f"Posted review as issue comment on PR #{pr.number}")
 
-    def post_inline_comments(
-        self,
-        pr: PullRequest,
-        review: ConsolidatedReview,
-        max_total: int = 50,
-        max_per_file: int = 10,
-    ) -> int:
-        """Post inline comments for each finding.
-
-        Args:
-            pr: Pull request
-            review: Consolidated review with findings
-            max_total: Maximum total inline comments to post
-            max_per_file: Maximum inline comments per file
-
-        Returns:
-            Number of successfully posted comments
-        """
-        # Get the head commit for inline comments
-        head_commit = pr.get_commits().reversed[0]
-        posted_count = 0
-
-        for finding in apply_comment_limits(review.findings, max_total, max_per_file):
-            try:
-                # Build comment body with emoji for severity
-                severity_emoji = {
-                    "critical": "🔴",
-                    "warning": "🟡",
-                    "suggestion": "💡",
-                    "nitpick": "📝",
-                }.get(finding.severity.value, "ℹ️")
-
-                comment_body = f"{severity_emoji} **{finding.title}**\n\n{finding.description}"
-                if finding.suggested_fix:
-                    comment_body += f"\n\n**Suggested fix:**\n```\n{finding.suggested_fix}\n```"
-                comment_body += f"\n\n<!-- ai-reviewer-id: {finding.finding_hash} -->"
-
-                # Use create_review_comment for inline comments on the diff
-                pr.create_review_comment(
-                    body=comment_body,
-                    commit=head_commit,
-                    path=finding.file_path,
-                    line=finding.line_start,
-                )
-                posted_count += 1
-                logger.debug(f"Posted inline comment on {finding.file_path}:{finding.line_start}")
-            except Exception as e:
-                _raise_if_forbidden(e)
-                # Inline comments can fail if the line isn't in the diff
-                logger.warning(
-                    f"Could not post inline comment on {finding.file_path}:{finding.line_start}: {e}"
-                )
-
-        return posted_count
+    def _post_as_comment_with_inline_warning(
+        self, pr: PullRequest, body: str, dropped_inline_count: int
+    ) -> None:
+        """Post review as issue comment with a warning about lost inline comments."""
+        comment_body = (
+            f"⚠️ *Posted as comment because a pending review could not be cleared.*\n"
+            f"**{dropped_inline_count} inline comment(s) could not be posted** — "
+            f"please check the review body below for details.\n\n---\n\n{body}"
+        )
+        pr.create_issue_comment(comment_body)
+        logger.info(f"Posted review as issue comment on PR #{pr.number}")
 
     # Known AI reviewer bot usernames
     AI_REVIEWER_USERS = {
         "github-actions[bot]",
     }
 
+    def get_review_metadata(self, pr: PullRequest) -> ReviewMeta | None:
+        """Extract ReviewMeta from the most recent bot review on this PR.
+
+        Only checks the *most recent* review (and issue comment) from allowed
+        users.  If that review/comment lacks embedded metadata (legacy format),
+        returns ``None`` rather than searching older entries — this prevents
+        returning stale metadata from a much earlier review run.
+        """
+        allowed_users = self._get_allowed_users()
+        try:
+            reviews = list(pr.get_reviews())
+        except Exception as e:
+            _raise_if_forbidden(e)
+            logger.warning("Could not fetch PR reviews for metadata: %s", e)
+            return None
+
+        for review in reversed(reviews):
+            if review.user is None or review.user.login not in allowed_users:
+                continue
+            body = review.body or ""
+            meta = ReviewMeta.parse(body)
+            if meta is not None:
+                logger.debug(
+                    "Found review metadata: commit=%s count=%d",
+                    meta.commit_sha[:8],
+                    meta.review_count,
+                )
+                return meta
+            logger.debug(
+                "Most recent bot review (id=%s) has no metadata; not searching older reviews",
+                review.id,
+            )
+            break
+
+        # Fallback: check the most recent issue comment from allowed users
+        try:
+            for comment in pr.get_issue_comments().reversed:
+                if comment.user is None or comment.user.login not in allowed_users:
+                    continue
+                meta = ReviewMeta.parse(comment.body or "")
+                if meta is not None:
+                    logger.debug(
+                        "Found review metadata in issue comment: commit=%s count=%d",
+                        meta.commit_sha[:8],
+                        meta.review_count,
+                    )
+                    return meta
+                logger.debug(
+                    "Most recent bot issue comment (id=%s) has no metadata; not searching older comments",
+                    comment.id,
+                )
+                break
+        except Exception as e:
+            _raise_if_forbidden(e)
+            logger.warning("Could not fetch issue comments for metadata: %s", e)
+
+        return None
+
+    def check_lgtm_fast_path(
+        self,
+        pr: PullRequest,
+        meta: ReviewMeta,
+    ) -> ReviewDelta | None:
+        """Check if the PR is an LGTM *candidate* based on diff heuristics.
+
+        Computes a lightweight delta with an empty findings list to see whether
+        every previously-reported comment has been fixed in the new diff.
+
+        Returns the candidate delta when ``all_issues_resolved`` is True and
+        ``meta.review_count >= 2``, otherwise ``None``.
+
+        **Important:** A non-None return only means the PR *looks* clean from
+        the diff.  Callers must run a lightweight 1-agent re-check to confirm
+        before posting the LGTM review.
+        """
+        if meta.review_count < 2:
+            return None
+
+        delta = self.compute_review_delta(pr, current_findings=[])
+        if not delta.previous_comments:
+            return None
+        if delta.all_issues_resolved:
+            logger.info(
+                "LGTM fast path: all %d previous issues resolved (review_count=%d)",
+                len(delta.fixed_findings),
+                meta.review_count,
+            )
+            return delta
+        return None
+
     def get_previous_review_comments(self, pr: PullRequest) -> list[PreviousComment]:
         """Get all previous review comments from AI reviewers.
+
+        Results are cached per PR number for the lifetime of this client
+        instance to avoid redundant API calls (e.g. LGTM fast path check
+        followed by the main review flow).
 
         Args:
             pr: Pull request object
@@ -590,29 +884,29 @@ class GitHubClient:
         Returns:
             List of previous comments from AI reviewers
         """
+        if pr.number in self._previous_comments_cache:
+            self._previous_comments_cache.move_to_end(pr.number)
+            return self._previous_comments_cache[pr.number]
         comments: list[PreviousComment] = []
         allowed_users = self._get_allowed_users()
 
-        # Get review comments (inline comments on code)
         for comment in pr.get_review_comments():
-            # Skip our own resolved / "no longer detected" replies - they are not findings
             if _is_resolved_reply(comment.body):
                 continue
 
             user_login = comment.user.login
 
-            # Only process comments authored by our bot - never human or other bot comments.
-            # Using format-based matching (has_ai_format) caused false positives where we
-            # would reply "Resolved" to human comments that happened to use similar formatting.
             if user_login not in allowed_users:
                 continue
 
-            # Parse the comment to extract title and severity
             parsed = self._parse_review_comment(comment)
             if parsed:
                 comments.append(parsed)
 
         logger.info(f"Found {len(comments)} previous AI review comments")
+        self._previous_comments_cache[pr.number] = comments
+        if len(self._previous_comments_cache) > self._previous_comments_cache_max:
+            self._previous_comments_cache.popitem(last=False)
         return comments
 
     def _parse_review_comment(self, comment: PullRequestComment) -> PreviousComment | None:
@@ -663,12 +957,15 @@ class GitHubClient:
         self,
         pr: PullRequest,
         current_findings: list[ConsolidatedFinding],
+        review_count: int | None = None,
     ) -> ReviewDelta:
         """Compare current findings with previous comments to compute delta.
 
         Args:
             pr: Pull request object
             current_findings: Current review findings
+            review_count: Accurate review count from metadata. When ``None``,
+                falls back to ``estimate_review_count()`` heuristic.
 
         Returns:
             ReviewDelta showing new, fixed, and open issues
@@ -692,7 +989,13 @@ class GitHubClient:
         # Track which previous comments are still open
         matched_previous: set[int] = set()
 
-        review_count = estimate_review_count(delta)
+        effective_review_count = (
+            review_count if review_count is not None else estimate_review_count(delta)
+        )
+
+        # Collect candidate new findings; fix-zone filtering happens after
+        # fixed_findings are determined below.
+        candidate_new: list[ConsolidatedFinding] = []
 
         for finding in current_findings:
             # Three-tier matching: strict hash → fuzzy hash → title+line
@@ -708,12 +1011,13 @@ class GitHubClient:
             if matched_comment is not None:
                 prev_sev = _parse_severity(matched_comment.severity)
                 if prev_sev is not None:
-                    finding.severity = stabilize_severity(finding.severity, prev_sev, review_count)
+                    finding.severity = stabilize_severity(
+                        finding.severity, prev_sev, effective_review_count
+                    )
                 delta.open_findings.append(finding)
                 matched_previous.add(matched_comment.id)
             else:
-                # This is a NEW finding
-                delta.new_findings.append(finding)
+                candidate_new.append(finding)
 
         # Determine which unmatched previous comments are likely fixed.
         # We mark as fixed when:
@@ -722,13 +1026,11 @@ class GitHubClient:
         # 3. The commented line was modified AND the AI didn't find the issue again
         #
         # This avoids false "no longer detected" replies on unmodified code while
-        # still detecting
-        # actual fixes when the relevant lines were changed.
+        # still detecting actual fixes when the relevant lines were changed.
         pr_files = list(pr.get_files())
         changed_files = {f.filename for f in pr_files}
         removed_files = {f.filename for f in pr_files if getattr(f, "status", None) == "removed"}
 
-        # Build a mapping of file -> modified lines (only for files with patches)
         file_modified_lines: dict[str, set[int]] = {}
         for f in pr_files:
             if f.patch:
@@ -738,20 +1040,12 @@ class GitHubClient:
             if comment.id not in matched_previous:
                 file_path = comment.file_path
 
-                if file_path not in changed_files:
-                    # File was removed/renamed - definitely fixed
-                    delta.fixed_findings.append(comment)
-                elif file_path in removed_files:
-                    # File was deleted (no patch for binary/large files) - definitely fixed
+                if file_path not in changed_files or file_path in removed_files:
                     delta.fixed_findings.append(comment)
                 elif file_path in file_modified_lines:
-                    # File is still in diff - check if the commented line was modified
                     modified_lines = file_modified_lines[file_path]
                     if self._is_line_in_modified_range(comment.line, modified_lines):
-                        # The line was modified AND the AI didn't find the issue again
-                        # → likely fixed
                         delta.fixed_findings.append(comment)
-                # else: file in diff but line wasn't modified → don't mark as fixed
 
         # Deduplicate by comment ID to prevent exponential growth on re-reviews
         seen: set[int] = set()
@@ -761,10 +1055,39 @@ class GitHubClient:
             if f.id not in seen and not seen.add(f.id)  # type: ignore[func-returns-value]
         ]
 
+        # Build fix zones: file → set of line numbers (with tolerance) where a
+        # previous finding was fixed.  New low-severity findings landing in these
+        # zones are suppressed to break the noise loop.
+        fix_zones: dict[str, set[int]] = defaultdict(set)
+        fix_zone_tolerance = 3
+        for fixed_comment in delta.fixed_findings:
+            line = fixed_comment.line
+            for offset in range(-fix_zone_tolerance, fix_zone_tolerance + 1):
+                fix_zones[fixed_comment.file_path].add(line + offset)
+
+        _SUPPRESSED_SEVERITIES = {Severity.SUGGESTION, Severity.NITPICK}
+
+        for finding in candidate_new:
+            if (
+                finding.file_path in fix_zones
+                and finding.line_start in fix_zones[finding.file_path]
+                and finding.severity in _SUPPRESSED_SEVERITIES
+            ):
+                delta.suppressed_findings.append(finding)
+            else:
+                delta.new_findings.append(finding)
+
+        if delta.suppressed_findings:
+            logger.info(
+                "Suppressed %d low-severity finding(s) on fix-zone lines",
+                len(delta.suppressed_findings),
+            )
+
         logger.info(
             f"Review delta: {len(delta.new_findings)} new, "
             f"{len(delta.fixed_findings)} fixed, "
-            f"{len(delta.open_findings)} open"
+            f"{len(delta.open_findings)} open, "
+            f"{len(delta.suppressed_findings)} suppressed"
         )
 
         return delta

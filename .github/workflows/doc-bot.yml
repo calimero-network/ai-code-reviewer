@@ -21,13 +21,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     
-    # Prevent duplicate comments from concurrent runs on rapid pushes
+    # Serialise runs per PR; don't cancel so the latest push always completes
     concurrency:
       group: doc-bot-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
-    
+      cancel-in-progress: false
+
     # Don't run on forks to avoid security issues with write permissions
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: ${{ github.event.pull_request.head.repo.fork == false }}
     
     steps:
       - name: Checkout code
@@ -104,7 +104,6 @@ jobs:
           echo "Changed files:"
           echo "$CHANGED"
       
-      # Only install dependencies if files actually changed
       - name: Setup Python
         if: steps.changed-files.outputs.any_changed == 'true'
         # Pinned to v5.1.0 - https://github.com/actions/setup-python/releases/tag/v5.1.0
@@ -112,127 +111,12 @@ jobs:
         with:
           python-version: '3.11'
       
-      - name: Install minimal dependencies
-        if: steps.changed-files.outputs.any_changed == 'true'
-        run: |
-          # Only install what's needed for doc analysis (not full dev dependencies)
-          pip install pyyaml
-      
       - name: Analyze documentation needs
         id: doc-analysis
         if: steps.changed-files.outputs.any_changed == 'true'
         env:
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Pass changed files via environment variable to prevent command injection
           CHANGED_FILES: ${{ steps.changed-files.outputs.CHANGED_FILES }}
-        run: |
-          # Run the doc-check analysis
-          if [ -n "$CURSOR_API_KEY" ]; then
-            python << 'PYTHON_EOF'
-import os
-import sys
-from pathlib import Path
-
-# Read changed files safely from environment (newline-separated)
-changed_files_str = os.environ.get('CHANGED_FILES', '')
-changed = [f.strip() for f in changed_files_str.strip().split('\n') if f.strip()]
-
-# Analyze each changed file for documentation impact
-suggestions = []
-
-for filepath in changed:
-    # Sanitize filepath - only allow expected characters
-    if not all(c.isalnum() or c in '._-/' for c in filepath):
-        # Don't log unsanitized filepath - just log length to avoid log injection
-        print(f"Warning: Skipping file with unexpected characters (length={len(filepath)})", file=sys.stderr)
-        continue
-    
-    path = Path(filepath)
-    
-    # Check if it's a Python file in a documented module
-    if path.suffix == '.py' and path.parent.name in ['agents', 'orchestrator', 'github', 'models']:
-        suggestions.append({
-            'file': f'.ai/rules/{path.parent.name}.md',
-            'reason': f'File `{filepath}` changed - may need documentation update',
-            'priority': 'normal'
-        })
-    
-    # Check if it changes config
-    if 'config' in filepath.lower():
-        suggestions.append({
-            'file': 'config.example.yaml',
-            'reason': 'Configuration changes may need example updates',
-            'priority': 'normal'
-        })
-        suggestions.append({
-            'file': 'README.md',
-            'reason': 'Configuration changes may affect README docs',
-            'priority': 'normal'
-        })
-    
-    # Check if it's CLI changes
-    if 'cli' in filepath.lower():
-        suggestions.append({
-            'file': 'README.md',
-            'reason': 'CLI changes may need README command documentation update',
-            'priority': 'normal'
-        })
-
-# Deduplicate suggestions by file
-seen_files = set()
-unique_suggestions = []
-for s in suggestions:
-    if s['file'] not in seen_files:
-        seen_files.add(s['file'])
-        unique_suggestions.append(s)
-
-# Output suggestions using GitHub Actions output format
-output_file = os.environ.get('GITHUB_OUTPUT', '/dev/stdout')
-with open(output_file, 'a') as f:
-    f.write('SUGGESTIONS<<EOF\n')
-    if unique_suggestions:
-        # HTML marker for reliable comment detection (won't appear in normal comments)
-        f.write('<!-- AI-CODE-REVIEWER-DOC-BOT -->\n')
-        f.write('## 📚 Documentation Check\n\n')
-        f.write('The following documentation files may need updates based on code changes:\n\n')
-        for s in unique_suggestions:
-            f.write(f"- **{s['file']}**: {s['reason']} [{s['priority']}]\n")
-        f.write('\n*Please review these suggestions and update documentation if needed.*\n')
-    # When no suggestions, write empty string so the condition skips posting
-    f.write('EOF\n')
-PYTHON_EOF
-          else
-            # Fallback when no API key - provide manual checklist
-            echo "::notice::Documentation bot running in manual mode (no CURSOR_API_KEY configured)"
-            {
-              echo "SUGGESTIONS<<EOF"
-              # HTML marker for reliable comment detection
-              echo "<!-- AI-CODE-REVIEWER-DOC-BOT -->"
-              echo "## 📚 Documentation Check (Manual Mode)"
-              echo ""
-              echo "⚠️ Automated analysis skipped (no API key configured)."
-              echo ""
-              echo "**Changed files to manually check for doc updates:**"
-              echo ""
-              # Sanitize and escape filenames for markdown output (consistent with Python path)
-              echo "$CHANGED_FILES" | while IFS= read -r file; do
-                if [ -n "$file" ]; then
-                  # Only allow safe characters (alphanumeric, dots, underscores, hyphens, slashes)
-                  if echo "$file" | grep -qE '^[a-zA-Z0-9._/-]+$'; then
-                    # Escape backticks for markdown safety
-                    safe_file="${file//\`/\\\`}"
-                    echo "- \`$safe_file\`"
-                  else
-                    echo "- *(skipped file with unexpected characters)*"
-                  fi
-                fi
-              done
-              echo ""
-              echo "*Please manually verify if documentation updates are needed.*"
-              echo "EOF"
-            } >> "$GITHUB_OUTPUT"
-          fi
+        run: python3 .github/scripts/doc_analysis.py
       
       - name: Post comment on PR
         if: steps.doc-analysis.outputs.SUGGESTIONS != ''
