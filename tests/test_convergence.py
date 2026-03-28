@@ -2298,7 +2298,7 @@ class TestFormatterSuppressedLine:
         formatter = GitHubFormatter()
         body = formatter.format_review_with_delta_compact(review, delta)
 
-        assert "3 low-severity suggestions suppressed on recently-fixed code" in body
+        assert "3 low-severity findings suppressed on recently-fixed code" in body
 
     def test_compact_delta_no_suppressed_line_when_empty(self):
         from ai_reviewer.github.formatter import GitHubFormatter
@@ -2355,7 +2355,7 @@ class TestFormatterSuppressedLine:
         formatter = GitHubFormatter()
         body = formatter.format_review_with_delta(review, delta)
 
-        assert "1 low-severity suggestion suppressed on recently-fixed code" in body
+        assert "1 low-severity finding suppressed on recently-fixed code" in body
 
     def test_singular_suppressed_noun(self):
         from ai_reviewer.github.formatter import GitHubFormatter
@@ -2383,8 +2383,8 @@ class TestFormatterSuppressedLine:
         formatter = GitHubFormatter()
         body = formatter.format_review_with_delta_compact(review, delta)
 
-        assert "1 low-severity suggestion suppressed" in body
-        assert "suggestions" not in body
+        assert "1 low-severity finding suppressed" in body
+        assert "findings" not in body
 
 
 class TestSuppressedFindingsNotPosted:

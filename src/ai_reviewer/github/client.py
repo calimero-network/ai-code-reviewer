@@ -13,13 +13,12 @@ import time
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
 
 import requests
 import yaml
 from github import Github
 from github.GithubException import GithubException
-from github.PullRequest import PullRequest
+from github.PullRequest import PullRequest, ReviewComment
 from github.PullRequestComment import PullRequestComment
 from github.Repository import Repository
 
@@ -686,7 +685,7 @@ class GitHubClient:
     @staticmethod
     def _build_review_comments(
         inline_findings: list[ConsolidatedFinding] | None,
-    ) -> list[dict[str, Any]]:
+    ) -> list[ReviewComment]:
         """Build atomic review comments from pre-filtered findings.
 
         Callers are responsible for filtering via ``get_postable_inline_findings``
@@ -697,27 +696,27 @@ class GitHubClient:
         if not inline_findings:
             return []
 
-        comments: list[dict[str, Any]] = []
-        for finding in inline_findings:
-            severity_emoji = {
-                "critical": "🔴",
-                "warning": "🟡",
-                "suggestion": "💡",
-                "nitpick": "📝",
-            }.get(finding.severity.value, "ℹ️")
+        severity_emoji = {
+            "critical": "🔴",
+            "warning": "🟡",
+            "suggestion": "💡",
+            "nitpick": "📝",
+        }
 
-            comment_body = f"{severity_emoji} **{finding.title}**\n\n{finding.description}"
+        comments: list[ReviewComment] = []
+        for finding in inline_findings:
+            emoji = severity_emoji.get(finding.severity.value, "ℹ️")
+            comment_body = f"{emoji} **{finding.title}**\n\n{finding.description}"
             if finding.suggested_fix:
                 comment_body += f"\n\n**Suggested fix:**\n```\n{finding.suggested_fix}\n```"
             comment_body += f"\n\n<!-- ai-reviewer-id: {finding.finding_hash} -->"
 
-            comments.append(
-                {
-                    "path": finding.file_path,
-                    "line": finding.line_start,
-                    "body": comment_body,
-                }
-            )
+            entry: ReviewComment = {
+                "path": finding.file_path,
+                "line": finding.line_start,
+                "body": comment_body,
+            }
+            comments.append(entry)
 
         return comments
 
