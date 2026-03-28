@@ -636,6 +636,7 @@ class GitHubClient:
         Returns the number of inline comments included in the review.
         """
         comments = self._build_review_comments(inline_findings)
+        inline_comments_posted = len(comments)
 
         logger.info(
             "Posting review to PR #%d: %s (%d inline comments)",
@@ -669,6 +670,7 @@ class GitHubClient:
                                 "%d inline comment(s) could not be posted.",
                                 len(comments),
                             )
+                            inline_comments_posted = 0
                             self._post_as_comment_with_inline_warning(pr, body, len(comments))
                         else:
                             logger.warning("Retry failed — posting body as issue comment")
@@ -678,7 +680,7 @@ class GitHubClient:
             else:
                 raise
 
-        return len(comments)
+        return inline_comments_posted
 
     @staticmethod
     def _build_review_comments(

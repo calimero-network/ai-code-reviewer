@@ -1283,7 +1283,7 @@ class TestPostReviewPendingRetry:
             assert len(retry_call.kwargs["comments"]) == 1
 
     def test_fallback_with_warning_when_retry_also_fails(self):
-        """When dismiss+retry still fails, fall back to issue comment with warning."""
+        """Fallback reports zero inline comments when they were dropped."""
         from ai_reviewer.github.client import GitHubClient
 
         mock_pr = MagicMock()
@@ -1303,10 +1303,10 @@ class TestPostReviewPendingRetry:
         mock_pr.create_issue_comment.assert_called_once()
         posted_body = mock_pr.create_issue_comment.call_args[0][0]
         assert "inline comments" in posted_body.lower() or "could not" in posted_body.lower()
-        assert count == 1
+        assert count == 0
 
     def test_fallback_when_dismiss_fails(self):
-        """When dismiss returns False, still retry once, then fall back."""
+        """Dismiss failure still falls back and reports zero inline comments."""
         from ai_reviewer.github.client import GitHubClient
 
         mock_pr = MagicMock()
@@ -1324,7 +1324,7 @@ class TestPostReviewPendingRetry:
             count = client.post_review(mock_pr, "body", inline_findings=[finding])
 
         mock_pr.create_issue_comment.assert_called_once()
-        assert count == 1
+        assert count == 0
 
     def test_no_inline_comments_still_falls_back_to_issue_comment(self):
         """Body-only review (no inline) on 422 also does dismiss-and-retry."""
