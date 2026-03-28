@@ -1923,6 +1923,282 @@ class TestComputeReviewDeltaFuzzyMatching:
         assert len(delta.open_findings) == 0
 
 
+class TestFixZoneSuppression:
+    """Tests for graduated suppression of low-severity findings on fix-zone lines."""
+
+    def _make_delta_with_fix_zone(self, current_findings, fixed_line=10):
+        """Helper: build a delta where line `fixed_line` in src/foo.py is a fix zone."""
+        from ai_reviewer.github.client import GitHubClient, PreviousComment
+
+        mock_pr = MagicMock()
+        mock_file = MagicMock()
+        mock_file.filename = "src/foo.py"
+        mock_file.patch = (
+            f"@@ -{fixed_line - 2},7 +{fixed_line - 2},7 @@\n"
+            f" context\n context\n-old line {fixed_line}\n+new line {fixed_line}\n context\n context"
+        )
+        mock_file.status = "modified"
+        mock_pr.get_files.return_value = [mock_file]
+
+        prev_comment = PreviousComment(
+            id=1,
+            file_path="src/foo.py",
+            line=fixed_line,
+            title="Old issue on fix line",
+            severity="warning",
+            body="🟡 **Old issue on fix line**\n\ndesc",
+        )
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client.get_previous_review_comments = MagicMock(return_value=[prev_comment])
+            delta = client.compute_review_delta(mock_pr, current_findings)
+
+        return delta
+
+    def test_suggestion_on_fix_zone_suppressed(self):
+        """A SUGGESTION on a fix-zone line is suppressed."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        finding = ConsolidatedFinding(
+            id="new-1",
+            file_path="src/foo.py",
+            line_start=10,
+            line_end=None,
+            severity=Severity.SUGGESTION,
+            category=Category.STYLE,
+            title="Style nit on fixed code",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+        delta = self._make_delta_with_fix_zone([finding])
+
+        assert len(delta.suppressed_findings) == 1
+        assert delta.suppressed_findings[0].id == "new-1"
+        assert len(delta.new_findings) == 0
+
+    def test_nitpick_on_fix_zone_suppressed(self):
+        """A NITPICK on a fix-zone line is suppressed."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        finding = ConsolidatedFinding(
+            id="new-1",
+            file_path="src/foo.py",
+            line_start=11,
+            line_end=None,
+            severity=Severity.NITPICK,
+            category=Category.STYLE,
+            title="Minor style issue",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+        delta = self._make_delta_with_fix_zone([finding])
+
+        assert len(delta.suppressed_findings) == 1
+        assert len(delta.new_findings) == 0
+
+    def test_warning_on_fix_zone_not_suppressed(self):
+        """A WARNING on a fix-zone line is NOT suppressed."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        finding = ConsolidatedFinding(
+            id="new-1",
+            file_path="src/foo.py",
+            line_start=10,
+            line_end=None,
+            severity=Severity.WARNING,
+            category=Category.LOGIC,
+            title="Real bug on fixed code",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+        delta = self._make_delta_with_fix_zone([finding])
+
+        assert len(delta.new_findings) == 1
+        assert len(delta.suppressed_findings) == 0
+
+    def test_critical_on_fix_zone_not_suppressed(self):
+        """A CRITICAL on a fix-zone line is NOT suppressed."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        finding = ConsolidatedFinding(
+            id="new-1",
+            file_path="src/foo.py",
+            line_start=10,
+            line_end=None,
+            severity=Severity.CRITICAL,
+            category=Category.SECURITY,
+            title="Security issue on fixed code",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+        delta = self._make_delta_with_fix_zone([finding])
+
+        assert len(delta.new_findings) == 1
+        assert len(delta.suppressed_findings) == 0
+
+    def test_suggestion_outside_fix_zone_not_suppressed(self):
+        """A SUGGESTION on a non-fix line is NOT suppressed."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        finding = ConsolidatedFinding(
+            id="new-1",
+            file_path="src/foo.py",
+            line_start=50,
+            line_end=None,
+            severity=Severity.SUGGESTION,
+            category=Category.STYLE,
+            title="Style nit on new code",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+        delta = self._make_delta_with_fix_zone([finding])
+
+        assert len(delta.new_findings) == 1
+        assert len(delta.suppressed_findings) == 0
+
+    def test_suggestion_in_different_file_not_suppressed(self):
+        """A SUGGESTION in a different file from the fix zone is NOT suppressed."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        finding = ConsolidatedFinding(
+            id="new-1",
+            file_path="src/bar.py",
+            line_start=10,
+            line_end=None,
+            severity=Severity.SUGGESTION,
+            category=Category.STYLE,
+            title="Style nit in other file",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+        delta = self._make_delta_with_fix_zone([finding])
+
+        assert len(delta.new_findings) == 1
+        assert len(delta.suppressed_findings) == 0
+
+    def test_fix_zone_tolerance_boundary(self):
+        """Findings within tolerance (3 lines) of fix line are suppressed."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        within_tolerance = ConsolidatedFinding(
+            id="within",
+            file_path="src/foo.py",
+            line_start=13,
+            line_end=None,
+            severity=Severity.SUGGESTION,
+            category=Category.STYLE,
+            title="Within tolerance",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+        outside_tolerance = ConsolidatedFinding(
+            id="outside",
+            file_path="src/foo.py",
+            line_start=14,
+            line_end=None,
+            severity=Severity.SUGGESTION,
+            category=Category.STYLE,
+            title="Outside tolerance",
+            description="desc",
+            suggested_fix=None,
+            consensus_score=1.0,
+            agreeing_agents=["a1"],
+            confidence=0.9,
+        )
+
+        delta = self._make_delta_with_fix_zone([within_tolerance, outside_tolerance])
+
+        suppressed_ids = {f.id for f in delta.suppressed_findings}
+        new_ids = {f.id for f in delta.new_findings}
+        assert "within" in suppressed_ids
+        assert "outside" in new_ids
+
+    def test_mixed_findings_partitioned_correctly(self):
+        """Multiple findings with different severities and locations are partitioned correctly."""
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        findings = [
+            ConsolidatedFinding(
+                id="suppressed-suggestion",
+                file_path="src/foo.py",
+                line_start=10,
+                line_end=None,
+                severity=Severity.SUGGESTION,
+                category=Category.STYLE,
+                title="Suggestion on fix zone",
+                description="desc",
+                suggested_fix=None,
+                consensus_score=1.0,
+                agreeing_agents=["a1"],
+                confidence=0.9,
+            ),
+            ConsolidatedFinding(
+                id="kept-warning",
+                file_path="src/foo.py",
+                line_start=10,
+                line_end=None,
+                severity=Severity.WARNING,
+                category=Category.LOGIC,
+                title="Warning on fix zone",
+                description="desc",
+                suggested_fix=None,
+                consensus_score=1.0,
+                agreeing_agents=["a1"],
+                confidence=0.9,
+            ),
+            ConsolidatedFinding(
+                id="kept-suggestion-elsewhere",
+                file_path="src/foo.py",
+                line_start=50,
+                line_end=None,
+                severity=Severity.SUGGESTION,
+                category=Category.STYLE,
+                title="Suggestion elsewhere",
+                description="desc",
+                suggested_fix=None,
+                consensus_score=1.0,
+                agreeing_agents=["a1"],
+                confidence=0.9,
+            ),
+        ]
+
+        delta = self._make_delta_with_fix_zone(findings)
+
+        suppressed_ids = {f.id for f in delta.suppressed_findings}
+        new_ids = {f.id for f in delta.new_findings}
+
+        assert suppressed_ids == {"suppressed-suggestion"}
+        assert new_ids == {"kept-warning", "kept-suggestion-elsewhere"}
+
+
 class TestGetReviewMetadata:
     """Tests for get_review_metadata() parsing from mock PR reviews."""
 

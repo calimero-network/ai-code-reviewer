@@ -248,6 +248,7 @@ class ReviewDelta:
     fixed_findings: list[PreviousComment] = field(default_factory=list)
     open_findings: list[ConsolidatedFinding] = field(default_factory=list)
     previous_comments: list[PreviousComment] = field(default_factory=list)
+    suppressed_findings: list[ConsolidatedFinding] = field(default_factory=list)
 
     @property
     def all_issues_resolved(self) -> bool:
@@ -982,6 +983,10 @@ class GitHubClient:
             review_count if review_count is not None else estimate_review_count(delta)
         )
 
+        # Collect candidate new findings; fix-zone filtering happens after
+        # fixed_findings are determined below.
+        candidate_new: list[ConsolidatedFinding] = []
+
         for finding in current_findings:
             # Three-tier matching: strict hash → fuzzy hash → title+line
             matched_comment = hash_lookup.get(finding.finding_hash)
@@ -1002,8 +1007,7 @@ class GitHubClient:
                 delta.open_findings.append(finding)
                 matched_previous.add(matched_comment.id)
             else:
-                # This is a NEW finding
-                delta.new_findings.append(finding)
+                candidate_new.append(finding)
 
         # Determine which unmatched previous comments are likely fixed.
         # We mark as fixed when:
@@ -1012,13 +1016,11 @@ class GitHubClient:
         # 3. The commented line was modified AND the AI didn't find the issue again
         #
         # This avoids false "no longer detected" replies on unmodified code while
-        # still detecting
-        # actual fixes when the relevant lines were changed.
+        # still detecting actual fixes when the relevant lines were changed.
         pr_files = list(pr.get_files())
         changed_files = {f.filename for f in pr_files}
         removed_files = {f.filename for f in pr_files if getattr(f, "status", None) == "removed"}
 
-        # Build a mapping of file -> modified lines (only for files with patches)
         file_modified_lines: dict[str, set[int]] = {}
         for f in pr_files:
             if f.patch:
@@ -1029,19 +1031,13 @@ class GitHubClient:
                 file_path = comment.file_path
 
                 if file_path not in changed_files:
-                    # File was removed/renamed - definitely fixed
                     delta.fixed_findings.append(comment)
                 elif file_path in removed_files:
-                    # File was deleted (no patch for binary/large files) - definitely fixed
                     delta.fixed_findings.append(comment)
                 elif file_path in file_modified_lines:
-                    # File is still in diff - check if the commented line was modified
                     modified_lines = file_modified_lines[file_path]
                     if self._is_line_in_modified_range(comment.line, modified_lines):
-                        # The line was modified AND the AI didn't find the issue again
-                        # → likely fixed
                         delta.fixed_findings.append(comment)
-                # else: file in diff but line wasn't modified → don't mark as fixed
 
         # Deduplicate by comment ID to prevent exponential growth on re-reviews
         seen: set[int] = set()
@@ -1051,10 +1047,39 @@ class GitHubClient:
             if f.id not in seen and not seen.add(f.id)  # type: ignore[func-returns-value]
         ]
 
+        # Build fix zones: file → set of line numbers (with tolerance) where a
+        # previous finding was fixed.  New low-severity findings landing in these
+        # zones are suppressed to break the noise loop.
+        fix_zones: dict[str, set[int]] = defaultdict(set)
+        fix_zone_tolerance = 3
+        for fixed_comment in delta.fixed_findings:
+            line = fixed_comment.line
+            for offset in range(-fix_zone_tolerance, fix_zone_tolerance + 1):
+                fix_zones[fixed_comment.file_path].add(line + offset)
+
+        _SUPPRESSED_SEVERITIES = {Severity.SUGGESTION, Severity.NITPICK}
+
+        for finding in candidate_new:
+            if (
+                finding.file_path in fix_zones
+                and finding.line_start in fix_zones[finding.file_path]
+                and finding.severity in _SUPPRESSED_SEVERITIES
+            ):
+                delta.suppressed_findings.append(finding)
+            else:
+                delta.new_findings.append(finding)
+
+        if delta.suppressed_findings:
+            logger.info(
+                "Suppressed %d low-severity finding(s) on fix-zone lines",
+                len(delta.suppressed_findings),
+            )
+
         logger.info(
             f"Review delta: {len(delta.new_findings)} new, "
             f"{len(delta.fixed_findings)} fixed, "
-            f"{len(delta.open_findings)} open"
+            f"{len(delta.open_findings)} open, "
+            f"{len(delta.suppressed_findings)} suppressed"
         )
 
         return delta

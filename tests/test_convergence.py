@@ -1940,3 +1940,262 @@ class TestWebhookCompactSummaryCounts:
             assert "🆕 2 new" in post_args.args[1]
             assert "🆕 4 new" not in post_args.args[1]
             assert post_args.kwargs["inline_findings"] == postable_findings
+
+
+class TestFormatterSuppressedLine:
+    """Tests that the formatter mentions suppressed findings when present."""
+
+    def test_compact_delta_includes_suppressed_line(self):
+        from ai_reviewer.github.formatter import GitHubFormatter
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        suppressed = [_finding(severity=Severity.SUGGESTION, title=f"Nit {i}") for i in range(3)]
+        review = ConsolidatedReview(
+            id="r1",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[],
+            summary="Clean",
+            agent_count=1,
+            review_quality_score=0.95,
+            total_review_time_ms=1000,
+        )
+        delta = ReviewDelta(
+            new_findings=[_finding(severity=Severity.WARNING)],
+            fixed_findings=[_prev_comment()],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+            suppressed_findings=suppressed,
+        )
+
+        formatter = GitHubFormatter()
+        body = formatter.format_review_with_delta_compact(review, delta)
+
+        assert "3 low-severity suggestions suppressed on recently-fixed code" in body
+
+    def test_compact_delta_no_suppressed_line_when_empty(self):
+        from ai_reviewer.github.formatter import GitHubFormatter
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        review = ConsolidatedReview(
+            id="r1",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[],
+            summary="Clean",
+            agent_count=1,
+            review_quality_score=0.95,
+            total_review_time_ms=1000,
+        )
+        delta = ReviewDelta(
+            new_findings=[_finding()],
+            fixed_findings=[],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+            suppressed_findings=[],
+        )
+
+        formatter = GitHubFormatter()
+        body = formatter.format_review_with_delta_compact(review, delta)
+
+        assert "suppressed" not in body
+
+    def test_full_delta_includes_suppressed_line(self):
+        from ai_reviewer.github.formatter import GitHubFormatter
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        suppressed = [_finding(severity=Severity.NITPICK)]
+        review = ConsolidatedReview(
+            id="r1",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[],
+            summary="Clean",
+            agent_count=1,
+            review_quality_score=0.95,
+            total_review_time_ms=1000,
+        )
+        delta = ReviewDelta(
+            new_findings=[],
+            fixed_findings=[_prev_comment()],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+            suppressed_findings=suppressed,
+        )
+
+        formatter = GitHubFormatter()
+        body = formatter.format_review_with_delta(review, delta)
+
+        assert "1 low-severity suggestion suppressed on recently-fixed code" in body
+
+    def test_singular_suppressed_noun(self):
+        from ai_reviewer.github.formatter import GitHubFormatter
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        review = ConsolidatedReview(
+            id="r1",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[],
+            summary="Clean",
+            agent_count=1,
+            review_quality_score=0.95,
+            total_review_time_ms=1000,
+        )
+        delta = ReviewDelta(
+            new_findings=[],
+            fixed_findings=[],
+            open_findings=[],
+            previous_comments=[],
+            suppressed_findings=[_finding(severity=Severity.SUGGESTION)],
+        )
+
+        formatter = GitHubFormatter()
+        body = formatter.format_review_with_delta_compact(review, delta)
+
+        assert "1 low-severity suggestion suppressed" in body
+        assert "suggestions" not in body
+
+
+class TestSuppressedFindingsNotPosted:
+    """Integration tests: suppressed findings are excluded from inline posting."""
+
+    def test_cli_does_not_post_suppressed_findings(self):
+        """CLI posts only new_findings as inline comments, not suppressed ones."""
+        import asyncio
+
+        from ai_reviewer.cli import review_pr_async
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        new_f = _finding(severity=Severity.WARNING, title="Real issue")
+        suppressed_f = _finding(severity=Severity.SUGGESTION, title="Suppressed nit")
+
+        review = ConsolidatedReview(
+            id="r1",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[new_f, suppressed_f],
+            summary="Issues found",
+            agent_count=1,
+            review_quality_score=0.9,
+            total_review_time_ms=1000,
+        )
+
+        delta = ReviewDelta(
+            new_findings=[new_f],
+            fixed_findings=[_prev_comment()],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+            suppressed_findings=[suppressed_f],
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.head.sha = "abc123"
+
+        mock_gh = MagicMock()
+        mock_gh.get_pull_request.return_value = mock_pr
+        mock_gh.get_review_metadata.return_value = None
+        mock_gh.compute_review_delta.return_value = delta
+        mock_gh.get_postable_inline_findings.return_value = [new_f]
+
+        with (
+            patch("ai_reviewer.cli.load_config") as mock_load,
+            patch("ai_reviewer.cli.validate_config", return_value=[]),
+            patch("ai_reviewer.cli.review_pr_with_cursor_agent", return_value=review),
+            patch("ai_reviewer.cli.GitHubClient") as mock_gh_cls,
+        ):
+            mock_config = MagicMock()
+            mock_load.return_value = mock_config
+
+            mock_gh_cls.return_value = mock_gh
+
+            asyncio.run(
+                review_pr_async(
+                    repo="test/repo",
+                    pr_number=42,
+                    output="github",
+                )
+            )
+
+            # Verify inline findings passed to post_review are only new (not suppressed)
+            post_args = mock_gh.post_review.call_args
+            assert post_args is not None
+            inline = post_args.kwargs.get("inline_findings")
+            assert inline is not None
+            inline_titles = [f.title for f in inline]
+            assert "Real issue" in inline_titles
+            assert "Suppressed nit" not in inline_titles
+
+    @pytest.mark.asyncio
+    async def test_webhook_does_not_post_suppressed_findings(self):
+        """Webhook posts only new_findings as inline comments, not suppressed ones."""
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        new_f = _finding(severity=Severity.WARNING, title="Real issue")
+        suppressed_f = _finding(severity=Severity.SUGGESTION, title="Suppressed nit")
+
+        review = ConsolidatedReview(
+            id="r1",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[new_f, suppressed_f],
+            summary="Issues found",
+            agent_count=1,
+            review_quality_score=0.9,
+            total_review_time_ms=1000,
+        )
+
+        delta = ReviewDelta(
+            new_findings=[new_f],
+            fixed_findings=[],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+            suppressed_findings=[suppressed_f],
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.head.sha = "new_sha"
+        mock_pr.get_labels.return_value = []
+
+        mock_gh = MagicMock()
+        mock_gh.get_pull_request.return_value = mock_pr
+        mock_gh.get_review_metadata.return_value = None
+        mock_gh.compute_review_delta.return_value = delta
+        mock_gh.get_postable_inline_findings.return_value = [new_f]
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+            ),
+            patch("ai_reviewer.config.load_config"),
+            patch(
+                "ai_reviewer.review.review_pr_with_cursor_agent",
+                return_value=review,
+            ),
+            patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
+        ):
+            from ai_reviewer.github import webhook
+            from ai_reviewer.github.webhook import _setup_default_review_handler
+
+            _setup_default_review_handler()
+
+            handler = webhook._review_handler
+            assert handler is not None
+            await handler(repo="test/repo", pr_number=42)
+
+            post_args = mock_gh.post_review.call_args
+            assert post_args is not None
+            body = post_args.args[1]
+            assert "suppressed" in body.lower()
+            inline = post_args.kwargs.get("inline_findings")
+            assert inline is not None
+            inline_titles = [f.title for f in inline]
+            assert "Real issue" in inline_titles
+            assert "Suppressed nit" not in inline_titles

@@ -155,19 +155,25 @@ class GitHubFormatter:
             body = (
                 (" | ".join(parts) + ". See inline comments.") if parts else "See inline comments."
             )
-        return "\n".join(
+        suppressed_line = self._format_suppressed_line(delta)
+        content = [
+            f"## 🤖 {self.reviewer_name}",
+            "",
+            header,
+            "",
+            body,
+        ]
+        if suppressed_line:
+            content.append(suppressed_line)
+        content.extend(
             [
-                f"## 🤖 {self.reviewer_name}",
-                "",
-                header,
-                "",
-                body,
                 "",
                 "---",
                 "",
                 self._format_footer(review, meta),
             ]
         )
+        return "\n".join(content)
 
     def _format_header(self, review: ConsolidatedReview) -> str:
         """Format the review header."""
@@ -297,6 +303,11 @@ class GitHubFormatter:
                 ]
             )
 
+        suppressed_line = self._format_suppressed_line(delta)
+        if suppressed_line:
+            lines.append(suppressed_line)
+            lines.append("")
+
         lines.extend(
             [
                 "---",
@@ -306,6 +317,15 @@ class GitHubFormatter:
         )
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_suppressed_line(delta: ReviewDelta) -> str:
+        """Return a short note about suppressed findings, or empty string if none."""
+        n = len(delta.suppressed_findings)
+        if n == 0:
+            return ""
+        noun = "suggestion" if n == 1 else "suggestions"
+        return f"*{n} low-severity {noun} suppressed on recently-fixed code.*"
 
     def _format_status_banner(self, delta: ReviewDelta) -> list[str]:
         """Format the status summary banner."""
