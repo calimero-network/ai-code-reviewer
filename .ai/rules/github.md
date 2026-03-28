@@ -8,7 +8,7 @@ The `github/` module handles all GitHub API integration: fetching PR data, posti
 ```
 github/
 ├── __init__.py      # Public exports
-├── client.py        # GitHub API wrapper
+├── client.py        # GitHub API wrapper (reviews, delta, doc-bot comments, repo probing)
 ├── webhook.py       # FastAPI webhook handlers
 └── formatter.py     # Review output formatting
 ```
@@ -23,6 +23,11 @@ class GitHubClient:
     async def get_changed_files(self, repo: str, pr_number: int) -> dict[str, str]: ...
     async def post_review(self, repo: str, pr_number: int, review: ConsolidatedReview): ...
     async def post_inline_comments(self, repo: str, pr_number: int, findings: list): ...
+
+    # Documentation review support
+    def probe_repo_paths(self, repo_name: str, ref: str, paths: list[str]) -> set[str]: ...
+    def find_doc_bot_comment(self, pr: PullRequest, marker: str) -> int | None: ...
+    def post_or_update_doc_comment(self, pr: PullRequest, body: str, marker: str) -> None: ...
 
 class ReviewFormatter:
     """Formats ConsolidatedReview for different outputs."""
@@ -48,6 +53,9 @@ Always validate webhook signatures using `X-Hub-Signature-256` header.
 
 ### G5: No Agent Logic in GitHub Module
 This module fetches data and posts results. Review logic is in orchestrator.
+
+### G6: Doc-Bot Comment Deduplication
+`post_or_update_doc_comment` uses an HTML comment marker (`<!-- AI-CODE-REVIEWER-DOC-BOT -->`) to find and update an existing comment instead of creating duplicates. `find_doc_bot_comment` searches issue comments for the marker. `probe_repo_paths` checks whether convention files and architecture directories exist in the repo (short list, ~6-8 items, one `get_contents` call each).
 
 ## Webhook Handling
 
@@ -167,3 +175,4 @@ github:
 3. **Don't skip signature validation** - Security critical
 4. **Don't block webhook handler** - Return quickly, process async
 5. **Don't hardcode repos/permissions** - Use configuration
+6. **Don't create duplicate doc-bot comments** - Always search for the marker first via `find_doc_bot_comment`

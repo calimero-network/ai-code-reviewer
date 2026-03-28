@@ -11,8 +11,9 @@
 4. [Scoring System](#4-scoring-system)
 5. [Incremental Review (Delta Tracking)](#5-incremental-review-delta-tracking)
 6. [Convergence and "Stop Reviewing" Logic](#6-convergence-and-stop-reviewing-logic)
-7. [Prompt Engineering](#7-prompt-engineering)
-8. [Security](#8-security)
+7. [Documentation Review](#7-documentation-review)
+8. [Prompt Engineering](#8-prompt-engineering)
+9. [Security](#9-security)
 
 ---
 
@@ -34,6 +35,8 @@ flowchart LR
     Delta --> Conv{"Converged?"}
     Conv -- yes --> Skip["Skip / LGTM"]
     Conv -- no --> Post["Format + Post to GitHub"]
+    Post --> DocReview["Documentation Review\n(rule-based, no LLM)"]
+    DocReview --> DocComment["Post/update doc-bot\nPR comment"]
 ```
 
 ### Module Map
@@ -54,9 +57,11 @@ flowchart LR
 | `orchestrator/orchestrator.py` | Generic parallel `AgentOrchestrator` (asyncio tasks) |
 | `orchestrator/aggregator.py` | `ReviewAggregator` clustering/merge (alternate path; production uses `aggregate_findings` in `review.py`) |
 | `security/scanner.py` | Regex + Shannon entropy secret scanner on unified diffs |
-| `github/client.py` | `GitHubClient`, delta/convergence, inline comments, metadata, thread resolution |
+| `github/client.py` | `GitHubClient`, delta/convergence, inline comments, metadata, thread resolution, doc-bot comment upsert, repo path probing |
 | `github/formatter.py` | `GitHubFormatter`: markdown bodies, compact/delta layouts, review actions, JSON export |
 | `github/webhook.py` | FastAPI app, HMAC verification, PR + `/ai-review` comment handlers |
+| `docs/__init__.py` | Package init for documentation review module |
+| `docs/analyzer.py` | `DocAnalyzer`, `DocSuggestion`, `is_architecture_impacting`, `format_doc_comment` — rule-based doc review |
 
 ---
 
@@ -104,6 +109,12 @@ sequenceDiagram
     Conv-->>Trigger: skip? (unless --force-review)
     Trigger->>Fmt: format_review_compact / format_review_delta
     Trigger->>GH: post_review, resolve_fixed_comments, post_inline_comments
+
+    Note over Trigger,GH: Documentation review (rule-based, after main review)
+    Trigger->>GH: probe_repo_paths(convention files + arch dirs)
+    GH-->>Trigger: existing_repo_paths
+    Trigger->>Trigger: DocAnalyzer.run()
+    Trigger->>GH: post_or_update_doc_comment(body, marker)
 ```
 
 ### Key Functions
@@ -361,7 +372,110 @@ Runs after agents complete and delta is computed:
 
 ---
 
-## 7. Prompt Engineering
+## 7. Documentation Review
+
+A rule-based check that runs after the main AI review. It detects architecture-impacting changes and flags missing documentation updates. No LLM calls are consumed — the check is fast, free, and deterministic.
+
+### Two-Tier Design
+
+```mermaid
+flowchart TD
+    Start["DocAnalyzer.run()"]
+    HasConfig{"repo has .ai-reviewer.yaml\nwith documentation section?"}
+
+    subgraph tier1 [Tier 1: Zero-Config]
+        ArchCheck["check_architecture_folder()"]
+        ConvCheck["check_convention_files()"]
+    end
+
+    subgraph tier2 [Tier 2: Configured]
+        MappingCheck["check_source_to_docs_mapping()"]
+    end
+
+    Start --> HasConfig
+    HasConfig -->|"No"| ArchCheck
+    HasConfig -->|"Yes"| ArchCheck
+    ArchCheck --> ConvCheck
+    ConvCheck --> MappingCheck
+    MappingCheck --> Dedup["Deduplicate by target file,\nsort high-priority first"]
+```
+
+**Tier 1 (zero-config)** runs on every repo, including those without `.ai-reviewer.yaml`:
+
+| Check | What it does |
+|-------|-------------|
+| `check_architecture_folder()` | Probes for `architecture/`, `docs/`, or `doc/` directories. If none exist, emits a high-priority suggestion. |
+| `check_convention_files()` | Probes for `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `.cursor/rules/README.md`. If any exist and the PR is architecture-impacting but doesn't modify them, emits a suggestion per stale file. |
+
+**Tier 2 (configured)** adds `check_source_to_docs_mapping()` when the repo has a `documentation.source_to_docs_mapping` section in `.ai-reviewer.yaml`. Each changed file is matched against glob patterns; unupdated doc targets produce suggestions.
+
+### Architecture-Impact Heuristics
+
+`is_architecture_impacting()` returns `True` when any changed file matches:
+
+| Heuristic | Examples |
+|-----------|---------|
+| New or deleted top-level directory | Adding `newpkg/`, removing `legacy/` |
+| Project manifest files | `pyproject.toml`, `package.json`, `Cargo.toml`, `go.mod`, `Gemfile`, `build.gradle`, `pom.xml`, `CMakeLists.txt` |
+| CI/workflow files | `.github/workflows/*`, `.gitlab-ci.yml`, `Jenkinsfile` |
+| Entry-point files | Any file named `main.*`, `cli.*`, `app.*`, `index.*`, `server.*` |
+| Infrastructure files | `Dockerfile*`, `docker-compose*`, `*.tf`, `cloudbuild.yaml` |
+
+If none match, the convention file check produces zero suggestions (silent on routine PRs).
+
+### Comment Deduplication
+
+Doc suggestions are posted as a separate issue comment from the AI code review. An HTML marker (`<!-- AI-CODE-REVIEWER-DOC-BOT -->`) is embedded in the comment body. On subsequent pushes:
+
+- `find_doc_bot_comment()` searches existing issue comments for the marker.
+- `post_or_update_doc_comment()` updates the existing comment in-place if found, or creates a new one.
+
+This prevents duplicate comments across commits within the same PR.
+
+### Configuration
+
+**Operator-level** (`config.yaml`):
+
+```yaml
+doc_review:
+  enabled: true
+  architecture_paths: ["architecture/", "docs/", "doc/"]
+  convention_files: ["AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", ".cursor/rules/README.md"]
+  comment_marker: "<!-- AI-CODE-REVIEWER-DOC-BOT -->"
+```
+
+**Repo-level** (`.ai-reviewer.yaml`):
+
+```yaml
+documentation:
+  enabled: true
+  source_to_docs_mapping:
+    "src/ai_reviewer/agents/**":
+      - .ai/rules/agents.md
+    "src/ai_reviewer/config.py":
+      - config.example.yaml
+      - README.md
+```
+
+Setting `documentation.enabled: false` in the repo config skips both tiers entirely.
+
+**CLI**: `--doc-check` / `--no-doc-check` overrides the config-level `enabled` flag for a single run.
+
+### Key Functions
+
+| Function | Location | Purpose |
+|----------|----------|---------|
+| `is_architecture_impacting()` | `docs/analyzer.py` | Heuristic detection of architecture-impacting changes |
+| `DocAnalyzer.run()` | `docs/analyzer.py` | Orchestrates all checks, deduplicates, sorts by priority |
+| `format_doc_comment()` | `docs/analyzer.py` | Renders suggestions as markdown with the dedup marker |
+| `probe_repo_paths()` | `github/client.py` | Checks which convention files / dirs exist in the repo |
+| `find_doc_bot_comment()` | `github/client.py` | Finds existing doc-bot comment by marker |
+| `post_or_update_doc_comment()` | `github/client.py` | Creates or updates the doc-bot PR comment |
+| `_run_doc_review()` | `cli.py` | Wires the analyzer into the `review-pr` CLI flow |
+
+---
+
+## 8. Prompt Engineering
 
 ### PR Classification
 
@@ -411,7 +525,7 @@ Size-adaptive instructions are injected into the prompt:
 
 ---
 
-## 8. Security
+## 9. Security
 
 ### Secret Detection Pre-Scan
 
