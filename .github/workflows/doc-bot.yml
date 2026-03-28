@@ -27,7 +27,7 @@ jobs:
       cancel-in-progress: false
 
     # Don't run on forks to avoid security issues with write permissions
-    if: github.event.pull_request.head.repo.fork == false
+    if: ${{ github.event.pull_request.head.repo.fork == false }}
     
     steps:
       - name: Checkout code
