@@ -324,7 +324,7 @@ class GitHubFormatter:
         n = len(delta.suppressed_findings)
         if n == 0:
             return ""
-        noun = "suggestion" if n == 1 else "suggestions"
+        noun = "finding" if n == 1 else "findings"
         return f"*{n} low-severity {noun} suppressed on recently-fixed code.*"
 
     def _format_status_banner(self, delta: ReviewDelta) -> list[str]:
