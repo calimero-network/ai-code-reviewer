@@ -664,6 +664,112 @@ class TestShouldSkipBeforeAgents:
         )
         assert should_skip_before_agents(meta, "new_sha") is None
 
+    def test_findings_unchanged_no_overlap(self):
+        """Diff only touches files with no previous findings → skip."""
+        meta = ReviewMeta(
+            commit_sha="old_sha",
+            review_count=2,
+            timestamp="2026-01-01T00:00:00Z",
+            findings_hash="deadbeef",
+        )
+        previous = [
+            PreviousComment(
+                id=1, file_path="src/foo.py", line=10,
+                title="Bug", severity="warning", body="x",
+            ),
+        ]
+        diff_files = {"README.md", "docs/guide.md"}
+        result = should_skip_before_agents(
+            meta, "new_sha", diff_files=diff_files, previous_comments=previous,
+        )
+        assert result == SkipReason.FINDINGS_UNCHANGED
+
+    def test_findings_unchanged_overlap_proceeds(self):
+        """Diff touches a file with previous findings → don't skip."""
+        meta = ReviewMeta(
+            commit_sha="old_sha",
+            review_count=2,
+            timestamp="2026-01-01T00:00:00Z",
+            findings_hash="deadbeef",
+        )
+        previous = [
+            PreviousComment(
+                id=1, file_path="src/foo.py", line=10,
+                title="Bug", severity="warning", body="x",
+            ),
+        ]
+        diff_files = {"src/foo.py", "README.md"}
+        result = should_skip_before_agents(
+            meta, "new_sha", diff_files=diff_files, previous_comments=previous,
+        )
+        assert result is None
+
+    def test_findings_unchanged_force_review_overrides(self):
+        """force_review=True overrides findings-hash skip."""
+        meta = ReviewMeta(
+            commit_sha="old_sha",
+            review_count=2,
+            timestamp="2026-01-01T00:00:00Z",
+            findings_hash="deadbeef",
+        )
+        previous = [
+            PreviousComment(
+                id=1, file_path="src/foo.py", line=10,
+                title="Bug", severity="warning", body="x",
+            ),
+        ]
+        diff_files = {"README.md"}
+        result = should_skip_before_agents(
+            meta, "new_sha", force_review=True,
+            diff_files=diff_files, previous_comments=previous,
+        )
+        assert result is None
+
+    def test_findings_unchanged_no_hash_proceeds(self):
+        """Empty findings_hash means the check is skipped."""
+        meta = ReviewMeta(
+            commit_sha="old_sha",
+            review_count=2,
+            timestamp="2026-01-01T00:00:00Z",
+            findings_hash="",
+        )
+        previous = [
+            PreviousComment(
+                id=1, file_path="src/foo.py", line=10,
+                title="Bug", severity="warning", body="x",
+            ),
+        ]
+        diff_files = {"README.md"}
+        result = should_skip_before_agents(
+            meta, "new_sha", diff_files=diff_files, previous_comments=previous,
+        )
+        assert result is None
+
+    def test_findings_unchanged_no_previous_comments_proceeds(self):
+        """No previous comments with a findings_hash → no overlap, skip."""
+        meta = ReviewMeta(
+            commit_sha="old_sha",
+            review_count=2,
+            timestamp="2026-01-01T00:00:00Z",
+            findings_hash="deadbeef",
+        )
+        diff_files = {"src/foo.py"}
+        result = should_skip_before_agents(
+            meta, "new_sha", diff_files=diff_files, previous_comments=[],
+        )
+        assert result == SkipReason.FINDINGS_UNCHANGED
+
+    def test_findings_unchanged_backward_compat_no_diff_files(self):
+        """When diff_files is not provided, the hash check is skipped."""
+        meta = ReviewMeta(
+            commit_sha="old_sha",
+            review_count=2,
+            timestamp="2026-01-01T00:00:00Z",
+            findings_hash="deadbeef",
+        )
+        result = should_skip_before_agents(meta, "new_sha")
+        assert result is None
+
 
 class TestLgtmFastPathVacuous:
     """LGTM fast path must not fire when there are no previous comments."""
@@ -1019,13 +1125,17 @@ class TestLgtmLightweightRecheck:
             total_review_time_ms=500,
         )
 
+        mock_file = MagicMock()
+        mock_file.filename = "src/foo.py"
         mock_pr = MagicMock()
         mock_pr.head.sha = "new_sha"
+        mock_pr.get_files.return_value = [mock_file]
 
         mock_gh = MagicMock()
         mock_gh.get_pull_request.return_value = mock_pr
         mock_gh.get_review_metadata.return_value = meta
         mock_gh.check_lgtm_fast_path.return_value = lgtm_delta
+        mock_gh.get_previous_review_comments.return_value = [_prev_comment()]
 
         with (
             patch("ai_reviewer.cli.load_config") as mock_load,
@@ -1088,13 +1198,17 @@ class TestLgtmLightweightRecheck:
             total_review_time_ms=500,
         )
 
+        mock_file = MagicMock()
+        mock_file.filename = "src/foo.py"
         mock_pr = MagicMock()
         mock_pr.head.sha = "new_sha"
+        mock_pr.get_files.return_value = [mock_file]
 
         mock_gh = MagicMock()
         mock_gh.get_pull_request.return_value = mock_pr
         mock_gh.get_review_metadata.return_value = meta
         mock_gh.check_lgtm_fast_path.return_value = lgtm_delta
+        mock_gh.get_previous_review_comments.return_value = [_prev_comment()]
 
         with (
             patch("ai_reviewer.cli.load_config") as mock_load,
@@ -1161,14 +1275,18 @@ class TestLgtmLightweightRecheck:
             previous_comments=[_prev_comment()],
         )
 
+        mock_file = MagicMock()
+        mock_file.filename = "src/foo.py"
         mock_pr = MagicMock()
         mock_pr.head.sha = "new_sha"
+        mock_pr.get_files.return_value = [mock_file]
 
         mock_gh = MagicMock()
         mock_gh.get_pull_request.return_value = mock_pr
         mock_gh.get_review_metadata.return_value = meta
         mock_gh.check_lgtm_fast_path.return_value = lgtm_delta
         mock_gh.compute_review_delta.return_value = normal_delta
+        mock_gh.get_previous_review_comments.return_value = [_prev_comment()]
 
         with (
             patch("ai_reviewer.cli.load_config") as mock_load,
@@ -1235,14 +1353,18 @@ class TestLgtmLightweightRecheck:
             previous_comments=[_prev_comment()],
         )
 
+        mock_file = MagicMock()
+        mock_file.filename = "src/foo.py"
         mock_pr = MagicMock()
         mock_pr.head.sha = "new_sha"
+        mock_pr.get_files.return_value = [mock_file]
 
         mock_gh = MagicMock()
         mock_gh.get_pull_request.return_value = mock_pr
         mock_gh.get_review_metadata.return_value = meta
         mock_gh.check_lgtm_fast_path.return_value = lgtm_delta
         mock_gh.compute_review_delta.return_value = normal_delta
+        mock_gh.get_previous_review_comments.return_value = [_prev_comment()]
 
         with (
             patch("ai_reviewer.cli.load_config") as mock_load,
@@ -1300,14 +1422,18 @@ class TestLgtmLightweightRecheck:
             total_review_time_ms=500,
         )
 
+        mock_file = MagicMock()
+        mock_file.filename = "src/foo.py"
         mock_pr = MagicMock()
         mock_pr.head.sha = "new_sha"
         mock_pr.get_labels.return_value = []
+        mock_pr.get_files.return_value = [mock_file]
 
         mock_gh = MagicMock()
         mock_gh.get_pull_request.return_value = mock_pr
         mock_gh.get_review_metadata.return_value = meta
         mock_gh.check_lgtm_fast_path.return_value = lgtm_delta
+        mock_gh.get_previous_review_comments.return_value = [_prev_comment()]
 
         with (
             patch.dict(
@@ -1382,15 +1508,19 @@ class TestLgtmLightweightRecheck:
             previous_comments=[_prev_comment()],
         )
 
+        mock_file = MagicMock()
+        mock_file.filename = "src/foo.py"
         mock_pr = MagicMock()
         mock_pr.head.sha = "new_sha"
         mock_pr.get_labels.return_value = []
+        mock_pr.get_files.return_value = [mock_file]
 
         mock_gh = MagicMock()
         mock_gh.get_pull_request.return_value = mock_pr
         mock_gh.get_review_metadata.return_value = meta
         mock_gh.check_lgtm_fast_path.return_value = lgtm_delta
         mock_gh.compute_review_delta.return_value = normal_delta
+        mock_gh.get_previous_review_comments.return_value = [_prev_comment()]
 
         with (
             patch.dict(
@@ -1456,15 +1586,19 @@ class TestLgtmLightweightRecheck:
             previous_comments=[_prev_comment()],
         )
 
+        mock_file = MagicMock()
+        mock_file.filename = "src/foo.py"
         mock_pr = MagicMock()
         mock_pr.head.sha = "new_sha"
         mock_pr.get_labels.return_value = []
+        mock_pr.get_files.return_value = [mock_file]
 
         mock_gh = MagicMock()
         mock_gh.get_pull_request.return_value = mock_pr
         mock_gh.get_review_metadata.return_value = meta
         mock_gh.check_lgtm_fast_path.return_value = lgtm_delta
         mock_gh.compute_review_delta.return_value = normal_delta
+        mock_gh.get_previous_review_comments.return_value = [_prev_comment()]
 
         with (
             patch.dict(
@@ -1676,13 +1810,17 @@ class TestCLIPreAgentChecks:
             total_review_time_ms=500,
         )
 
+        mock_file = MagicMock()
+        mock_file.filename = "src/foo.py"
         mock_pr = MagicMock()
         mock_pr.head.sha = "new_sha"
+        mock_pr.get_files.return_value = [mock_file]
 
         mock_gh = MagicMock()
         mock_gh.get_pull_request.return_value = mock_pr
         mock_gh.get_review_metadata.return_value = meta
         mock_gh.check_lgtm_fast_path.return_value = lgtm_delta
+        mock_gh.get_previous_review_comments.return_value = [_prev_comment()]
 
         with (
             patch("ai_reviewer.cli.load_config") as mock_load,
@@ -1744,14 +1882,18 @@ class TestCLIPreAgentChecks:
             previous_comments=[_prev_comment()],
         )
 
+        mock_file = MagicMock()
+        mock_file.filename = "src/foo.py"
         mock_pr = MagicMock()
         mock_pr.head.sha = "new_sha"
+        mock_pr.get_files.return_value = [mock_file]
 
         mock_gh = MagicMock()
         mock_gh.get_pull_request.return_value = mock_pr
         mock_gh.get_review_metadata.return_value = meta
         mock_gh.check_lgtm_fast_path.return_value = None
         mock_gh.compute_review_delta.return_value = delta
+        mock_gh.get_previous_review_comments.return_value = [_prev_comment()]
 
         with (
             patch("ai_reviewer.cli.load_config") as mock_load,

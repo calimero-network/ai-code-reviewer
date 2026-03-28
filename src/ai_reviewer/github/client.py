@@ -321,12 +321,15 @@ class SkipReason(enum.Enum):
     """Reason for skipping a review before running agents."""
 
     ALREADY_REVIEWED = "already_reviewed"
+    FINDINGS_UNCHANGED = "findings_unchanged"
 
 
 def should_skip_before_agents(
     meta: ReviewMeta | None,
     current_sha: str,
     force_review: bool = False,
+    diff_files: set[str] | None = None,
+    previous_comments: list[PreviousComment] | None = None,
 ) -> SkipReason | None:
     """Decide whether to skip the review entirely before running agents.
 
@@ -337,6 +340,8 @@ def should_skip_before_agents(
     Checks (in order):
     * ``force_review`` → never skip.
     * Same ``commit_sha`` → ``ALREADY_REVIEWED``.
+    * ``findings_hash`` available and diff doesn't touch any file with previous
+      findings → ``FINDINGS_UNCHANGED``.
     """
     if force_review:
         return None
@@ -346,6 +351,15 @@ def should_skip_before_agents(
 
     if meta.commit_sha == current_sha:
         return SkipReason.ALREADY_REVIEWED
+
+    if (
+        meta.findings_hash
+        and diff_files is not None
+        and previous_comments is not None
+    ):
+        previous_files = {c.file_path for c in previous_comments}
+        if not diff_files & previous_files:
+            return SkipReason.FINDINGS_UNCHANGED
 
     return None
 

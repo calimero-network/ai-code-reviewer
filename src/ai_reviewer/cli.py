@@ -174,7 +174,15 @@ async def review_pr_async(
         current_sha = pr.head.sha
 
         meta = gh.get_review_metadata(pr)
-        skip_reason = should_skip_before_agents(meta, current_sha, force_review)
+        diff_files = {f.filename for f in pr.get_files()}
+        previous_comments = gh.get_previous_review_comments(pr) if meta else []
+        skip_reason = should_skip_before_agents(
+            meta,
+            current_sha,
+            force_review,
+            diff_files=diff_files,
+            previous_comments=previous_comments,
+        )
         if skip_reason is not None:
             console.print(
                 f"[dim]⏭️  Skipping review: {skip_reason.value} "

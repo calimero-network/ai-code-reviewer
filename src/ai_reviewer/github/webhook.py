@@ -194,7 +194,15 @@ def _setup_default_review_handler() -> None:
             meta = gh.get_review_metadata(pr)
             current_sha = pr.head.sha
 
-            skip_reason = should_skip_before_agents(meta, current_sha, force_review)
+            diff_files = {f.filename for f in pr.get_files()}
+            previous_comments = gh.get_previous_review_comments(pr) if meta else []
+            skip_reason = should_skip_before_agents(
+                meta,
+                current_sha,
+                force_review,
+                diff_files=diff_files,
+                previous_comments=previous_comments,
+            )
             if skip_reason is not None:
                 logger.info(
                     "Pre-agent skip for %s PR #%d: %s (sha=%s)",
