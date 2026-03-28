@@ -21,13 +21,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     
-    # Prevent duplicate comments from concurrent runs on rapid pushes
+    # Serialise runs per PR; don't cancel so the latest push always completes
     concurrency:
       group: doc-bot-${{ github.event.pull_request.number }}
-      cancel-in-progress: true
-    
+      cancel-in-progress: false
+
     # Don't run on forks to avoid security issues with write permissions
-    if: github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event.pull_request.head.repo.fork == false
     
     steps:
       - name: Checkout code
