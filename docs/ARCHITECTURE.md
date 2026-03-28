@@ -205,10 +205,11 @@ Displayed in the review footer as a collapsed `<details>` section so reviewers c
 ```python
 @dataclass
 class ReviewDelta:
-    new_findings: list[ConsolidatedFinding]    # Not seen before
-    fixed_findings: list[PreviousComment]       # Previously reported, now resolved
-    open_findings: list[ConsolidatedFinding]    # Still present from prior review
-    previous_comments: list[PreviousComment]    # All prior AI review comments
+    new_findings: list[ConsolidatedFinding]       # Not seen before
+    fixed_findings: list[PreviousComment]          # Previously reported, now resolved
+    open_findings: list[ConsolidatedFinding]       # Still present from prior review
+    previous_comments: list[PreviousComment]       # All prior AI review comments
+    suppressed_findings: list[ConsolidatedFinding] # Low-severity on fix-zone lines
 
     @property
     def all_issues_resolved(self) -> bool:
@@ -262,16 +263,16 @@ Parsed by `_parse_review_comment()` on subsequent reviews to build the `Previous
 Top-level review comments embed structured metadata:
 
 ```
-<!-- ai-reviewer-meta: {"review_count": 2, "commit_sha": "abc123", "timestamp": "..."} -->
+<!-- ai-reviewer-meta: {"commit_sha": "abc123", "review_count": 2, "timestamp": "...", "findings_hash": "a1b2c3d4e5f6"} -->
 ```
 
-Used by `should_skip_before_agents()` for same-SHA detection and debouncing, and by `check_lgtm_fast_path()` for the LGTM approval path.
+Used by `should_skip_before_agents()` for same-SHA detection and findings-hash comparison, and by `check_lgtm_fast_path()` for the LGTM candidate check.
 
 ---
 
 ## 6. Convergence and "Stop Reviewing" Logic
 
-The convergence system prevents redundant reviews when findings have stabilized.
+The convergence system prevents redundant reviews when findings have stabilized and suppresses low-value noise on recently-fixed code.
 
 ### Decision Flowchart
 
@@ -283,27 +284,75 @@ flowchart TD
     Force -- no --> PreAgent["should_skip_before_agents()"]
     PreAgent --> SameSHA{"Same SHA as\nlast review?"}
     SameSHA -- yes --> SkipAlready["Skip: ALREADY_REVIEWED"]
-    SameSHA -- no --> Debounce{"Within debounce\nwindow (120s)?"}
-    Debounce -- yes --> SkipDebounce["Skip: DEBOUNCED"]
-    Debounce -- no --> LGTM{"LGTM fast path?\n(review_count ≥ 2,\nall issues resolved)"}
-    LGTM -- yes --> Approve["Post APPROVE, skip agents"]
+    SameSHA -- no --> HashCheck{"findings_hash set and\ndiff doesn't touch\nfiles with findings?"}
+    HashCheck -- yes --> SkipUnchanged["Skip: FINDINGS_UNCHANGED"]
+    HashCheck -- no --> LGTM{"LGTM fast path?\n(review_count ≥ 2,\nall issues resolved)"}
+    LGTM -- yes --> Recheck["1-agent re-check"]
+    Recheck --> Clean{"Re-check clean?"}
+    Clean -- yes --> PostLGTM["Post COMMENT (LGTM),\nresolve fixed threads"]
+    Clean -- no --> RunAgents["Run full agent set"]
     LGTM -- no --> RunAgents
     RunAgents --> Delta["compute_review_delta()"]
-    Delta --> EstCount["estimate_review_count()"]
+    Delta --> FixZones["Build fix zones from\nfixed_findings"]
+    FixZones --> Suppress["Suppress SUGGESTION/NITPICK\non fix-zone lines"]
+    Suppress --> EstCount["estimate_review_count()"]
     EstCount --> ShouldSkip{"should_skip_review()?"}
     ShouldSkip -- skip --> Silent["Skip posting (log only)"]
     ShouldSkip -- post --> Format["Format + post review"]
 ```
 
+### Pre-Agent Skip (`should_skip_before_agents`)
+
+Runs before any LLM agents are spawned. Returns a `SkipReason` or `None`:
+
+| Check | `SkipReason` | Condition |
+|-------|-------------|-----------|
+| Same commit | `ALREADY_REVIEWED` | `meta.commit_sha == current_sha` |
+| Unchanged findings | `FINDINGS_UNCHANGED` | `meta.findings_hash` is set and the diff only touches files with no previous findings |
+
+`force_review` overrides both checks.
+
+### LGTM Fast Path
+
+`check_lgtm_fast_path(self, pr, meta)` computes a lightweight delta with an empty findings list. Returns the delta when `review_count >= 2` and `all_issues_resolved`, otherwise `None`.
+
+When a candidate is found, callers run a **1-agent re-check** (no cross-review). If the re-check finds zero findings, a `COMMENT` review is posted with the LGTM delta and fixed threads are resolved. If the re-check finds issues, its result is **discarded** and the full agent pipeline runs — the re-check is never reused as the main review.
+
+### Graduated Suppression on Fix-Zone Lines
+
+After `compute_review_delta()` determines which previous findings were fixed, it builds **fix zones**: a mapping of `file_path → set[int]` covering each fixed finding's line ± 3 lines of tolerance.
+
+New findings that land in a fix zone are suppressed if their severity is `SUGGESTION` or `NITPICK`. `WARNING` and `CRITICAL` findings on fix-zone lines are always posted. Suppressed findings are stored in `ReviewDelta.suppressed_findings` and mentioned in the review body (e.g., "2 suggestions suppressed on recently-fixed code").
+
+```mermaid
+flowchart TD
+    NewFinding["New finding on line N"]
+    NewFinding --> InFixZone{"Line N in a\nfix zone?"}
+    InFixZone -- no --> PostAll["Post normally\n(all severities)"]
+    InFixZone -- yes --> SevCheck{"Severity ≥ WARNING?"}
+    SevCheck -- yes --> PostIt["Post it"]
+    SevCheck -- no --> Suppress["Suppress\n(SUGGESTION/NITPICK on fix code)"]
+```
+
+### Post-Agent Skip (`should_skip_review`)
+
+Runs after agents complete and delta is computed:
+
+| Condition | Action |
+|-----------|--------|
+| First review (`count == 1`) | Always post |
+| Converged (`new == 0` and `fixed == 0`) on 2nd+ review | Skip |
+| 3rd+ review where all new findings are `NITPICK` | Skip |
+
 ### Functions
 
-| Function | Location | Logic |
-|----------|----------|-------|
-| `has_converged(delta)` | `github/client.py` | `True` when `new_findings == 0` and `fixed_findings == 0` |
-| `should_skip_review(count, delta)` | `github/client.py` | Never skip first review; skip if converged on 2nd+; on 3rd+, also skip if only new findings are all NITPICK |
-| `estimate_review_count(delta)` | `github/client.py` | 1 if no previous comments; else `max(2, len(previous_comments) // 3 + 1)` |
-| `should_skip_before_agents(meta, sha, force)` | `github/client.py` | Same-SHA → `ALREADY_REVIEWED`; within debounce → `DEBOUNCED` |
-| `check_lgtm_fast_path(meta, delta)` | `github/client.py` | `review_count ≥ 2`, empty findings delta, `all_issues_resolved` |
+| Function | Signature | Logic |
+|----------|-----------|-------|
+| `has_converged(delta)` | `(ReviewDelta) → bool` | `True` when `new_findings == 0` and `fixed_findings == 0` |
+| `should_skip_review(count, delta)` | `(int, ReviewDelta) → bool` | See table above |
+| `estimate_review_count(delta)` | `(ReviewDelta) → int` | 1 if no previous comments; else `max(2, len(previous_comments) // 3 + 1)` |
+| `should_skip_before_agents(meta, sha, force, diff_files, previous_comments)` | `(...) → SkipReason \| None` | Same-SHA or findings-unchanged check |
+| `check_lgtm_fast_path(self, pr, meta)` | `(PullRequest, ReviewMeta) → ReviewDelta \| None` | `review_count ≥ 2` and `all_issues_resolved` |
 
 ### Overrides
 
