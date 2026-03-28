@@ -1042,9 +1042,7 @@ class GitHubClient:
             if comment.id not in matched_previous:
                 file_path = comment.file_path
 
-                if file_path not in changed_files:
-                    delta.fixed_findings.append(comment)
-                elif file_path in removed_files:
+                if file_path not in changed_files or file_path in removed_files:
                     delta.fixed_findings.append(comment)
                 elif file_path in file_modified_lines:
                     modified_lines = file_modified_lines[file_path]
