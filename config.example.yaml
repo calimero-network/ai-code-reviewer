@@ -157,6 +157,31 @@ server:
   metrics_enabled: true
 
 # ============================================================================
+# DOCUMENTATION REVIEW
+# ============================================================================
+# Rule-based check for missing documentation updates on architecture-impacting PRs.
+# No AI calls consumed — fast, free, deterministic.
+
+doc_review:
+  enabled: true
+
+  # Directories to check for architecture documentation
+  architecture_paths:
+    - "architecture/"
+    - "docs/"
+    - "doc/"
+
+  # Convention files to check for freshness on architecture-impacting PRs
+  convention_files:
+    - "AGENTS.md"
+    - "CLAUDE.md"
+    - "CONTRIBUTING.md"
+    - ".cursor/rules/README.md"
+
+  # HTML comment marker for deduplicating PR comments
+  comment_marker: "<!-- AI-CODE-REVIEWER-DOC-BOT -->"
+
+# ============================================================================
 # LOGGING
 # ============================================================================
 logging:
