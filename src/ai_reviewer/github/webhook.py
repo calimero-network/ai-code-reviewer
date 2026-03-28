@@ -356,10 +356,6 @@ def _setup_default_review_handler() -> None:
                 )
                 action = formatter.get_review_action(review, allow_approve=False)
 
-            if delta.fixed_findings:
-                resolved = gh.resolve_fixed_comments(pr, delta)
-                logger.info(f"Resolved {resolved} comments")
-
             posted = gh.post_review(
                 pr,
                 body,
@@ -373,6 +369,10 @@ def _setup_default_review_handler() -> None:
                 action,
                 posted,
             )
+
+            if delta.fixed_findings:
+                resolved = gh.resolve_fixed_comments(pr, delta)
+                logger.info(f"Resolved {resolved} comments")
 
         except Exception as e:
             logger.exception(f"Error reviewing {repo} PR #{pr_number}: {e}")

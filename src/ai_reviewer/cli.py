@@ -416,11 +416,6 @@ async def review_pr_async(
                 )
                 action = formatter.get_review_action(review, allow_approve=allow_approve)
 
-            if delta.fixed_findings:
-                console.print(f"✅ Marking {len(delta.fixed_findings)} fixed issues as resolved...")
-                resolved = gh.resolve_fixed_comments(pr, delta)
-                console.print(f"   Resolved {resolved} comments")
-
             posted = gh.post_review(
                 pr,
                 body,
@@ -428,6 +423,11 @@ async def review_pr_async(
                 inline_findings=postable_inline_findings or None,
             )
             console.print(f"📝 Posted review to GitHub ({action}, {posted} inline comments)")
+
+            if delta.fixed_findings:
+                console.print(f"✅ Marking {len(delta.fixed_findings)} fixed issues as resolved...")
+                resolved = gh.resolve_fixed_comments(pr, delta)
+                console.print(f"   Resolved {resolved} comments")
 
             # Final status
             if delta.all_issues_resolved:

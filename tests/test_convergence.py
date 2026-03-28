@@ -379,6 +379,69 @@ class TestCLIConvergenceGate:
 
             mock_gh.post_review.assert_called_once()
 
+    def test_cli_does_not_resolve_fixed_comments_before_post_succeeds(self):
+        """CLI leaves fixed threads open if posting the new review fails."""
+        from datetime import datetime
+
+        from ai_reviewer.cli import review_pr_async
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        review = ConsolidatedReview(
+            id="r1",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[],
+            summary="No issues",
+            agent_count=1,
+            review_quality_score=0.9,
+            total_review_time_ms=1000,
+        )
+
+        delta = ReviewDelta(
+            new_findings=[],
+            fixed_findings=[_prev_comment()],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.head.sha = "abc123"
+
+        with (
+            patch("ai_reviewer.cli.load_config") as mock_load,
+            patch("ai_reviewer.cli.validate_config", return_value=[]),
+            patch("ai_reviewer.cli.review_pr_with_cursor_agent", return_value=review),
+            patch("ai_reviewer.cli.GitHubClient") as mock_gh_cls,
+        ):
+            mock_config = MagicMock()
+            mock_config.output.max_total_findings = 50
+            mock_config.output.max_findings_per_file = 10
+            mock_load.return_value = mock_config
+
+            mock_gh = MagicMock()
+            mock_gh_cls.return_value = mock_gh
+            mock_gh.get_pull_request.return_value = mock_pr
+            mock_gh.get_review_metadata.return_value = None
+            mock_gh.compute_review_delta.return_value = delta
+            mock_gh.get_postable_inline_findings.return_value = []
+            mock_gh.post_review.side_effect = RuntimeError("post failed")
+
+            import asyncio
+
+            with pytest.raises(RuntimeError, match="post failed"):
+                asyncio.run(
+                    review_pr_async(
+                        repo="test/repo",
+                        pr_number=42,
+                        output="github",
+                        force_review=False,
+                    )
+                )
+
+            mock_gh.post_review.assert_called_once()
+            mock_gh.resolve_fixed_comments.assert_not_called()
+
 
 class TestSeverityStabilization:
     """Unit tests for stabilize_severity() (Task 8)."""
@@ -555,6 +618,68 @@ class TestWebhookConvergenceGate:
             await handler(repo="test/repo", pr_number=42)
 
             mock_gh.post_review.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_webhook_does_not_resolve_fixed_comments_before_post_succeeds(self):
+        """Webhook leaves fixed threads open if posting the new review fails."""
+        from datetime import datetime
+
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        review = ConsolidatedReview(
+            id="r1",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[],
+            summary="No issues",
+            agent_count=1,
+            review_quality_score=0.9,
+            total_review_time_ms=1000,
+        )
+
+        delta = ReviewDelta(
+            new_findings=[],
+            fixed_findings=[_prev_comment()],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.head.sha = "abc123"
+        mock_pr.get_labels.return_value = []
+
+        mock_gh = MagicMock()
+        mock_gh.get_pull_request.return_value = mock_pr
+        mock_gh.compute_review_delta.return_value = delta
+        mock_gh.get_review_metadata.return_value = None
+        mock_gh.get_postable_inline_findings.return_value = []
+        mock_gh.post_review.side_effect = RuntimeError("post failed")
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+            ),
+            patch("ai_reviewer.config.load_config"),
+            patch(
+                "ai_reviewer.review.review_pr_with_cursor_agent",
+                return_value=review,
+            ),
+            patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
+            patch("ai_reviewer.github.formatter.GitHubFormatter"),
+        ):
+            from ai_reviewer.github import webhook
+            from ai_reviewer.github.webhook import _setup_default_review_handler
+
+            _setup_default_review_handler()
+
+            handler = webhook._review_handler
+            assert handler is not None
+            await handler(repo="test/repo", pr_number=42)
+
+            mock_gh.post_review.assert_called_once()
+            mock_gh.resolve_fixed_comments.assert_not_called()
 
 
 class TestReviewMetaParsing:
