@@ -1,3 +1,9 @@
+# DEPRECATED: This standalone workflow is superseded by the --doc-check flag
+# in `ai-reviewer review-pr`. Repos using the full AI review pipeline no longer
+# need this workflow — doc checking runs automatically as part of review-pr.
+# This file is kept as a lightweight fallback for repos that only want
+# documentation checking without the full AI review.
+
 name: Documentation Bot
 
 on:

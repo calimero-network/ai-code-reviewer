@@ -1460,3 +1460,62 @@ class GitHubClient:
             resolved_ids.add(reply_to)
 
         return resolved_ids
+
+    def probe_repo_paths(self, repo_name: str, ref: str, paths: list[str]) -> set[str]:
+        """Check which of the given file/directory paths exist in the repo.
+
+        Uses ``repo.get_contents()`` per path. The list is expected to be short
+        (6-8 items) so the overhead is minimal.  404s are swallowed; 403s are
+        re-raised via ``_raise_if_forbidden``.
+
+        Returns:
+            Subset of *paths* that exist at *ref*.
+        """
+        repo = self._gh.get_repo(repo_name)
+        found: set[str] = set()
+        for path in paths:
+            lookup = path.rstrip("/")
+            try:
+                repo.get_contents(lookup, ref=ref)
+                found.add(path)
+            except Exception as e:
+                _raise_if_forbidden(e)
+                logger.debug("probe_repo_paths: %s not found: %s", path, e)
+        return found
+
+    def find_doc_bot_comment(self, pr: PullRequest, marker: str) -> int | None:
+        """Find the existing doc-bot issue comment on a PR.
+
+        Searches issue comments for one containing *marker* (an HTML comment
+        used for deduplication).
+
+        Returns:
+            The comment ID if found, otherwise ``None``.
+        """
+        try:
+            for comment in pr.get_issue_comments():
+                if marker in (comment.body or ""):
+                    return comment.id
+        except Exception as e:
+            _raise_if_forbidden(e)
+            logger.warning("Could not search issue comments for doc-bot marker: %s", e)
+        return None
+
+    def post_or_update_doc_comment(self, pr: PullRequest, body: str, marker: str) -> None:
+        """Create or update the doc-bot issue comment on a PR.
+
+        If a comment with *marker* already exists it is updated in-place;
+        otherwise a new issue comment is created.
+        """
+        existing_id = self.find_doc_bot_comment(pr, marker)
+        try:
+            if existing_id is not None:
+                comment = pr.get_issue_comment(existing_id)
+                comment.edit(body)
+                logger.info("Updated existing doc-bot comment %d on PR #%d", existing_id, pr.number)
+            else:
+                pr.create_issue_comment(body)
+                logger.info("Created new doc-bot comment on PR #%d", pr.number)
+        except Exception as e:
+            _raise_if_forbidden(e)
+            logger.warning("Could not post/update doc-bot comment on PR #%d: %s", pr.number, e)

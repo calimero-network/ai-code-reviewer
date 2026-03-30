@@ -97,6 +97,25 @@ class ServerSettings:
 
 
 @dataclass
+class DocReviewSettings:
+    """Documentation review configuration."""
+
+    enabled: bool = True
+    architecture_paths: list[str] = field(
+        default_factory=lambda: ["architecture/", "docs/", "doc/"]
+    )
+    convention_files: list[str] = field(
+        default_factory=lambda: [
+            "AGENTS.md",
+            "CLAUDE.md",
+            "CONTRIBUTING.md",
+            ".cursor/rules/README.md",
+        ]
+    )
+    comment_marker: str = "<!-- AI-CODE-REVIEWER-DOC-BOT -->"
+
+
+@dataclass
 class Config:
     """Complete application configuration."""
 
@@ -108,6 +127,7 @@ class Config:
     output: OutputSettings = field(default_factory=OutputSettings)
     review_policy: ReviewPolicy = field(default_factory=ReviewPolicy)
     server: ServerSettings = field(default_factory=ServerSettings)
+    doc_review: DocReviewSettings = field(default_factory=DocReviewSettings)
 
 
 def load_config(config_path: Path | None = None) -> Config:
@@ -257,6 +277,18 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         metrics_enabled=server_raw.get("metrics_enabled", True),
     )
 
+    # Doc review settings
+    doc_raw = raw.get("doc_review", {})
+    doc_review = DocReviewSettings(
+        enabled=doc_raw.get("enabled", True),
+        architecture_paths=doc_raw.get("architecture_paths", ["architecture/", "docs/", "doc/"]),
+        convention_files=doc_raw.get(
+            "convention_files",
+            ["AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", ".cursor/rules/README.md"],
+        ),
+        comment_marker=doc_raw.get("comment_marker", "<!-- AI-CODE-REVIEWER-DOC-BOT -->"),
+    )
+
     return Config(
         cursor=cursor,
         github=github,
@@ -266,6 +298,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         output=output,
         review_policy=review_policy,
         server=server,
+        doc_review=doc_review,
     )
 
 

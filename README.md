@@ -17,6 +17,7 @@ AI Code Reviewer takes a different approach to automated code review: instead of
 - **Single API Key**: All models (Claude, GPT-4, etc.) accessed through the Cursor unified API
 - **GitHub Integration**: Automatic PR reviews via webhooks, with inline comments and thread resolution
 - **Incremental Reviews**: Delta tracking detects new, fixed, and open findings across pushes — with convergence logic that stops reviewing when findings stabilize
+- **Documentation Review**: Rule-based check that flags missing doc updates on architecture-impacting PRs — works out-of-the-box on any repo by probing for `CLAUDE.md`, `AGENTS.md`, and architecture folders (zero LLM cost)
 
 For the full technical deep-dive — pipeline flowcharts, scoring formulas, convergence state machine, and prompt engineering — see the **[Architecture Documentation](docs/ARCHITECTURE.md)**.
 
@@ -94,6 +95,12 @@ agents:
 orchestrator:
   timeout_seconds: 120
   min_agents_required: 2
+
+# Documentation review (rule-based, no LLM cost)
+doc_review:
+  enabled: true
+  architecture_paths: ["architecture/", "docs/", "doc/"]
+  convention_files: ["AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md"]
 ```
 
 ---
@@ -101,12 +108,14 @@ orchestrator:
 ## CLI Commands
 
 ```bash
-# Review a GitHub PR
+# Review a GitHub PR (includes doc review by default)
 ai-reviewer review-pr <owner/repo> <pr-number>
 
-# Review a local diff or specific commit
-ai-reviewer review --diff <file>
-ai-reviewer review --commit <sha>
+# Skip documentation review
+ai-reviewer review-pr <owner/repo> <pr-number> --no-doc-check
+
+# Force documentation review even if disabled in config
+ai-reviewer review-pr <owner/repo> <pr-number> --doc-check
 
 # Start webhook server
 ai-reviewer serve --port 8080
@@ -114,10 +123,6 @@ ai-reviewer serve --port 8080
 # Configuration
 ai-reviewer config validate
 ai-reviewer config show
-
-# Agent utilities
-ai-reviewer agents list
-ai-reviewer agents test <type>
 ```
 
 ---
@@ -232,7 +237,7 @@ The repository ships structured AI context to help coding assistants work with t
     └── conventions.md   # Coding style guide
 ```
 
-PRs that modify source code automatically trigger a documentation bot that analyzes which docs may need updating and posts suggestions as PR comments. Configure via `.ai-reviewer.yaml`.
+The `review-pr` command includes a built-in documentation review that runs alongside the AI code review. It detects architecture-impacting changes (new modules, manifest edits, CI changes, infrastructure files) and checks whether convention files like `CLAUDE.md` or `AGENTS.md` were updated. For repos with `.ai-reviewer.yaml`, it also checks explicit `source_to_docs_mapping` rules. The check is rule-based (no LLM calls) and posts a separate PR comment with suggestions. Disable with `--no-doc-check` or `doc_review.enabled: false` in config.
 
 ---
 

@@ -9,13 +9,15 @@ from pathlib import Path
 
 import click
 import uvicorn
+from github.PullRequest import PullRequest
 from rich.console import Console
 from rich.logging import RichHandler
 from rich.table import Table
 
 from ai_reviewer import __version__
 from ai_reviewer.agents.cursor_client import CursorConfig
-from ai_reviewer.config import load_config, validate_config
+from ai_reviewer.config import Config, DocReviewSettings, load_config, validate_config
+from ai_reviewer.docs.analyzer import DocAnalyzer, format_doc_comment
 from ai_reviewer.github.client import (
     GitHubClient,
     ReviewMeta,
@@ -86,6 +88,11 @@ def cli(verbose: bool) -> None:
     is_flag=True,
     help="Bypass convergence detection and always post a review",
 )
+@click.option(
+    "--doc-check/--no-doc-check",
+    default=None,
+    help="Enable/disable documentation review (default: follow config doc_review.enabled)",
+)
 def review_pr(
     repo: str,
     pr_number: int,
@@ -98,6 +105,7 @@ def review_pr(
     no_cross_review: bool,
     min_agreement: float,
     force_review: bool,
+    doc_check: bool | None,
 ) -> None:
     """Review a GitHub pull request using Cursor AI agent(s).
 
@@ -120,6 +128,7 @@ def review_pr(
             enable_cross_review=not no_cross_review,
             min_validation_agreement=min_agreement,
             force_review=force_review,
+            doc_check=doc_check,
         )
     )
 
@@ -136,6 +145,7 @@ async def review_pr_async(
     enable_cross_review: bool = True,
     min_validation_agreement: float = 2 / 3,
     force_review: bool = False,
+    doc_check: bool | None = None,
 ) -> None:
     """Async implementation of PR review using Cursor Background Agent(s)."""
     # Auto-detect GitHub Actions environment - never allow APPROVE there
@@ -164,7 +174,7 @@ async def review_pr_async(
 
     # Pre-agent checks (github output only — json/markdown always run agents)
     gh: GitHubClient | None = None
-    pr = None
+    pr: PullRequest | None = None
     meta: ReviewMeta | None = None
     recheck_review: ConsolidatedReview | None = None
 
@@ -435,6 +445,97 @@ async def review_pr_async(
             elif delta.previous_comments:
                 open_count = len(delta.open_findings) + len(delta.new_findings)
                 console.print(f"\n[yellow]⚠️  {open_count} issues remaining[/yellow]")
+
+        # Doc review (runs for github output after the main review)
+        _run_doc_review(
+            gh=gh,
+            pr=pr,
+            repo=repo,
+            config=config,
+            doc_check=doc_check,
+            dry_run=dry_run,
+        )
+
+
+def _run_doc_review(
+    *,
+    gh: GitHubClient | None,
+    pr: PullRequest | None,
+    repo: str,
+    config: Config,
+    doc_check: bool | None,
+    dry_run: bool,
+) -> None:
+    """Run documentation review and post/update the doc-bot comment.
+
+    Factored out of ``review_pr_async`` to keep the main flow readable.
+    """
+    if gh is None or pr is None:
+        return
+
+    doc_settings = getattr(config, "doc_review", None)
+    if not isinstance(doc_settings, DocReviewSettings):
+        doc_settings = DocReviewSettings()
+
+    # Resolve effective enabled flag: CLI flag > config
+    enabled = doc_settings.enabled if doc_check is None else doc_check
+    if not enabled:
+        return
+
+    console.print("📄 Running documentation review...")
+
+    # Probe the repo for convention files and architecture directories
+    probe_paths = doc_settings.convention_files + doc_settings.architecture_paths
+    try:
+        existing_repo_paths = gh.probe_repo_paths(repo, pr.head.sha, probe_paths)
+    except Exception as e:
+        console.print(f"[yellow]⚠️  Could not probe repo paths for doc review: {e}[/yellow]")
+        return
+
+    # Build changed paths with status from PR files
+    pr_files = list(pr.get_files())
+    changed_paths = [f.filename for f in pr_files]
+    changed_paths_with_status = {f.filename: getattr(f, "status", "modified") for f in pr_files}
+
+    # Load doc_config from repo's .ai-reviewer.yaml if present
+    repo_config = gh.load_repo_config(repo, pr.head.sha)
+    doc_config = repo_config.get("documentation") if repo_config else None
+
+    if doc_config is not None and not doc_config.get("enabled", True):
+        console.print("[dim]ℹ️  Documentation review disabled in repo .ai-reviewer.yaml[/dim]")
+        return
+
+    analyzer = DocAnalyzer(
+        changed_paths=changed_paths,
+        changed_paths_with_status=changed_paths_with_status,
+        existing_repo_paths=existing_repo_paths,
+        doc_config=doc_config,
+        architecture_dirs=doc_settings.architecture_paths,
+        convention_files=doc_settings.convention_files,
+    )
+    suggestions = analyzer.run()
+
+    marker = doc_settings.comment_marker
+    body = format_doc_comment(suggestions, marker)
+
+    if dry_run:
+        if suggestions:
+            console.print(f"[yellow]Dry run - {len(suggestions)} doc suggestion(s):[/yellow]")
+            print(body)
+        else:
+            console.print("[dim]Dry run - documentation looks current[/dim]")
+        return
+
+    if suggestions:
+        console.print(f"📄 Posting {len(suggestions)} doc suggestion(s)...")
+        gh.post_or_update_doc_comment(pr, body, marker)
+    else:
+        existing_comment_id = gh.find_doc_bot_comment(pr, marker)
+        if existing_comment_id is not None:
+            console.print("[dim]📄 Updating doc-bot comment: all documentation looks current[/dim]")
+            gh.post_or_update_doc_comment(pr, body, marker)
+        else:
+            console.print("[dim]📄 Documentation looks current — no comment needed[/dim]")
 
 
 @cli.group("config")
