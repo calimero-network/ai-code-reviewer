@@ -536,7 +536,7 @@ class TestWebhookConvergenceGate:
         with (
             patch.dict(
                 "os.environ",
-                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+                {"ANTHROPIC_API_KEY": "test", "GITHUB_TOKEN": "test"},
             ),
             patch("ai_reviewer.config.load_config"),
             patch(
@@ -598,7 +598,7 @@ class TestWebhookConvergenceGate:
         with (
             patch.dict(
                 "os.environ",
-                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+                {"ANTHROPIC_API_KEY": "test", "GITHUB_TOKEN": "test"},
             ),
             patch("ai_reviewer.config.load_config"),
             patch(
@@ -659,7 +659,7 @@ class TestWebhookConvergenceGate:
         with (
             patch.dict(
                 "os.environ",
-                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+                {"ANTHROPIC_API_KEY": "test", "GITHUB_TOKEN": "test"},
             ),
             patch("ai_reviewer.config.load_config"),
             patch(
@@ -1609,7 +1609,7 @@ class TestLgtmLightweightRecheck:
             patch.dict(
                 "os.environ",
                 {
-                    "CURSOR_API_KEY": "test",
+                    "ANTHROPIC_API_KEY": "test",
                     "GITHUB_TOKEN": "test",
                     "MIN_VALIDATION_AGREEMENT": "0.8",
                 },
@@ -1708,7 +1708,7 @@ class TestLgtmLightweightRecheck:
         with (
             patch.dict(
                 "os.environ",
-                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+                {"ANTHROPIC_API_KEY": "test", "GITHUB_TOKEN": "test"},
             ),
             patch("ai_reviewer.config.load_config"),
             patch(
@@ -1787,7 +1787,7 @@ class TestLgtmLightweightRecheck:
         with (
             patch.dict(
                 "os.environ",
-                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+                {"ANTHROPIC_API_KEY": "test", "GITHUB_TOKEN": "test"},
             ),
             patch("ai_reviewer.config.load_config"),
             patch(
@@ -2241,7 +2241,7 @@ class TestWebhookCompactSummaryCounts:
             patch.dict(
                 "os.environ",
                 {
-                    "CURSOR_API_KEY": "test",
+                    "ANTHROPIC_API_KEY": "test",
                     "GITHUB_TOKEN": "test",
                 },
             ),
@@ -2498,7 +2498,7 @@ class TestSuppressedFindingsNotPosted:
         with (
             patch.dict(
                 "os.environ",
-                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+                {"ANTHROPIC_API_KEY": "test", "GITHUB_TOKEN": "test"},
             ),
             patch("ai_reviewer.config.load_config"),
             patch(

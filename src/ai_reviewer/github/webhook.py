@@ -129,8 +129,7 @@ def _setup_default_review_handler() -> None:
     This is used when running as a standalone server (e.g., Cloud Run)
     without the CLI's explicit handler setup.
     """
-    from ai_reviewer.agents.cursor_client import CursorConfig
-    from ai_reviewer.config import load_config
+    from ai_reviewer.config import AnthropicApiConfig, load_config
     from ai_reviewer.github.client import (
         GitHubClient,
         ReviewMeta,
@@ -144,7 +143,7 @@ def _setup_default_review_handler() -> None:
 
     async def default_review_handler(repo: str, pr_number: int) -> None:
         """Default review handler that reads config from environment."""
-        cursor_api_key = os.environ.get("CURSOR_API_KEY")
+        anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
 
         # Support both GitHub App and PAT authentication
         github_app_id = os.environ.get("GITHUB_APP_ID")
@@ -159,21 +158,21 @@ def _setup_default_review_handler() -> None:
                 logger.error("Failed to get GitHub App installation token")
                 return
 
-        if not cursor_api_key:
-            logger.error("CURSOR_API_KEY not set")
+        if not anthropic_api_key:
+            logger.error("ANTHROPIC_API_KEY not set")
             return
         if not github_token:
             logger.error("GITHUB_TOKEN not set")
             return
 
-        cursor_timeout = _get_env_int("CURSOR_TIMEOUT", 300)
+        anthropic_timeout = _get_env_int("ANTHROPIC_TIMEOUT", 300)
         num_agents = _get_env_int("NUM_AGENTS", 3)
         min_agreement = _get_env_float("MIN_VALIDATION_AGREEMENT", 2 / 3)
 
-        cursor_config = CursorConfig(
-            api_key=cursor_api_key,
-            base_url=os.environ.get("CURSOR_BASE_URL", "https://api.cursor.com/v0"),
-            timeout=cursor_timeout,
+        anthropic_cfg = AnthropicApiConfig(
+            api_key=anthropic_api_key,
+            base_url=os.environ.get("ANTHROPIC_BASE_URL", "https://api.anthropic.com"),
+            timeout_seconds=anthropic_timeout,
         )
 
         enable_cross_review = os.environ.get("ENABLE_CROSS_REVIEW", "true").lower() != "false"
@@ -226,7 +225,7 @@ def _setup_default_review_handler() -> None:
                         recheck_review = await review_pr_with_cursor_agent(
                             repo=repo,
                             pr_number=pr_number,
-                            cursor_config=cursor_config,
+                            anthropic_cfg=anthropic_cfg,
                             github_token=github_token,
                             num_agents=1,
                             enable_cross_review=False,
@@ -274,7 +273,7 @@ def _setup_default_review_handler() -> None:
             review = await review_pr_with_cursor_agent(
                 repo=repo,
                 pr_number=pr_number,
-                cursor_config=cursor_config,
+                anthropic_cfg=anthropic_cfg,
                 github_token=github_token,
                 num_agents=num_agents,
                 enable_cross_review=enable_cross_review,

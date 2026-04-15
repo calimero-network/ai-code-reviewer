@@ -15,7 +15,7 @@ from rich.logging import RichHandler
 from rich.table import Table
 
 from ai_reviewer import __version__
-from ai_reviewer.agents.cursor_client import CursorConfig
+# Cursor config import retained only during migration grace period; no longer used.
 from ai_reviewer.config import Config, DocReviewSettings, load_config, validate_config
 from ai_reviewer.docs.analyzer import DocAnalyzer, format_doc_comment
 from ai_reviewer.github.client import (
@@ -166,11 +166,13 @@ async def review_pr_async(
         f"[dim]Requested {num_agents} agent(s); actual count may be reduced for small PRs[/dim]"
     )
 
-    cursor_config = CursorConfig(
-        api_key=config.cursor.api_key,
-        base_url=config.cursor.base_url,
-        timeout=config.cursor.timeout_seconds,
-    )
+    if not config.anthropic or not config.anthropic.api_key:
+        console.print(
+            "[red]error:[/red] anthropic.api_key not configured "
+            "(set ANTHROPIC_API_KEY or anthropic.api_key in config.yaml)"
+        )
+        sys.exit(2)
+    anthropic_cfg = config.anthropic
 
     # Pre-agent checks (github output only — json/markdown always run agents)
     gh: GitHubClient | None = None
@@ -210,7 +212,7 @@ async def review_pr_async(
                     recheck_review = await review_pr_with_cursor_agent(
                         repo=repo,
                         pr_number=pr_number,
-                        cursor_config=cursor_config,
+                        anthropic_cfg=anthropic_cfg,
                         github_token=config.github.token,
                         num_agents=1,
                         enable_cross_review=False,
@@ -272,7 +274,7 @@ async def review_pr_async(
         review = await review_pr_with_cursor_agent(
             repo=repo,
             pr_number=pr_number,
-            cursor_config=cursor_config,
+            anthropic_cfg=anthropic_cfg,
             github_token=config.github.token,
             on_status=on_status,
             num_agents=num_agents,
