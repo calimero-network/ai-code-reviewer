@@ -107,7 +107,10 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
-addopts = "-v --cov=ai_reviewer --cov-report=term-missing"
+addopts = "-v --cov=ai_reviewer --cov-report=term-missing -m 'not integration'"
+markers = [
+    "integration: opt-in end-to-end tests requiring live API keys (run with `pytest -m integration`)",
+]
 
 [tool.coverage.run]
 source = ["src/ai_reviewer"]
