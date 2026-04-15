@@ -26,15 +26,6 @@ class AgentConfig:
 
 
 @dataclass
-class CursorApiConfig:
-    """Cursor API configuration."""
-
-    api_key: str
-    base_url: str = "https://api.cursor.com/v0"
-    timeout_seconds: int = 120
-
-
-@dataclass
 class AnthropicApiConfig:
     """Anthropic Messages API configuration."""
 
@@ -138,7 +129,6 @@ class DocReviewSettings:
 class Config:
     """Complete application configuration."""
 
-    cursor: CursorApiConfig | None
     anthropic: AnthropicApiConfig | None
     github: GitHubConfig
     agents: list[AgentConfig]
@@ -194,16 +184,6 @@ def _expand_env_vars(obj: Any) -> Any:
 
 def _parse_config(raw: dict[str, Any]) -> Config:
     """Parse raw config dict into Config object."""
-    # Cursor config (legacy; kept during migration)
-    cursor_raw = raw.get("cursor", {})
-    cursor: CursorApiConfig | None = None
-    if cursor_raw:
-        cursor = CursorApiConfig(
-            api_key=cursor_raw.get("api_key") or os.environ.get("CURSOR_API_KEY", ""),
-            base_url=cursor_raw.get("base_url", "https://api.cursor.com/v0"),
-            timeout_seconds=cursor_raw.get("timeout_seconds", 120),
-        )
-
     # Anthropic config
     anthropic_raw = raw.get("anthropic", {})
     anthropic: AnthropicApiConfig | None = None
@@ -332,7 +312,6 @@ def _parse_config(raw: dict[str, Any]) -> Config:
     )
 
     return Config(
-        cursor=cursor,
         anthropic=anthropic,
         github=github,
         agents=agents,
@@ -356,9 +335,7 @@ def validate_config(config: Config) -> list[str]:
     """
     errors = []
 
-    has_anthropic = config.anthropic is not None and config.anthropic.api_key
-    has_cursor = config.cursor is not None and config.cursor.api_key
-    if not has_anthropic and not has_cursor:
+    if not config.anthropic or not config.anthropic.api_key:
         errors.append(
             "Missing Anthropic API key (set ANTHROPIC_API_KEY or anthropic.api_key)"
         )

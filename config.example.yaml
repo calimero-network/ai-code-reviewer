@@ -4,15 +4,18 @@
 version: 1
 
 # ============================================================================
-# CURSOR API - Single gateway for all LLM models
+# ANTHROPIC API — unified LLM gateway via the official Messages API
 # ============================================================================
-# All agents (Claude, GPT-4, etc.) are accessed through Cursor's unified API
-# This means you only need ONE API key to access multiple models!
-
-cursor:
-  api_key: ${CURSOR_API_KEY}
-  # base_url: https://api.cursor.com/v0  # Default (Background Agent API)
-  timeout_seconds: 120
+anthropic:
+  api_key: ${ANTHROPIC_API_KEY}
+  # base_url: https://api.anthropic.com   # default
+  default_model: claude-opus-4-6
+  timeout_seconds: 300
+  max_retries: 3
+  enable_prompt_caching: true
+  max_combined_context_tokens: 150000
+  per_file_max_bytes: 524288
+  per_review_github_request_budget: 200
 
 # ============================================================================
 # GITHUB INTEGRATION
@@ -29,60 +32,86 @@ github:
 # ============================================================================
 # AGENT CONFIGURATION
 # ============================================================================
-# Each agent uses Cursor API but with different models and focus areas.
-# This enables diverse perspectives on the same code.
+# Diversity comes from model mix (Opus vs Sonnet), system prompts,
+# focus areas, and extended thinking.
 
 agents:
-  # Security-focused agent using Claude
+  # Reasoning-heavy: Opus + extended thinking
   - name: security-reviewer
-    model: claude-4.5-opus-high-thinking
+    model: claude-opus-4-6
     focus_areas:
       - security
       - authentication
       - data_validation
     description: "Identifies security vulnerabilities and auth issues"
-    max_tokens: 4096
-    temperature: 0.3
+    max_tokens: 16384
+    temperature: 0.2
+    thinking_enabled: true
+    thinking_budget_tokens: 8192
+    allow_tool_use: true
+    max_tool_calls: 20
 
-  # Performance-focused agent using GPT-4
-  - name: performance-reviewer
-    model: gpt-5.2
-    focus_areas:
-      - performance
-      - complexity
-      - resource_management
-    description: "Finds performance bottlenecks and inefficiencies"
-    max_tokens: 4096
-    temperature: 0.3
-
-  # Architecture/patterns agent using Claude with codebase context
   - name: patterns-reviewer
-    model: claude-4.5-opus-high-thinking
+    model: claude-opus-4-6
     focus_areas:
       - consistency
       - patterns
       - architecture
       - breaking_changes
-    description: "Ensures code follows existing patterns"
-    include_codebase_context: true # Cursor's unique feature
-    max_tokens: 4096
+    description: "Ensures code follows existing patterns; explores repo via tools"
+    max_tokens: 16384
+    temperature: 0.2
+    thinking_enabled: true
+    thinking_budget_tokens: 8192
+    allow_tool_use: true
+    max_tool_calls: 30
+
+  - name: logic-reviewer
+    model: claude-opus-4-6
+    focus_areas:
+      - logic
+      - edge_cases
+      - error_handling
+      - correctness
+    max_tokens: 16384
+    temperature: 0.2
+    thinking_enabled: true
+    thinking_budget_tokens: 8192
+    allow_tool_use: true
+    max_tool_calls: 20
+
+  # Broad/fast: Sonnet without thinking
+  - name: performance-reviewer
+    model: claude-sonnet-4-6
+    focus_areas:
+      - performance
+      - complexity
+      - resource_management
+    description: "Finds performance bottlenecks and inefficiencies"
+    max_tokens: 8192
     temperature: 0.3
+    thinking_enabled: false
+    allow_tool_use: true
+    max_tool_calls: 10
+
+  - name: style-reviewer
+    model: claude-sonnet-4-6
+    focus_areas:
+      - style
+      - documentation
+      - readability
+    max_tokens: 8192
+    temperature: 0.3
+    thinking_enabled: false
+    allow_tool_use: false
 
 # ============================================================================
 # ORCHESTRATOR SETTINGS
 # ============================================================================
 orchestrator:
-  # Maximum time to wait for all agents (seconds)
-  timeout_seconds: 120
-
-  # Minimum agents that must succeed for a valid review
-  # If fewer succeed, the review is considered incomplete
+  timeout_seconds: 300
   min_agents_required: 2
-
-  # Maximum concurrent agent executions
   max_parallel_agents: 5
-
-  # Retry failed agents
   retry_on_failure: true
   max_retries: 2
 
@@ -90,17 +119,8 @@ orchestrator:
 # AGGREGATOR SETTINGS
 # ============================================================================
 aggregator:
-  # Similarity threshold for clustering findings (0.0 - 1.0)
-  # Higher = stricter matching, fewer merged findings
-  # Lower = more aggressive merging
   similarity_threshold: 0.85
-
-  # Minimum consensus required to report a finding as "critical"
-  # 0.5 = at least half of agents must agree
-  # 1.0 = all agents must agree
   min_consensus_for_critical: 0.5
-
-  # Use embeddings for semantic similarity
   use_embeddings: true
   embedding_model: all-MiniLM-L6-v2
 
@@ -108,33 +128,19 @@ aggregator:
 # OUTPUT SETTINGS
 # ============================================================================
 output:
-  # Include breakdown of which agent found what
   include_agent_breakdown: true
-
-  # Show confidence scores in output
   include_confidence_scores: true
-
-  # Limit findings per file to avoid overwhelming PRs
   max_findings_per_file: 10
-
-  # Maximum total findings to report
   max_total_findings: 50
 
 # ============================================================================
 # REVIEW POLICY
 # ============================================================================
 review_policy:
-  # Automatically approve PRs with no findings
   auto_approve_if_no_findings: false
-
-  # Request changes if critical issues found
   block_on_critical: true
-
-  # Categories that always require human review
   require_human_review_for:
     - security
-
-  # File patterns to ignore (supports glob)
   ignore_patterns:
     - "**/*.lock"
     - "**/*.generated.*"
@@ -148,37 +154,24 @@ review_policy:
 server:
   host: "0.0.0.0"
   port: 8080
-
-  # Health check endpoint
   health_check_path: /health
-
-  # Prometheus metrics
   metrics_path: /metrics
   metrics_enabled: true
 
 # ============================================================================
 # DOCUMENTATION REVIEW
 # ============================================================================
-# Rule-based check for missing documentation updates on architecture-impacting PRs.
-# No AI calls consumed — fast, free, deterministic.
-
 doc_review:
   enabled: true
-
-  # Directories to check for architecture documentation
   architecture_paths:
     - "architecture/"
     - "docs/"
     - "doc/"
-
-  # Convention files to check for freshness on architecture-impacting PRs
   convention_files:
     - "AGENTS.md"
     - "CLAUDE.md"
     - "CONTRIBUTING.md"
     - ".cursor/rules/README.md"
-
-  # HTML comment marker for deduplicating PR comments
   comment_marker: "<!-- AI-CODE-REVIEWER-DOC-BOT -->"
 
 # ============================================================================
@@ -187,6 +180,3 @@ doc_review:
 logging:
   level: INFO
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-
-  # Log to file (optional)
-  # file: /var/log/ai-code-reviewer.log

@@ -6,11 +6,26 @@ version: 1
 # Inherit default settings
 inherit_from: default
 
+# Anthropic Messages API — unified LLM gateway
+anthropic:
+  api_key: ${ANTHROPIC_API_KEY}
+  default_model: claude-opus-4-6
+  timeout_seconds: 300
+  enable_prompt_caching: true
+  max_combined_context_tokens: 150000
+  per_file_max_bytes: 524288
+  per_review_github_request_budget: 200
+
 # Agent customization for self-review
 agents:
   - name: security-reviewer
-    model: claude-4.5-opus-high-thinking
+    model: claude-opus-4-6
     focus_areas: [security, authentication]
+    thinking_enabled: true
+    thinking_budget_tokens: 8192
+    allow_tool_use: true
+    max_tool_calls: 20
+    temperature: 0.2
     custom_prompt_append: |
       This is a Python codebase that handles API keys and GitHub tokens.
       Pay special attention to:
@@ -18,12 +33,17 @@ agents:
       - Webhook signature validation
       - Rate limiting and abuse prevention
 
-  - name: architecture-reviewer
-    model: claude-4.5-opus-high-thinking
+  - name: patterns-reviewer
+    model: claude-opus-4-6
     focus_areas: [architecture, patterns]
+    thinking_enabled: true
+    thinking_budget_tokens: 8192
+    allow_tool_use: true
+    max_tool_calls: 30
+    temperature: 0.2
     custom_prompt_append: |
       This codebase follows these key patterns:
-      - All LLM access via CursorClient (never direct provider APIs)
+      - All LLM access via AnthropicClient (never direct provider SDKs elsewhere)
       - Agents are stateless and run independently
       - Async throughout for I/O operations
       - Dataclasses for all data structures
@@ -31,19 +51,29 @@ agents:
       Flag violations of these patterns as architectural issues.
       Reference .ai/rules/ for detailed module conventions.
 
-  - name: documentation-reviewer
-    model: claude-4.5-opus-high-thinking
-    focus_areas: [documentation]
-    custom_prompt_append: |
-      Check if code changes require documentation updates.
+  - name: logic-reviewer
+    model: claude-opus-4-6
+    focus_areas: [logic, edge_cases, error_handling]
+    thinking_enabled: true
+    thinking_budget_tokens: 8192
+    allow_tool_use: true
+    max_tool_calls: 20
+    temperature: 0.2
 
-      Documentation locations:
-      - README.md - User-facing features
-      - DESIGN.md - Architecture decisions
-      - .cursor/rules/ - AI rules per module
-      - .ai/context.md - Quick AI context
+  - name: performance-reviewer
+    model: claude-sonnet-4-6
+    focus_areas: [performance, complexity, resource_management]
+    thinking_enabled: false
+    allow_tool_use: true
+    max_tool_calls: 10
+    temperature: 0.3
 
-      Flag missing or outdated documentation as suggestions.
+  - name: style-reviewer
+    model: claude-sonnet-4-6
+    focus_areas: [style, documentation, readability]
+    thinking_enabled: false
+    allow_tool_use: false
+    temperature: 0.3
 
 # Files to ignore in reviews
 ignore:
@@ -74,7 +104,6 @@ documentation:
     - .ai/context.md
     - config.example.yaml
 
-  # Map source files to docs that may need updates
   source_to_docs_mapping:
     "src/ai_reviewer/agents/**":
       - .ai/rules/agents.md
@@ -109,9 +138,9 @@ custom_rules:
     check: "missing_type_hints_on_public_functions"
     severity: suggestion
 
-  # No direct LLM imports
+  # No direct LLM imports outside agents/anthropic_client.py
   - name: no-direct-llm
-    description: "LLM access must go through CursorClient"
-    pattern: "^(import (anthropic|openai)|from (anthropic|openai) import)"
+    description: "LLM access must go through AnthropicClient"
+    pattern: "^(import (openai)|from (openai) import)"
     severity: critical
-    message: "Use CursorClient from agents/cursor_client.py instead"
+    message: "Use AnthropicClient from agents/anthropic_client.py; no OpenAI/other-provider SDKs."

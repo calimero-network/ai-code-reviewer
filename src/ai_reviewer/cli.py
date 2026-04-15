@@ -15,7 +15,6 @@ from rich.logging import RichHandler
 from rich.table import Table
 
 from ai_reviewer import __version__
-# Cursor config import retained only during migration grace period; no longer used.
 from ai_reviewer.config import Config, DocReviewSettings, load_config, validate_config
 from ai_reviewer.docs.analyzer import DocAnalyzer, format_doc_comment
 from ai_reviewer.github.client import (
