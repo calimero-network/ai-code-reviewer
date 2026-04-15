@@ -159,7 +159,7 @@ Enabled via the `thinking` parameter on the Messages API.
 
 `max_tokens` is set to `thinking.budget_tokens + expected_output_tokens + margin`, e.g., 16384 for thinking-enabled agents, 8192 otherwise.
 
-`claude-mythos-preview` is exposed as a YAML-toggleable alternative for the security agent but not default (preview status).
+`claude-mythos-preview` is **not** used. Confirmed unavailable outside Anthropic's Project Glasswing consortium (invitation-only, ~40 approved orgs), with no plan for general availability. The security agent stays on `claude-opus-4-6`.
 
 ### 5.5 Model mix
 
@@ -256,7 +256,7 @@ anthropic:
 
 agents:
   - name: security-reviewer
-    model: claude-opus-4-6          # or claude-mythos-preview (preview)
+    model: claude-opus-4-6
     focus_areas: [security, authentication, data_validation]
     thinking_enabled: true
     thinking_budget_tokens: 8192
