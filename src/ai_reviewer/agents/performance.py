@@ -6,9 +6,10 @@ from ai_reviewer.agents.base import ReviewAgent
 class PerformanceAgent(ReviewAgent):
     """Agent specialized in performance and efficiency issues."""
 
-    MODEL = "gpt-5.2"
-    AGENT_TYPE = "gpt4-performance"
+    MODEL = "claude-sonnet-4-6"
+    AGENT_TYPE = "performance-reviewer"
     FOCUS_AREAS = ["performance", "complexity", "resource_management", "efficiency"]
+    THINKING_ENABLED = False
 
     SYSTEM_PROMPT = """You are an expert performance engineer reviewing code for efficiency issues.
 
@@ -52,9 +53,11 @@ Suggest concrete optimizations with example code when possible.
 class LogicAgent(ReviewAgent):
     """Agent specialized in logic errors and edge cases."""
 
-    MODEL = "gpt-5.2"
-    AGENT_TYPE = "gpt4-logic"
+    MODEL = "claude-opus-4-6"
+    AGENT_TYPE = "logic-reviewer"
     FOCUS_AREAS = ["logic", "edge_cases", "error_handling", "correctness"]
+    THINKING_ENABLED = True
+    THINKING_BUDGET = 8192
 
     SYSTEM_PROMPT = """You are an expert code reviewer focused on correctness and logic.
 
