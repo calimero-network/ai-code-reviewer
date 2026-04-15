@@ -14,7 +14,7 @@ AI Code Reviewer takes a different approach to automated code review: instead of
 
 - **Multi-Agent Architecture**: Run 2–5+ LLM agents in parallel, each with a specialized focus area
 - **Consensus-Based Scoring**: Findings are weighted by how many agents agree, reducing false positives
-- **Single API Key**: All models (Claude, GPT-4, etc.) accessed through the Cursor unified API
+- **Anthropic Messages API**: All models (Claude Opus 4.6, Sonnet 4.6) accessed directly via the official `anthropic` SDK, with prompt caching, extended thinking, and tool use
 - **GitHub Integration**: Automatic PR reviews via webhooks, with inline comments and thread resolution
 - **Incremental Reviews**: Delta tracking detects new, fixed, and open findings across pushes — with convergence logic that stops reviewing when findings stabilize
 - **Documentation Review**: Rule-based check that flags missing doc updates on architecture-impacting PRs — works out-of-the-box on any repo by probing for `CLAUDE.md`, `AGENTS.md`, and architecture folders (zero LLM cost)
@@ -30,7 +30,7 @@ For the full technical deep-dive — pipeline flowcharts, scoring formulas, conv
 pip install ai-code-reviewer
 
 # Export credentials
-export CURSOR_API_KEY=cur_...
+export ANTHROPIC_API_KEY=sk-ant-...
 export GITHUB_TOKEN=ghp_...
 
 # Review a GitHub PR
@@ -44,19 +44,21 @@ git diff main | ai-reviewer review --output markdown
 
 ## How It Works
 
-All LLM agents access Claude, GPT-4, and other models through the Cursor unified API — a single key, consistent interface, and codebase context for pattern-aware reviews.
+All LLM agents call Anthropic's Messages API directly via the official `anthropic` SDK. Reasoning-heavy agents run on `claude-opus-4-6` with extended thinking; broader agents run on `claude-sonnet-4-6`. Repo exploration happens through Claude tool use (`read_file` / `glob` / `grep`) backed by the GitHub Contents API — no cloning, no extra infrastructure.
 
 ```mermaid
 flowchart LR
-    PR["PR Diff"] --> Cursor["Cursor API\n(Unified LLM Gateway)"]
+    PR["PR Diff"] --> Anthropic["Anthropic Messages API\n(claude-opus-4-6 / sonnet-4-6)"]
 
     subgraph Agents["Parallel Agent Execution"]
-        A1["Claude\n(Security)"]
-        A2["GPT-4\n(Performance)"]
-        A3["Claude\n(Patterns)"]
+        A1["Opus + thinking\n(Security)"]
+        A2["Sonnet\n(Performance)"]
+        A3["Opus + thinking\n(Patterns)"]
+        A4["Opus + thinking\n(Logic)"]
+        A5["Sonnet\n(Style)"]
     end
 
-    Cursor --> Agents
+    Anthropic --> Agents
 
     Agents --> Agg["Review Aggregator\n• Cluster similar findings\n• Compute consensus scores\n• Rank by severity × agreement"]
     Agg --> Delta["Delta Tracking\n• New / fixed / open findings\n• Convergence detection"]
@@ -72,28 +74,34 @@ For a detailed breakdown of the pipeline, scoring formulas, and convergence logi
 Create `config.yaml`:
 
 ```yaml
-cursor:
-  api_key: ${CURSOR_API_KEY}
+anthropic:
+  api_key: ${ANTHROPIC_API_KEY}
+  default_model: claude-opus-4-6
+  enable_prompt_caching: true
 
 github:
   token: ${GITHUB_TOKEN}  # or Classic PAT for thread resolution (see below)
 
 agents:
   - name: security-reviewer
-    model: claude-4.5-opus-high-thinking
+    model: claude-opus-4-6
     focus_areas: [security, architecture]
+    thinking_enabled: true
+    thinking_budget_tokens: 8192
 
   - name: performance-reviewer
-    model: gpt-5.2
+    model: claude-sonnet-4-6
     focus_areas: [performance, logic]
 
   - name: patterns-reviewer
-    model: claude-4.5-opus-high-thinking
+    model: claude-opus-4-6
     focus_areas: [consistency, patterns]
-    include_codebase_context: true
+    thinking_enabled: true
+    allow_tool_use: true
+    max_tool_calls: 30
 
 orchestrator:
-  timeout_seconds: 120
+  timeout_seconds: 300
   min_agents_required: 2
 
 # Documentation review (rule-based, no LLM cost)

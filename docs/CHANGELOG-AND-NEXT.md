@@ -1,5 +1,27 @@
 # AI Code Reviewer – What Changed & What’s Next
 
+## 2026-04 — Anthropic Messages API migration
+
+### Migrated
+- **LLM backend**: Cursor Background Agent API → Anthropic Messages API (official SDK).
+- **Models**: `claude-4.5-opus-high-thinking` → `claude-opus-4-6` + extended thinking;
+  `gpt-5.2` → `claude-sonnet-4-6` (Anthropic-only, no GPT).
+- **Repo context**: Cursor's background-agent exploration replaced by Claude tool use
+  (`read_file` / `glob` / `grep`) backed by the GitHub Contents API. No local cloning.
+- **Quality stack**: Prompt caching on system blocks, JSON-schema structured output,
+  extended thinking on security/patterns/logic agents.
+- **Config**: `cursor:` block replaced by `anthropic:`. New per-agent knobs:
+  `thinking_enabled`, `thinking_budget_tokens`, `allow_tool_use`, `max_tool_calls`.
+
+### Secrets
+- Rename `CURSOR_API_KEY` → `ANTHROPIC_API_KEY` in GitHub Actions, Cloud Run, and local `.env`.
+
+### Spec & plan
+- Design: [`docs/superpowers/specs/2026-04-15-anthropic-messages-migration-design.md`](superpowers/specs/2026-04-15-anthropic-messages-migration-design.md)
+- Implementation plan: [`docs/superpowers/plans/2026-04-16-anthropic-messages-migration.md`](superpowers/plans/2026-04-16-anthropic-messages-migration.md)
+
+---
+
 ## Summary of changes (this round)
 
 ### P0 (already merged or in branch)
