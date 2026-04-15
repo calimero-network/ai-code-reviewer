@@ -1,4 +1,4 @@
-"""Main review flow using Cursor Background Agent API with multi-agent support.
+"""Main review flow using Anthropic Messages API with multi-agent support.
 
 Review standard (embedded in prompts):
 - Favor approving when the CL improves overall code health; no perfectionism.

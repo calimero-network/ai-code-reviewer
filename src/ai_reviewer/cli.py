@@ -106,7 +106,7 @@ def review_pr(
     force_review: bool,
     doc_check: bool | None,
 ) -> None:
-    """Review a GitHub pull request using Cursor AI agent(s).
+    """Review a GitHub pull request using Anthropic Claude agent(s).
 
     With --agents=1: Single comprehensive review
     With --agents=2: Security + Performance agents (cross-review on by default)
@@ -146,7 +146,7 @@ async def review_pr_async(
     force_review: bool = False,
     doc_check: bool | None = None,
 ) -> None:
-    """Async implementation of PR review using Cursor Background Agent(s)."""
+    """Async implementation of PR review using Anthropic Claude agents."""
     # Auto-detect GitHub Actions environment - never allow APPROVE there
     is_github_actions = os.getenv("GITHUB_ACTIONS") == "true"
     allow_approve = not no_approve and not is_github_actions
@@ -291,10 +291,10 @@ async def review_pr_async(
         console.print(f"   Time: {review.total_review_time_ms / 1000:.1f}s")
         console.print("\n[yellow]Not posting to GitHub - all agents failed.[/yellow]")
         console.print("\n[bold]Possible causes:[/bold]")
-        console.print("  • Invalid or expired Cursor API key")
+        console.print("  • Invalid or expired Anthropic API key")
         console.print("  • Rate limit exceeded")
         console.print("  • Network connectivity issues")
-        console.print("\nCheck your CURSOR_API_KEY and try again.")
+        console.print("\nCheck your ANTHROPIC_API_KEY and try again.")
         sys.exit(1)
 
     effective_agents = review.agent_count
@@ -585,8 +585,10 @@ def config_show(config_path: str | None) -> None:
     console.print(table)
 
     # Other settings
-    console.print(f"\n[bold]Cursor API:[/bold] {config.cursor.base_url}")
-    console.print(f"[bold]Timeout:[/bold] {config.cursor.timeout_seconds}s")
+    if config.anthropic:
+        console.print(f"\n[bold]Anthropic API:[/bold] {config.anthropic.base_url}")
+        console.print(f"[bold]Model:[/bold] {config.anthropic.default_model}")
+        console.print(f"[bold]Timeout:[/bold] {config.anthropic.timeout_seconds}s")
 
 
 @cli.command("serve")
