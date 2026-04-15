@@ -24,20 +24,20 @@ classifiers = [
 ]
 
 dependencies = [
-    # Cursor API is our unified gateway - no direct anthropic/openai needed
+    "anthropic>=0.40.0",
     "PyGithub>=2.1.0",
     "fastapi>=0.109.0",
     "uvicorn>=0.27.0",
     "click>=8.1.0",
     "pydantic>=2.6.0",
     "pydantic-settings>=2.1.0",
-    "httpx>=0.26.0",      # HTTP client for Cursor API
+    "httpx>=0.26.0",
     "pyyaml>=6.0.0",
-    "rich>=13.7.0",        # Beautiful terminal output
-    "tenacity>=8.2.0",     # Retry logic
-    "sentence-transformers>=2.3.0",  # For finding similarity clustering
-    "PyJWT>=2.8.0",        # GitHub App authentication
-    "cryptography>=42.0.0", # For JWT RS256 signing
+    "rich>=13.7.0",
+    "tenacity>=8.2.0",
+    "sentence-transformers>=2.3.0",
+    "PyJWT>=2.8.0",
+    "cryptography>=42.0.0",
 ]
 
 [project.optional-dependencies]
