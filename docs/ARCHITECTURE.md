@@ -2,6 +2,16 @@
 
 > Comprehensive technical reference for the AI Code Reviewer system.
 > For a quick overview, see the [README](../README.md).
+>
+> **2026-04 migration notice:** the LLM backend moved from the Cursor
+> Background Agent API to Anthropic's Messages API (official `anthropic`
+> SDK). The function name `review_pr_with_cursor_agent` is retained for
+> call-site / test-patch parity but its implementation now uses the
+> Anthropic backend. See
+> [`docs/superpowers/specs/2026-04-15-anthropic-messages-migration-design.md`](superpowers/specs/2026-04-15-anthropic-messages-migration-design.md)
+> for the full design. Some sequence diagrams below reference the old
+> `run_single_agent` helper that has been removed; the agent execution
+> now flows through `ReviewAgent` subclasses and `AnthropicClient.run_review`.
 
 ## Table of Contents
 
@@ -19,7 +29,7 @@
 
 ## 1. System Overview
 
-AI Code Reviewer orchestrates multiple LLM agents — each with a specialized focus area — to produce consensus-based code reviews. All LLM access goes through the Cursor Background Agent API; there are no direct provider SDK dependencies.
+AI Code Reviewer orchestrates multiple LLM agents — each with a specialized focus area — to produce consensus-based code reviews. All LLM access goes through Anthropic's Messages API via the official `anthropic` SDK. Agents run on `claude-opus-4-6` (reasoning-heavy, with extended thinking) or `claude-sonnet-4-6` (broader, faster). Repo exploration happens through Claude tool use (`read_file` / `glob` / `grep`) backed by the GitHub Contents API.
 
 ```mermaid
 flowchart LR
@@ -49,11 +59,16 @@ flowchart LR
 | `models/context.py` | `ReviewContext` dataclass for PR/repo metadata and repo config hooks |
 | `models/findings.py` | `Severity`, `Category`, `ReviewFinding`, `ConsolidatedFinding`, `compute_fuzzy_hash` |
 | `models/review.py` | `ReviewHistory`, `ScoreBreakdown`, `AgentReview`, `ConsolidatedReview` |
-| `agents/cursor_client.py` | `CursorClient` / `CursorConfig`: HTTP client for Cursor Background Agent API |
-| `agents/base.py` | `ReviewAgent` ABC (alternate agent path, not used by main Cursor flow) |
-| `agents/security.py` | `SecurityAgent` subclass of `ReviewAgent` |
-| `agents/performance.py` | `PerformanceAgent` subclass |
-| `agents/patterns.py` | `PatternsAgent` subclass |
+| `agents/anthropic_client.py` | `AnthropicClient`: Messages API wrapper with tool-use loop, extended thinking, JSON-schema structured output, prompt caching |
+| `agents/base.py` | `ReviewAgent` base class; drives `AnthropicClient.run_review` per agent |
+| `agents/security.py` | `SecurityAgent`, `AuthenticationAgent` (Opus + thinking) |
+| `agents/performance.py` | `PerformanceAgent` (Sonnet), `LogicAgent` (Opus + thinking) |
+| `agents/patterns.py` | `PatternsAgent` (Opus + thinking), `StyleAgent` (Sonnet) |
+| `context/builder.py` | `build_system_blocks`, `build_user_blocks`, `FINDINGS_SCHEMA` |
+| `context/fetch.py` | `fetch_conventions`, `build_repo_map` (GitHub Contents API, budget-aware) |
+| `context/neighbors.py` | Import-graph / sibling heuristics; `parse_imports_by_path` for Python/TS/JS/Go/Rust/Java |
+| `tools/repo_tools.py` | `ToolRegistry` exposing `read_file`/`glob`/`grep` for Claude tool use |
+| `session.py` | `ReviewSession` — per-review GitHub quota + file/tree caches + tool counters |
 | `orchestrator/orchestrator.py` | Generic parallel `AgentOrchestrator` (asyncio tasks) |
 | `orchestrator/aggregator.py` | `ReviewAggregator` clustering/merge (alternate path; production uses `aggregate_findings` in `review.py`) |
 | `security/scanner.py` | Regex + Shannon entropy secret scanner on unified diffs |

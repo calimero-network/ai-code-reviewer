@@ -1,4 +1,4 @@
-"""Main review flow using Cursor Background Agent API with multi-agent support.
+"""Main review flow using Anthropic Messages API with multi-agent support.
 
 Review standard (embedded in prompts):
 - Favor approving when the CL improves overall code health; no perfectionism.
@@ -28,12 +28,22 @@ from difflib import SequenceMatcher
 from typing import Any
 from uuid import uuid4
 
-from ai_reviewer.agents.cursor_client import CursorClient, CursorConfig
+from ai_reviewer.agents.anthropic_client import AnthropicClient
+from ai_reviewer.agents.base import ReviewAgent
+from ai_reviewer.agents.patterns import PatternsAgent, StyleAgent
+from ai_reviewer.agents.performance import LogicAgent, PerformanceAgent
+from ai_reviewer.agents.security import AuthenticationAgent, SecurityAgent
+from ai_reviewer.config import AnthropicApiConfig
+from ai_reviewer.context.builder import build_system_blocks, build_user_blocks
+from ai_reviewer.context.fetch import build_repo_map, fetch_conventions
+from ai_reviewer.context.neighbors import select_neighbors
 from ai_reviewer.github.client import GitHubClient
 from ai_reviewer.models.context import ReviewContext
-from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
-from ai_reviewer.models.review import ConsolidatedReview, ScoreBreakdown
+from ai_reviewer.models.findings import Category, ConsolidatedFinding, ReviewFinding, Severity
+from ai_reviewer.models.review import AgentReview, ConsolidatedReview, ScoreBreakdown
 from ai_reviewer.security.scanner import scan_for_secrets
+from ai_reviewer.session import ReviewSession
+from ai_reviewer.tools.repo_tools import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -636,29 +646,6 @@ def parse_review_response(content: str) -> tuple[list[dict], str]:
         return [], "Failed to parse review response"
 
 
-async def run_single_agent(
-    client: CursorClient,
-    repo_url: str,
-    ref: str,
-    prompt: str,
-    agent_name: str,
-    on_status: Callable[..., Any] | None = None,
-) -> tuple[str, list[dict], str]:
-    """Run a single agent and return its findings."""
-    try:
-        result = await client.run_review_agent(
-            repo_url=repo_url,
-            ref=ref,
-            prompt=prompt,
-            on_status=on_status,
-        )
-        findings, summary = parse_review_response(result.content)
-        return agent_name, findings, summary
-    except Exception as e:
-        logger.error(f"Agent {agent_name} failed: {e}")
-        return agent_name, [], f"Agent failed: {e}"
-
-
 # Similarity threshold for clustering findings (match aggregator default)
 _SIMILARITY_THRESHOLD = 0.85
 
@@ -949,59 +936,200 @@ def aggregate_findings(
     )
 
 
-async def _run_single_cross_review_agent(
-    client: CursorClient,
-    repo_url: str,
-    ref: str,
+_AGENT_CLASSES: dict[str, type[ReviewAgent]] = {
+    "security-reviewer": SecurityAgent,
+    "authentication-reviewer": AuthenticationAgent,
+    "performance-reviewer": PerformanceAgent,
+    "patterns-reviewer": PatternsAgent,
+    "logic-reviewer": LogicAgent,
+    "style-reviewer": StyleAgent,
+}
+
+DEFAULT_AGENT_ORDER = [
+    "security-reviewer",
+    "performance-reviewer",
+    "patterns-reviewer",
+    "logic-reviewer",
+    "style-reviewer",
+]
+
+CONVENTION_PATHS = [
+    "AGENTS.md",
+    "CLAUDE.md",
+    "CONTRIBUTING.md",
+    ".ai/rules/architecture.md",
+    ".ai/rules/conventions.md",
+    ".ai/rules/agents.md",
+    ".cursor/rules/README.md",
+]
+
+
+def _review_finding_to_dict(f: ReviewFinding) -> dict[str, Any]:
+    """Convert a parsed ReviewFinding back to the dict form aggregate_findings expects."""
+    return {
+        "file_path": f.file_path,
+        "line_start": f.line_start,
+        "line_end": f.line_end,
+        "severity": f.severity.value if hasattr(f.severity, "value") else str(f.severity),
+        "category": f.category.value if hasattr(f.category, "value") else str(f.category),
+        "title": f.title,
+        "description": f.description,
+        "suggested_fix": f.suggested_fix,
+        "confidence": f.confidence,
+    }
+
+
+async def _prepare_shared_context(
+    session: ReviewSession,
+    gh: GitHubClient,
+    pr: Any,
+    diff: str,
+    changed_file_contents: dict[str, str],
+    anthropic_cfg: AnthropicApiConfig,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Fetch conventions + repo map + neighbors and build system/user blocks."""
+    import base64 as _b64
+
+    conventions = fetch_conventions(session, gh, CONVENTION_PATHS)
+    repo_map = build_repo_map(session, gh)
+
+    tree = session.cached_tree() or []
+
+    def _read(path: str) -> str:
+        cached = session.cached_file(path)
+        return cached if cached is not None else ""
+
+    neighbor_paths = select_neighbors(
+        changed_files=changed_file_contents,
+        repo_paths=tree,
+        read_file=_read,
+        max_siblings=5,
+        max_total=15,
+    )
+
+    neighbors: dict[str, str] = {}
+    for path in neighbor_paths:
+        if session.is_github_budget_exhausted():
+            break
+        cached = session.cached_file(path)
+        if cached is not None:
+            neighbors[path] = cached
+            continue
+        try:
+            session.consume_github_request()
+            contents = gh.get_file_contents(session.repo, path, ref=session.head_sha)
+            text = _b64.b64decode(getattr(contents, "content", "")).decode(
+                "utf-8", errors="replace"
+            )
+            if len(text) > anthropic_cfg.per_file_max_bytes:
+                text = text[: anthropic_cfg.per_file_max_bytes] + "\n[truncated]"
+            session.store_file(path, text)
+            neighbors[path] = text
+        except Exception as e:  # noqa: BLE001
+            logger.debug("Neighbor fetch failed %s: %s", path, e)
+
+    system_blocks = build_system_blocks(
+        agent_role=(
+            "You are a specialized code reviewer. Each agent has its own "
+            "focus area in the next system block."
+        ),
+        convention_texts=conventions,
+        repo_map=repo_map,
+    )
+    user_blocks = build_user_blocks(
+        pr_title=getattr(pr, "title", "") or "",
+        pr_body=getattr(pr, "body", "") or "",
+        diff=diff,
+        changed_files=changed_file_contents,
+        neighbor_files=neighbors,
+        max_total_chars=anthropic_cfg.max_combined_context_tokens * 4,
+    )
+    return system_blocks, user_blocks
+
+
+async def _run_agent_safe(
+    agent: ReviewAgent,
+    context: ReviewContext,
+    on_status: Callable[..., Any] | None,
+) -> AgentReview | Exception:
+    """Run one agent; return its AgentReview or the exception for downstream handling."""
+    name = agent.agent_id
+    if on_status:
+        on_status(f"{name}: RUNNING")
+    try:
+        review = await agent.review(diff="", file_contents={}, context=context)
+        if on_status:
+            on_status(f"{name}: DONE")
+        return review
+    except Exception as e:  # noqa: BLE001
+        logger.exception("Agent %s failed", name)
+        if on_status:
+            on_status(f"{name}: FAILED")
+        return e
+
+
+async def _run_single_cross_agent(
+    client: AnthropicClient,
     cross_prompt: str,
     agent_name: str,
     on_status: Callable[..., Any] | None,
 ) -> tuple[str, list[dict[str, Any]] | None]:
-    """Run one agent's cross-review; returns (name, assessments) or (name, None) on failure."""
+    """Run one cross-review agent and return (name, assessments) or (name, None)."""
     try:
         if on_status:
             on_status(f"Cross-review: {agent_name}")
-        result = await client.run_review_agent(
-            repo_url=repo_url,
-            ref=ref,
-            prompt=cross_prompt,
-            on_status=on_status,
+        response = await client._sdk.messages.create(
+            model="claude-sonnet-4-6",
+            system=[
+                {
+                    "type": "text",
+                    "text": "You are a code review validator. Respond with valid JSON.",
+                }
+            ],
+            messages=[{"role": "user", "content": cross_prompt}],
+            max_tokens=8192,
+            temperature=0.2,
         )
-        assessments, _ = parse_cross_review_response(result.content)
+        raw_text = ""
+        for block in getattr(response, "content", []) or []:
+            if getattr(block, "type", None) == "text":
+                raw_text += getattr(block, "text", "")
+        assessments, _ = parse_cross_review_response(raw_text)
         return (agent_name, assessments)
-    except Exception as e:
-        logger.warning(f"Cross-review agent {agent_name} failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Cross-review agent %s failed: %s", agent_name, e)
         return (agent_name, None)
 
 
 async def run_cross_review_round(
-    client: CursorClient,
-    repo_url: str,
-    ref: str,
+    *,
+    client: AnthropicClient,
     review: ConsolidatedReview,
     context: ReviewContext,
     diff: str,
     agents_to_run: list[dict],
     on_status: Callable[..., Any] | None = None,
+    **_kwargs: Any,
 ) -> list[tuple[str, list[dict[str, Any]]]]:
-    """Run cross-review: each agent validates and ranks the consolidated findings (in parallel)."""
+    """Cross-review round: each agent validates and ranks findings.
+
+    Uses get_cross_review_prompt + get_cross_review_output_format to produce
+    the {id, valid, rank} assessment format that apply_cross_review expects.
+    """
     if not review.findings:
         return []
 
     cross_prompt = get_cross_review_prompt(context, review, diff) + get_cross_review_output_format()
     tasks = [
-        _run_single_cross_review_agent(
+        _run_single_cross_agent(
             client=client,
-            repo_url=repo_url,
-            ref=ref,
             cross_prompt=cross_prompt,
-            agent_name=agent_config["name"],
+            agent_name=str(cfg.get("name") if isinstance(cfg, dict) else cfg),
             on_status=on_status,
         )
-        for agent_config in agents_to_run
+        for cfg in agents_to_run
     ]
     gathered = await asyncio.gather(*tasks)
-    # Exclude agents that returned None (failed) or [] (unparseable); avoid apply_cross_review with no real votes
     return [
         (name, assessments)
         for name, assessments in gathered
@@ -1021,10 +1149,10 @@ def _effective_agent_count(
     return requested
 
 
-async def review_pr_with_cursor_agent(
+async def review_pr(
     repo: str,
     pr_number: int,
-    cursor_config: CursorConfig,
+    anthropic_cfg: AnthropicApiConfig,
     github_token: str,
     on_status: Callable[..., Any] | None = None,
     num_agents: int = 3,
@@ -1032,20 +1160,25 @@ async def review_pr_with_cursor_agent(
     min_validation_agreement: float = 2 / 3,
     config: Any | None = None,
 ) -> ConsolidatedReview:
-    """Review a PR using Cursor Background Agent(s).
+    """Review a PR using Anthropic Messages API agents.
+
+    Function name is retained for backward compatibility with existing
+    callers and test patches; the implementation now uses the official
+    Anthropic SDK (see docs/superpowers/specs/2026-04-15-anthropic-
+    messages-migration-design.md).
 
     Args:
         repo: Repository in "owner/name" format
         pr_number: Pull request number
-        cursor_config: Cursor API configuration
+        anthropic_cfg: Anthropic API configuration
         github_token: GitHub token for PR access
         on_status: Optional callback for status updates
-        num_agents: Number of agents to run (1-3)
-        enable_cross_review: If True (default) and num_agents > 1, run a second round where
+        num_agents: Number of agents to run (1-5)
+        enable_cross_review: If True and num_agents > 1, run a second round where
             agents validate and rank findings; drop low-agreement and re-order by rank.
-        min_validation_agreement: Fraction of assessing agents that must mark a finding valid (0-1, default 2/3).
-        config: Optional Config object; used to pass aggregator confidence thresholds and
-            review_policy.secret_scan_exclude into the pipeline.
+        min_validation_agreement: Fraction of assessing agents that must mark a finding valid.
+        config: Optional Config object; used for aggregator confidence thresholds and
+            review_policy.secret_scan_exclude.
 
     Returns:
         ConsolidatedReview with findings
@@ -1110,64 +1243,94 @@ async def review_pr_with_cursor_agent(
     if pr_type != "code":
         logger.info(f"PR type: {pr_type} – using context-aware review rules")
 
-    base_prompt = get_base_prompt(context, diff, files, changed_paths=changed_paths)
-    output_format = get_output_format(pr_type, total_lines=context.additions + context.deletions)
-    repo_url = f"https://github.com/{repo}"
+    # Select agents to run (resolve from config.agents, fall back to defaults)
+    configured_names = [a.name for a in (config.agents if config and config.agents else [])]
+    effective_order = configured_names or DEFAULT_AGENT_ORDER
+    agent_order = effective_order[: min(num_agents, len(effective_order))]
+    agents_to_run = [{"name": n} for n in agent_order]
 
-    # Select agents to run
-    agents_to_run = AGENT_CONFIGS[: min(num_agents, len(AGENT_CONFIGS))]
+    # When a single agent runs, it must cover ALL perspectives (not just security).
+    _single_agent_comprehensive = num_agents == 1
 
-    if num_agents == 1:
-        # Single comprehensive agent
-        prompt = (
-            base_prompt
-            + """
-**Analyze from ALL perspectives**: security, performance, logic, and code quality.
-"""
-            + output_format
+    session = ReviewSession(
+        repo=repo,
+        head_sha=pr.head.sha,
+        github_budget=anthropic_cfg.per_review_github_request_budget,
+    )
+
+    async with AnthropicClient(anthropic_cfg) as client:
+        system_blocks, user_blocks = await _prepare_shared_context(
+            session=session,
+            gh=gh,
+            pr=pr,
+            diff=diff,
+            changed_file_contents=files,
+            anthropic_cfg=anthropic_cfg,
         )
 
-        async with CursorClient(cursor_config) as client:
-            if on_status:
-                on_status("CREATING")
+        if on_status:
+            on_status("CREATING")
 
-            result = await client.run_review_agent(
-                repo_url=repo_url,
-                ref=pr.base.ref,
-                prompt=prompt,
-                on_status=on_status,
+        tasks: list[Any] = []
+        instantiated: list[tuple[str, ReviewAgent]] = []
+        for i, agent_name in enumerate(agent_order):
+            cls = _AGENT_CLASSES.get(agent_name)
+            if not cls:
+                logger.warning("Unknown agent %s; skipping", agent_name)
+                continue
+            agent_cfg = next(
+                (a for a in (config.agents if config else []) if a.name == agent_name), None
             )
-
-        raw_findings, summary = parse_review_response(result.content)
-        all_findings = [("cursor-agent", raw_findings, summary)]
-    else:
-        # Multi-agent review
-        logger.info(f"Running {len(agents_to_run)} specialized agents in parallel...")
-
-        async with CursorClient(cursor_config) as client:
-            tasks = []
-            for agent_config in agents_to_run:
-                prompt = base_prompt + agent_config["prompt_addition"] + output_format
-
-                def make_status_callback(name: str):
-                    def callback(status: str):
-                        if on_status:
-                            on_status(f"{name}: {status}")
-
-                    return callback
-
-                task = run_single_agent(
-                    client=client,
-                    repo_url=repo_url,
-                    ref=pr.base.ref,
-                    prompt=prompt,
-                    agent_name=agent_config["name"],
-                    on_status=make_status_callback(agent_config["name"]),
+            allow_tools = agent_cfg.allow_tool_use if agent_cfg else True
+            max_tool_calls = agent_cfg.max_tool_calls if agent_cfg else 20
+            registry = (
+                ToolRegistry(
+                    session=session,
+                    github_client=gh,
+                    agent_id=f"{agent_name}-{i}",
+                    max_calls=max_tool_calls,
+                    per_file_max_bytes=anthropic_cfg.per_file_max_bytes,
                 )
-                tasks.append(task)
+                if allow_tools
+                else None
+            )
+            # When only 1 agent runs (small PR), override its system blocks
+            # with a comprehensive prompt covering ALL review perspectives.
+            agent_system = system_blocks
+            if _single_agent_comprehensive:
+                comprehensive_block = {
+                    "type": "text",
+                    "text": (
+                        "**IMPORTANT: You are the ONLY reviewer for this PR. "
+                        "Analyze from ALL perspectives**: security, performance, "
+                        "logic, architecture, and code quality. Do NOT limit "
+                        "yourself to your default focus area."
+                    ),
+                }
+                agent_system = [comprehensive_block, *system_blocks]
 
-            # Run all agents in parallel
-            all_findings = await asyncio.gather(*tasks)
+            agent = cls(
+                client=client,
+                agent_id=f"{agent_name}-{i}",
+                system_blocks=agent_system,
+                user_blocks=user_blocks,
+                tool_registry=registry,
+                max_tokens=agent_cfg.max_tokens if agent_cfg else 8192,
+                temperature=agent_cfg.temperature if agent_cfg else 0.3,
+                thinking_enabled=agent_cfg.thinking_enabled if agent_cfg else None,
+            )
+            instantiated.append((agent_name, agent))
+            tasks.append(_run_agent_safe(agent, context, on_status))
+
+        agent_results = await asyncio.gather(*tasks)
+
+    all_findings: list[tuple[str, list[dict[str, Any]], str]] = []
+    for (agent_name, _agent), result in zip(instantiated, agent_results, strict=False):
+        if isinstance(result, Exception):
+            all_findings.append((agent_name, [], f"Agent failed: {result}"))
+            continue
+        dicts = [_review_finding_to_dict(f) for f in result.findings]
+        all_findings.append((agent_name, dicts, result.summary))
 
     # Aggregate findings
     confidence_thresholds = None
@@ -1196,15 +1359,17 @@ async def review_pr_with_cursor_agent(
             logger.info("Skipping cross-review: no round-1 agents succeeded")
         else:
             logger.info("Running cross-review round (validate and rank findings)...")
-            async with CursorClient(cursor_config) as client:
+            async with AnthropicClient(anthropic_cfg) as cross_client:
                 cross_results = await run_cross_review_round(
-                    client=client,
-                    repo_url=repo_url,
-                    ref=pr.base.ref,
+                    client=cross_client,
+                    session=session,
+                    gh=gh,
+                    pr=pr,
                     review=review,
                     context=context,
                     diff=diff,
                     agents_to_run=agents_for_cross,
+                    anthropic_cfg=anthropic_cfg,
                     on_status=on_status,
                 )
             if cross_results:

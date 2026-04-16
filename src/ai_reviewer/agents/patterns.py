@@ -6,9 +6,10 @@ from ai_reviewer.agents.base import ReviewAgent
 class PatternsAgent(ReviewAgent):
     """Agent specialized in code patterns and consistency."""
 
-    MODEL = "claude-4.5-opus-high-thinking"
-    AGENT_TYPE = "claude-patterns"
+    MODEL = "claude-opus-4-6"
+    AGENT_TYPE = "patterns-reviewer"
     FOCUS_AREAS = ["consistency", "patterns", "architecture", "maintainability"]
+    THINKING_ENABLED = True
 
     SYSTEM_PROMPT = """You are an expert code reviewer focused on code quality and consistency.
 
@@ -52,9 +53,10 @@ Suggest patterns and refactoring when appropriate.
 class StyleAgent(ReviewAgent):
     """Agent focused on code style and documentation."""
 
-    MODEL = "claude-4.5-opus-high-thinking"
-    AGENT_TYPE = "claude-style"
+    MODEL = "claude-sonnet-4-6"
+    AGENT_TYPE = "style-reviewer"
     FOCUS_AREAS = ["style", "documentation", "readability"]
+    THINKING_ENABLED = False
 
     SYSTEM_PROMPT = """You are a code reviewer focused on readability and documentation.
 

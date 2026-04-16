@@ -103,7 +103,7 @@ create_or_update_secret() {
     echo -e "  ${GREEN}✓${NC} Created secret '$secret_name'"
 }
 
-create_or_update_secret "CURSOR_API_KEY" "Cursor API Key (required)" "CURSOR_API_KEY"
+create_or_update_secret "ANTHROPIC_API_KEY" "Anthropic API Key (required)" "ANTHROPIC_API_KEY"
 create_or_update_secret "GITHUB_TOKEN" "GitHub Token (required)" "GITHUB_TOKEN"
 create_or_update_secret "GITHUB_WEBHOOK_SECRET" "GitHub Webhook Secret (recommended)" "GITHUB_WEBHOOK_SECRET"
 
@@ -128,7 +128,7 @@ echo -e "${YELLOW}Step 4: Deploying to Cloud Run...${NC}"
 
 # Build secrets flag (only include secrets that exist)
 SECRETS_FLAG=""
-for secret in CURSOR_API_KEY GITHUB_TOKEN GITHUB_WEBHOOK_SECRET; do
+for secret in ANTHROPIC_API_KEY GITHUB_TOKEN GITHUB_WEBHOOK_SECRET; do
     if gcloud secrets describe "$secret" &>/dev/null 2>&1; then
         if [ -n "$SECRETS_FLAG" ]; then
             SECRETS_FLAG="${SECRETS_FLAG},"

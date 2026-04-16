@@ -14,7 +14,7 @@ on:
         required: true
         type: number
       agents:
-        description: 'Number of agents (1-3)'
+        description: 'Number of agents (1-5)'
         required: false
         default: '3'
         type: choice
@@ -22,6 +22,8 @@ on:
           - '1'
           - '2'
           - '3'
+          - '4'
+          - '5'
 
 # Prevent race conditions: only one review per PR at a time
 concurrency:
@@ -33,7 +35,7 @@ jobs:
     runs-on: ubuntu-latest
     # Don't run on draft PRs
     if: github.event.pull_request.draft == false || github.event_name == 'workflow_dispatch'
-    
+
     permissions:
       contents: read
       pull-requests: write
@@ -68,7 +70,7 @@ jobs:
 
       - name: Run AI Code Review
         env:
-          CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           # Use GH_PAT for full features (thread resolution), fallback to GITHUB_TOKEN
           GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
         run: |

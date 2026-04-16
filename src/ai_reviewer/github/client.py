@@ -389,6 +389,16 @@ class GitHubClient:
         else:
             self._gh = Github(token)
 
+    def get_tree(self, repo_name: str, sha: str, *, recursive: bool = True):
+        """Get the git tree for a commit SHA."""
+        repo = self._gh.get_repo(repo_name)
+        return repo.get_git_tree(sha, recursive=recursive)
+
+    def get_file_contents(self, repo_name: str, path: str, ref: str):
+        """Get file contents at a specific ref."""
+        repo = self._gh.get_repo(repo_name)
+        return repo.get_contents(path, ref=ref)
+
     def _get_current_user_login(self) -> str | None:
         """Get the current authenticated user's login, with caching.
 

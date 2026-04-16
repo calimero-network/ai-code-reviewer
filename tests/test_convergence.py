@@ -296,7 +296,7 @@ class TestCLIConvergenceGate:
         with (
             patch("ai_reviewer.cli.load_config") as mock_load,
             patch("ai_reviewer.cli.validate_config", return_value=[]),
-            patch("ai_reviewer.cli.review_pr_with_cursor_agent", return_value=review),
+            patch("ai_reviewer.cli.run_review", return_value=review),
             patch("ai_reviewer.cli.GitHubClient") as mock_gh_cls,
         ):
             mock_config = MagicMock()
@@ -354,7 +354,7 @@ class TestCLIConvergenceGate:
         with (
             patch("ai_reviewer.cli.load_config") as mock_load,
             patch("ai_reviewer.cli.validate_config", return_value=[]),
-            patch("ai_reviewer.cli.review_pr_with_cursor_agent", return_value=review),
+            patch("ai_reviewer.cli.run_review", return_value=review),
             patch("ai_reviewer.cli.GitHubClient") as mock_gh_cls,
         ):
             mock_config = MagicMock()
@@ -411,7 +411,7 @@ class TestCLIConvergenceGate:
         with (
             patch("ai_reviewer.cli.load_config") as mock_load,
             patch("ai_reviewer.cli.validate_config", return_value=[]),
-            patch("ai_reviewer.cli.review_pr_with_cursor_agent", return_value=review),
+            patch("ai_reviewer.cli.run_review", return_value=review),
             patch("ai_reviewer.cli.GitHubClient") as mock_gh_cls,
         ):
             mock_config = MagicMock()
@@ -536,11 +536,11 @@ class TestWebhookConvergenceGate:
         with (
             patch.dict(
                 "os.environ",
-                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+                {"ANTHROPIC_API_KEY": "test", "GITHUB_TOKEN": "test"},
             ),
             patch("ai_reviewer.config.load_config"),
             patch(
-                "ai_reviewer.review.review_pr_with_cursor_agent",
+                "ai_reviewer.review.review_pr",
                 return_value=review,
             ),
             patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
@@ -598,11 +598,11 @@ class TestWebhookConvergenceGate:
         with (
             patch.dict(
                 "os.environ",
-                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+                {"ANTHROPIC_API_KEY": "test", "GITHUB_TOKEN": "test"},
             ),
             patch("ai_reviewer.config.load_config"),
             patch(
-                "ai_reviewer.review.review_pr_with_cursor_agent",
+                "ai_reviewer.review.review_pr",
                 return_value=review,
             ),
             patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
@@ -659,11 +659,11 @@ class TestWebhookConvergenceGate:
         with (
             patch.dict(
                 "os.environ",
-                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+                {"ANTHROPIC_API_KEY": "test", "GITHUB_TOKEN": "test"},
             ),
             patch("ai_reviewer.config.load_config"),
             patch(
-                "ai_reviewer.review.review_pr_with_cursor_agent",
+                "ai_reviewer.review.review_pr",
                 return_value=review,
             ),
             patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
@@ -1298,7 +1298,7 @@ class TestLgtmLightweightRecheck:
             patch("ai_reviewer.cli.validate_config", return_value=[]),
             patch("ai_reviewer.cli.GitHubClient", return_value=mock_gh),
             patch(
-                "ai_reviewer.cli.review_pr_with_cursor_agent",
+                "ai_reviewer.cli.run_review",
                 return_value=recheck_review,
             ) as mock_agent,
         ):
@@ -1371,7 +1371,7 @@ class TestLgtmLightweightRecheck:
             patch("ai_reviewer.cli.validate_config", return_value=[]),
             patch("ai_reviewer.cli.GitHubClient", return_value=mock_gh),
             patch(
-                "ai_reviewer.cli.review_pr_with_cursor_agent",
+                "ai_reviewer.cli.run_review",
                 return_value=recheck_review,
             ),
         ):
@@ -1462,7 +1462,7 @@ class TestLgtmLightweightRecheck:
             patch("ai_reviewer.cli.validate_config", return_value=[]),
             patch("ai_reviewer.cli.GitHubClient", return_value=mock_gh),
             patch(
-                "ai_reviewer.cli.review_pr_with_cursor_agent",
+                "ai_reviewer.cli.run_review",
                 new_callable=AsyncMock,
                 side_effect=[recheck_review, full_review],
             ) as mock_agent,
@@ -1541,7 +1541,7 @@ class TestLgtmLightweightRecheck:
             patch("ai_reviewer.cli.validate_config", return_value=[]),
             patch("ai_reviewer.cli.GitHubClient", return_value=mock_gh),
             patch(
-                "ai_reviewer.cli.review_pr_with_cursor_agent",
+                "ai_reviewer.cli.run_review",
                 new_callable=AsyncMock,
                 side_effect=[RuntimeError("recheck failed"), normal_review],
             ) as mock_agent,
@@ -1609,14 +1609,14 @@ class TestLgtmLightweightRecheck:
             patch.dict(
                 "os.environ",
                 {
-                    "CURSOR_API_KEY": "test",
+                    "ANTHROPIC_API_KEY": "test",
                     "GITHUB_TOKEN": "test",
                     "MIN_VALIDATION_AGREEMENT": "0.8",
                 },
             ),
             patch("ai_reviewer.config.load_config"),
             patch(
-                "ai_reviewer.review.review_pr_with_cursor_agent",
+                "ai_reviewer.review.review_pr",
                 return_value=recheck_review,
             ) as mock_agent,
             patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
@@ -1708,11 +1708,11 @@ class TestLgtmLightweightRecheck:
         with (
             patch.dict(
                 "os.environ",
-                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+                {"ANTHROPIC_API_KEY": "test", "GITHUB_TOKEN": "test"},
             ),
             patch("ai_reviewer.config.load_config"),
             patch(
-                "ai_reviewer.review.review_pr_with_cursor_agent",
+                "ai_reviewer.review.review_pr",
                 new_callable=AsyncMock,
                 side_effect=[recheck_review, full_review],
             ) as mock_agent,
@@ -1787,11 +1787,11 @@ class TestLgtmLightweightRecheck:
         with (
             patch.dict(
                 "os.environ",
-                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+                {"ANTHROPIC_API_KEY": "test", "GITHUB_TOKEN": "test"},
             ),
             patch("ai_reviewer.config.load_config"),
             patch(
-                "ai_reviewer.review.review_pr_with_cursor_agent",
+                "ai_reviewer.review.review_pr",
                 new_callable=AsyncMock,
                 side_effect=[RuntimeError("recheck failed"), normal_review],
             ) as mock_agent,
@@ -1895,7 +1895,7 @@ class TestCLIPreAgentChecks:
             patch("ai_reviewer.cli.load_config") as mock_load,
             patch("ai_reviewer.cli.validate_config", return_value=[]),
             patch("ai_reviewer.cli.GitHubClient", return_value=mock_gh),
-            patch("ai_reviewer.cli.review_pr_with_cursor_agent", return_value=review),
+            patch("ai_reviewer.cli.run_review", return_value=review),
         ):
             mock_config = MagicMock()
             mock_config.cursor.api_key = "cursor-token"
@@ -1945,7 +1945,7 @@ class TestCLIPreAgentChecks:
             patch("ai_reviewer.cli.load_config") as mock_load,
             patch("ai_reviewer.cli.validate_config", return_value=[]),
             patch("ai_reviewer.cli.GitHubClient", return_value=mock_gh),
-            patch("ai_reviewer.cli.review_pr_with_cursor_agent") as mock_agent,
+            patch("ai_reviewer.cli.run_review") as mock_agent,
         ):
             mock_config = MagicMock()
             mock_load.return_value = mock_config
@@ -2011,7 +2011,7 @@ class TestCLIPreAgentChecks:
             patch("ai_reviewer.cli.validate_config", return_value=[]),
             patch("ai_reviewer.cli.GitHubClient", return_value=mock_gh),
             patch(
-                "ai_reviewer.cli.review_pr_with_cursor_agent",
+                "ai_reviewer.cli.run_review",
                 return_value=recheck_review,
             ) as mock_agent,
         ):
@@ -2083,7 +2083,7 @@ class TestCLIPreAgentChecks:
             patch("ai_reviewer.cli.load_config") as mock_load,
             patch("ai_reviewer.cli.validate_config", return_value=[]),
             patch("ai_reviewer.cli.GitHubClient", return_value=mock_gh),
-            patch("ai_reviewer.cli.review_pr_with_cursor_agent", return_value=review),
+            patch("ai_reviewer.cli.run_review", return_value=review),
         ):
             mock_config = MagicMock()
             mock_load.return_value = mock_config
@@ -2144,7 +2144,7 @@ class TestCLIPreAgentChecks:
             patch("ai_reviewer.cli.load_config") as mock_load,
             patch("ai_reviewer.cli.validate_config", return_value=[]),
             patch("ai_reviewer.cli.GitHubClient", return_value=mock_gh),
-            patch("ai_reviewer.cli.review_pr_with_cursor_agent", return_value=review),
+            patch("ai_reviewer.cli.run_review", return_value=review),
         ):
             mock_config = MagicMock()
             mock_load.return_value = mock_config
@@ -2183,7 +2183,7 @@ class TestCLIPreAgentChecks:
             patch("ai_reviewer.cli.load_config") as mock_load,
             patch("ai_reviewer.cli.validate_config", return_value=[]),
             patch("ai_reviewer.cli.GitHubClient") as mock_gh_cls,
-            patch("ai_reviewer.cli.review_pr_with_cursor_agent", return_value=review),
+            patch("ai_reviewer.cli.run_review", return_value=review),
         ):
             mock_config = MagicMock()
             mock_load.return_value = mock_config
@@ -2241,13 +2241,13 @@ class TestWebhookCompactSummaryCounts:
             patch.dict(
                 "os.environ",
                 {
-                    "CURSOR_API_KEY": "test",
+                    "ANTHROPIC_API_KEY": "test",
                     "GITHUB_TOKEN": "test",
                 },
             ),
             patch("ai_reviewer.config.load_config"),
             patch(
-                "ai_reviewer.review.review_pr_with_cursor_agent",
+                "ai_reviewer.review.review_pr",
                 return_value=review,
             ),
             patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
@@ -2432,7 +2432,7 @@ class TestSuppressedFindingsNotPosted:
         with (
             patch("ai_reviewer.cli.load_config") as mock_load,
             patch("ai_reviewer.cli.validate_config", return_value=[]),
-            patch("ai_reviewer.cli.review_pr_with_cursor_agent", return_value=review),
+            patch("ai_reviewer.cli.run_review", return_value=review),
             patch("ai_reviewer.cli.GitHubClient") as mock_gh_cls,
         ):
             mock_config = MagicMock()
@@ -2498,11 +2498,11 @@ class TestSuppressedFindingsNotPosted:
         with (
             patch.dict(
                 "os.environ",
-                {"CURSOR_API_KEY": "test", "GITHUB_TOKEN": "test"},
+                {"ANTHROPIC_API_KEY": "test", "GITHUB_TOKEN": "test"},
             ),
             patch("ai_reviewer.config.load_config"),
             patch(
-                "ai_reviewer.review.review_pr_with_cursor_agent",
+                "ai_reviewer.review.review_pr",
                 return_value=review,
             ),
             patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),

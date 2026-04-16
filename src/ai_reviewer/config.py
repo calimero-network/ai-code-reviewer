@@ -19,15 +19,25 @@ class AgentConfig:
     temperature: float = 0.3
     custom_prompt_append: str | None = None
     include_codebase_context: bool = False
+    thinking_enabled: bool = False
+    thinking_budget_tokens: int = 8192
+    allow_tool_use: bool = True
+    max_tool_calls: int = 20
 
 
 @dataclass
-class CursorApiConfig:
-    """Cursor API configuration."""
+class AnthropicApiConfig:
+    """Anthropic Messages API configuration."""
 
     api_key: str
-    base_url: str = "https://api.cursor.com/v0"
-    timeout_seconds: int = 120
+    base_url: str = "https://api.anthropic.com"
+    timeout_seconds: int = 300
+    max_retries: int = 3
+    default_model: str = "claude-opus-4-6"
+    enable_prompt_caching: bool = True
+    max_combined_context_tokens: int = 150_000
+    per_file_max_bytes: int = 512 * 1024
+    per_review_github_request_budget: int = 200
 
 
 @dataclass
@@ -119,7 +129,7 @@ class DocReviewSettings:
 class Config:
     """Complete application configuration."""
 
-    cursor: CursorApiConfig
+    anthropic: AnthropicApiConfig | None
     github: GitHubConfig
     agents: list[AgentConfig]
     orchestrator: OrchestratorSettings = field(default_factory=OrchestratorSettings)
@@ -174,12 +184,18 @@ def _expand_env_vars(obj: Any) -> Any:
 
 def _parse_config(raw: dict[str, Any]) -> Config:
     """Parse raw config dict into Config object."""
-    # Cursor config
-    cursor_raw = raw.get("cursor", {})
-    cursor = CursorApiConfig(
-        api_key=cursor_raw.get("api_key") or os.environ.get("CURSOR_API_KEY", ""),
-        base_url=cursor_raw.get("base_url", "https://api.cursor.com/v0"),
-        timeout_seconds=cursor_raw.get("timeout_seconds", 120),
+    # Anthropic config — always constructed; falls back to env var when YAML block absent
+    anthropic_raw = raw.get("anthropic", {})
+    anthropic = AnthropicApiConfig(
+        api_key=anthropic_raw.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", ""),
+        base_url=anthropic_raw.get("base_url", "https://api.anthropic.com"),
+        timeout_seconds=anthropic_raw.get("timeout_seconds", 300),
+        max_retries=anthropic_raw.get("max_retries", 3),
+        default_model=anthropic_raw.get("default_model", "claude-opus-4-6"),
+        enable_prompt_caching=anthropic_raw.get("enable_prompt_caching", True),
+        max_combined_context_tokens=anthropic_raw.get("max_combined_context_tokens", 150_000),
+        per_file_max_bytes=anthropic_raw.get("per_file_max_bytes", 512 * 1024),
+        per_review_github_request_budget=anthropic_raw.get("per_review_github_request_budget", 200),
     )
 
     # GitHub config
@@ -204,6 +220,10 @@ def _parse_config(raw: dict[str, Any]) -> Config:
                 temperature=agent_raw.get("temperature", 0.3),
                 custom_prompt_append=agent_raw.get("custom_prompt_append"),
                 include_codebase_context=agent_raw.get("include_codebase_context", False),
+                thinking_enabled=agent_raw.get("thinking_enabled", False),
+                thinking_budget_tokens=agent_raw.get("thinking_budget_tokens", 8192),
+                allow_tool_use=agent_raw.get("allow_tool_use", True),
+                max_tool_calls=agent_raw.get("max_tool_calls", 20),
             )
         )
 
@@ -212,18 +232,22 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         agents = [
             AgentConfig(
                 name="security-reviewer",
-                model="claude-4.5-opus-high-thinking",
+                model="claude-opus-4-6",
                 focus_areas=["security", "authentication"],
+                thinking_enabled=True,
+                thinking_budget_tokens=8192,
             ),
             AgentConfig(
                 name="performance-reviewer",
-                model="gpt-5.2",
+                model="claude-sonnet-4-6",
                 focus_areas=["performance", "complexity"],
             ),
             AgentConfig(
                 name="patterns-reviewer",
-                model="claude-4.5-opus-high-thinking",
+                model="claude-opus-4-6",
                 focus_areas=["consistency", "patterns"],
+                thinking_enabled=True,
+                thinking_budget_tokens=8192,
             ),
         ]
 
@@ -290,7 +314,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
     )
 
     return Config(
-        cursor=cursor,
+        anthropic=anthropic,
         github=github,
         agents=agents,
         orchestrator=orchestrator,
@@ -313,8 +337,8 @@ def validate_config(config: Config) -> list[str]:
     """
     errors = []
 
-    if not config.cursor.api_key:
-        errors.append("Missing Cursor API key (set CURSOR_API_KEY or cursor.api_key)")
+    if not config.anthropic or not config.anthropic.api_key:
+        errors.append("Missing Anthropic API key (set ANTHROPIC_API_KEY or anthropic.api_key)")
 
     if not config.github.token:
         errors.append("Missing GitHub token (set GITHUB_TOKEN or github.token)")

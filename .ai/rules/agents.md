@@ -2,17 +2,18 @@
 
 ## Purpose
 
-The `agents/` module contains all LLM agent implementations that perform code reviews. Each agent is specialized for particular review focuses.
+The `agents/` module contains all LLM agent implementations that perform code reviews. Each agent is specialized for particular review focuses. All LLM access goes through `AnthropicClient` (official Anthropic SDK).
 
 ## Key Types
 
 ```python
 # Base class all agents inherit from
 class ReviewAgent:
-    MODEL: str           # LLM model identifier
-    AGENT_TYPE: str      # Agent classification
-    FOCUS_AREAS: list    # What this agent specializes in
-    SYSTEM_PROMPT: str   # Instructions for the LLM
+    MODEL: str              # Anthropic model ID (e.g. "claude-opus-4-6")
+    AGENT_TYPE: str          # Agent classification (e.g. "security-reviewer")
+    FOCUS_AREAS: list        # What this agent specializes in
+    SYSTEM_PROMPT: str       # Instructions for the LLM
+    THINKING_ENABLED: bool   # Enable adaptive thinking (default False)
 
 # Return type for all reviews
 @dataclass
@@ -29,12 +30,12 @@ class AgentReview:
 
 ```
 agents/
-├── __init__.py          # Exports public API
-├── base.py              # ReviewAgent base class
-├── cursor_client.py     # Unified LLM access via Cursor API
-├── security.py          # Security-focused agent
-├── performance.py       # Performance-focused agent
-└── patterns.py          # Pattern/consistency agent
+├── __init__.py              # Exports public API
+├── anthropic_client.py      # AnthropicClient: Messages API wrapper with tool-use loop, thinking, caching
+├── base.py                  # ReviewAgent base class
+├── security.py              # SecurityAgent, AuthenticationAgent (Opus + thinking)
+├── performance.py           # PerformanceAgent (Sonnet), LogicAgent (Opus + thinking)
+└── patterns.py              # PatternsAgent (Opus + thinking), StyleAgent (Sonnet)
 ```
 
 ## Invariants
@@ -45,11 +46,11 @@ Never create standalone agent functions. Always inherit from `ReviewAgent`.
 
 ### A2: Agents Return JSON-Structured Findings
 
-Use `client.complete_json()` to ensure structured output.
+Output is enforced via `output_config.format = json_schema` on the Anthropic API. The schema is defined in `context/builder.py:FINDINGS_SCHEMA`.
 
 ### A3: Agents Are Stateless
 
-No mutable state between `review()` calls. Each review is independent.
+No mutable state between `review()` calls. Each review is independent. Agents receive pre-built `system_blocks` and `user_blocks` at construction time.
 
 ### A4: Focus Areas Match System Prompt
 
@@ -65,9 +66,10 @@ from ai_reviewer.agents.base import ReviewAgent
 class NewFocusAgent(ReviewAgent):
     """Agent focused on [specific area]."""
 
-    MODEL = "claude-4.5-opus-high-thinking"  # Model accessed via Cursor
-    AGENT_TYPE = "new-focus"
+    MODEL = "claude-opus-4-6"        # or "claude-sonnet-4-6" for faster/broader
+    AGENT_TYPE = "new-focus-reviewer"
     FOCUS_AREAS = ["focus1", "focus2"]
+    THINKING_ENABLED = True           # Enable for reasoning-heavy agents
 
     SYSTEM_PROMPT = """You are an expert in [area].
     Focus on:
@@ -77,23 +79,35 @@ class NewFocusAgent(ReviewAgent):
     Be thorough but avoid false positives."""
 ```
 
-## CursorClient Usage
+Then register in `review.py`:
+```python
+_AGENT_CLASSES["new-focus-reviewer"] = NewFocusAgent
+DEFAULT_AGENT_ORDER.append("new-focus-reviewer")
+```
+
+## AnthropicClient Usage
 
 ```python
-# Always use the injected client
-class MyAgent(ReviewAgent):
-    def __init__(self, client: CursorClient, agent_id: str | None = None):
-        super().__init__(client, agent_id)
+# Agents don't call the client directly — base.py handles it.
+# The review() method is inherited:
 
-    async def review(self, diff, files, context):
-        # JSON responses for structured findings
-        response = await self.client.complete_json(
-            model=self.MODEL,
-            system_prompt=self._get_system_prompt(),
-            user_prompt=self._build_review_prompt(diff, files, context),
-            temperature=0.3,  # Low temperature for consistency
-        )
-        return self._parse_response(response)
+class MyAgent(ReviewAgent):
+    MODEL = "claude-opus-4-6"
+    THINKING_ENABLED = True
+
+    # Override SYSTEM_PROMPT — that's usually all you need.
+    SYSTEM_PROMPT = """..."""
+
+# Construction happens in review.py:
+agent = MyAgent(
+    client=anthropic_client,
+    agent_id="my-agent-0",
+    system_blocks=system_blocks,     # Shared conventions + schema
+    user_blocks=user_blocks,         # PR diff + files + neighbors
+    tool_registry=registry,          # read_file/glob/grep tools
+    thinking_enabled=True,           # Config override (optional)
+)
+review = await agent.review(diff="", file_contents={}, context=ctx)
 ```
 
 ## Severity Guidelines for Agents
@@ -107,8 +121,9 @@ class MyAgent(ReviewAgent):
 
 ## Anti-Patterns
 
-1. **Don't parse raw LLM text** - Use `complete_json()` for structured output
+1. **Don't parse raw LLM text** - Structured output via `output_config` handles this
 2. **Don't catch all exceptions silently** - Let orchestrator handle failures
-3. **Don't access GitHub/external APIs** - Agents only process provided data
+3. **Don't access GitHub/external APIs directly** - Use `ToolRegistry` for repo exploration
 4. **Don't hardcode temperatures** - Use configuration
 5. **Don't share state between reviews** - Create fresh state each call
+6. **Don't import `anthropic` SDK directly** - Only `anthropic_client.py` should import it

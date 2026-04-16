@@ -1,9 +1,19 @@
 # AI Code Reviewer - Design Document
 
-**Project:** Multi-Agent Code Review System  
-**Version:** 0.1.0  
-**Date:** February 2026  
+**Project:** Multi-Agent Code Review System
+**Version:** 0.1.0
+**Date:** February 2026 (revised April 2026 for Anthropic migration)
 **Status:** Draft
+
+> **2026-04 migration notice:** this document predates the migration from
+> the Cursor Background Agent API to Anthropic's Messages API. References
+> below to "Cursor API", "CursorClient", and GPT-4/OpenAI model mixing
+> describe the original design. The current implementation uses Anthropic
+> exclusively — see
+> [`docs/superpowers/specs/2026-04-15-anthropic-messages-migration-design.md`](docs/superpowers/specs/2026-04-15-anthropic-messages-migration-design.md)
+> for the authoritative design and
+> [`docs/CHANGELOG-AND-NEXT.md`](docs/CHANGELOG-AND-NEXT.md) for the
+> migration summary. This document will be rewritten in a later pass.
 
 ---
 
@@ -11,7 +21,7 @@
 
 AI Code Reviewer is a multi-agent system that orchestrates multiple LLMs to produce comprehensive, high-quality code reviews. Unlike single-agent approaches, this tool leverages the diversity of multiple AI models—each with different strengths—to generate consolidated reviews that catch more issues and provide better insights.
 
-The system integrates with GitHub for PR reviews and can utilize Cursor's API for enhanced code understanding.
+The system integrates with GitHub for PR reviews. LLM access goes through Anthropic's Messages API via the official SDK (model mix: `claude-opus-4-6` for reasoning-heavy agents with extended thinking, `claude-sonnet-4-6` for broader/faster agents).
 
 ---
 

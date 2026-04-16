@@ -11,7 +11,7 @@
 #   4. Connect your repo in Cloud Build triggers
 #
 # Secrets should be stored in Secret Manager:
-#   gcloud secrets create CURSOR_API_KEY --data-file=-
+#   gcloud secrets create ANTHROPIC_API_KEY --data-file=-
 #   gcloud secrets create GITHUB_TOKEN --data-file=-
 #   gcloud secrets create GITHUB_WEBHOOK_SECRET --data-file=-
 
@@ -71,7 +71,7 @@ steps:
       - '5'
       # Secrets from Secret Manager (GitHub App auth)
       - '--set-secrets'
-      - 'CURSOR_API_KEY=CURSOR_API_KEY:latest,GITHUB_APP_ID=GITHUB_APP_ID:latest,GITHUB_APP_PRIVATE_KEY=GITHUB_APP_PRIVATE_KEY:latest,GITHUB_WEBHOOK_SECRET=GITHUB_WEBHOOK_SECRET:latest'
+      - 'ANTHROPIC_API_KEY=ANTHROPIC_API_KEY:latest,GITHUB_APP_ID=GITHUB_APP_ID:latest,GITHUB_APP_PRIVATE_KEY=GITHUB_APP_PRIVATE_KEY:latest,GITHUB_WEBHOOK_SECRET=GITHUB_WEBHOOK_SECRET:latest'
 
 images:
   - 'gcr.io/$PROJECT_ID/${_SERVICE_NAME}:$COMMIT_SHA'
