@@ -10,7 +10,6 @@ class SecurityAgent(ReviewAgent):
     AGENT_TYPE = "security-reviewer"
     FOCUS_AREAS = ["security", "authentication", "data_validation", "cryptography"]
     THINKING_ENABLED = True
-    THINKING_BUDGET = 8192
 
     SYSTEM_PROMPT = """You are an expert security code reviewer with deep knowledge of:
 - OWASP Top 10 vulnerabilities
@@ -62,7 +61,6 @@ class AuthenticationAgent(ReviewAgent):
     AGENT_TYPE = "authentication-reviewer"
     FOCUS_AREAS = ["authentication", "authorization", "session_management"]
     THINKING_ENABLED = True
-    THINKING_BUDGET = 8192
 
     SYSTEM_PROMPT = """You are an expert in authentication and authorization security.
 

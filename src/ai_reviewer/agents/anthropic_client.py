@@ -59,9 +59,9 @@ class AnthropicClient:
         user_blocks: list[dict[str, Any]],
         output_schema: dict[str, Any],
         tool_registry: Any,
-        thinking_budget: int | None,
-        max_tokens: int,
-        temperature: float,
+        enable_thinking: bool = False,
+        max_tokens: int = 8192,
+        temperature: float = 0.3,
         max_tool_rounds: int = 30,
     ) -> AnthropicReviewResult:
         messages: list[dict[str, Any]] = [{"role": "user", "content": user_blocks}]
@@ -88,7 +88,7 @@ class AnthropicClient:
             }
             if tools:
                 kwargs["tools"] = tools
-            if thinking_budget:
+            if enable_thinking:
                 kwargs["thinking"] = {"type": "adaptive"}
                 kwargs["temperature"] = 1.0
 

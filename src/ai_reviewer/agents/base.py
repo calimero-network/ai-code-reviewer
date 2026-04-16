@@ -23,7 +23,6 @@ class ReviewAgent:
     FOCUS_AREAS: list[str] = []
     SYSTEM_PROMPT: str = "You are a code reviewer."
     THINKING_ENABLED: bool = False
-    THINKING_BUDGET: int = 8192
 
     def __init__(
         self,
@@ -34,6 +33,7 @@ class ReviewAgent:
         tool_registry: Any,
         max_tokens: int = 4096,
         temperature: float = 0.3,
+        thinking_enabled: bool | None = None,
     ) -> None:
         self.client = client
         self._agent_id = agent_id
@@ -42,6 +42,8 @@ class ReviewAgent:
         self._tool_registry = tool_registry
         self._max_tokens = max_tokens
         self._temperature = temperature
+        # Config override takes precedence over class-level default
+        self._thinking_enabled = thinking_enabled if thinking_enabled is not None else self.THINKING_ENABLED
 
     @property
     def agent_id(self) -> str:
@@ -60,7 +62,6 @@ class ReviewAgent:
         start_time = time.monotonic()
 
         system_blocks = self._prepend_role(self._system_blocks)
-        thinking_budget = self.THINKING_BUDGET if self.THINKING_ENABLED else None
 
         try:
             result = await self.client.run_review(
@@ -69,7 +70,7 @@ class ReviewAgent:
                 user_blocks=self._user_blocks,
                 output_schema=FINDINGS_SCHEMA,
                 tool_registry=self._tool_registry,
-                thinking_budget=thinking_budget,
+                enable_thinking=self._thinking_enabled,
                 max_tokens=self._max_tokens,
                 temperature=self._temperature,
             )

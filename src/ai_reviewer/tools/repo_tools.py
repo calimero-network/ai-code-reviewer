@@ -114,8 +114,7 @@ class ToolRegistry:
             return "[error: review GitHub budget exhausted]"
         self.session.consume_github_request()
         try:
-            repo = self.gh._gh.get_repo(self.session.repo)
-            contents = repo.get_contents(path, ref=self.session.head_sha)
+            contents = self.gh.get_file_contents(self.session.repo, path, ref=self.session.head_sha)
         except Exception as e:  # noqa: BLE001
             logger.warning("read_file(%s) failed: %s", path, e)
             return f"[error: {e}]"
@@ -138,8 +137,7 @@ class ToolRegistry:
             return []
         self.session.consume_github_request()
         try:
-            repo = self.gh._gh.get_repo(self.session.repo)
-            tree = repo.get_git_tree(self.session.head_sha, recursive=True)
+            tree = self.gh.get_tree(self.session.repo, self.session.head_sha, recursive=True)
         except Exception as e:  # noqa: BLE001
             logger.warning("tree() failed: %s", e)
             return []

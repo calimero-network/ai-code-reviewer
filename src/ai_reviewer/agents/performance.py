@@ -57,7 +57,6 @@ class LogicAgent(ReviewAgent):
     AGENT_TYPE = "logic-reviewer"
     FOCUS_AREAS = ["logic", "edge_cases", "error_handling", "correctness"]
     THINKING_ENABLED = True
-    THINKING_BUDGET = 8192
 
     SYSTEM_PROMPT = """You are an expert code reviewer focused on correctness and logic.
 

@@ -59,7 +59,7 @@ async def test_run_review_happy_path_parses_json():
         user_blocks=[{"type": "text", "text": "diff..."}],
         output_schema={"type": "object"},
         tool_registry=None,
-        thinking_budget=None,
+        enable_thinking=False,
         max_tokens=4096,
         temperature=0.3,
     )
@@ -85,7 +85,7 @@ async def test_run_review_passes_output_schema_as_json_schema():
         user_blocks=[{"type": "text", "text": "u"}],
         output_schema=schema,
         tool_registry=None,
-        thinking_budget=None,
+        enable_thinking=False,
         max_tokens=4096,
         temperature=0.3,
     )
@@ -110,7 +110,7 @@ async def test_run_review_with_thinking_budget_sets_thinking_config():
         user_blocks=[{"type": "text", "text": "u"}],
         output_schema={"type": "object"},
         tool_registry=None,
-        thinking_budget=8192,
+        enable_thinking=True,
         max_tokens=16384,
         temperature=1.0,
     )
@@ -133,7 +133,7 @@ async def test_run_review_without_thinking_omits_config():
         user_blocks=[{"type": "text", "text": "u"}],
         output_schema={"type": "object"},
         tool_registry=None,
-        thinking_budget=None,
+        enable_thinking=False,
         max_tokens=4096,
         temperature=0.3,
     )
@@ -163,7 +163,7 @@ async def test_tool_use_loop_dispatches_and_feeds_result_back():
         user_blocks=[{"type": "text", "text": "u"}],
         output_schema={"type": "object"},
         tool_registry=registry,
-        thinking_budget=None,
+        enable_thinking=False,
         max_tokens=4096,
         temperature=0.3,
     )
@@ -198,7 +198,7 @@ async def test_caching_marks_last_system_block_when_enabled():
         user_blocks=[{"type": "text", "text": "u"}],
         output_schema={"type": "object"},
         tool_registry=None,
-        thinking_budget=None,
+        enable_thinking=False,
         max_tokens=4096,
         temperature=0.3,
     )
@@ -222,7 +222,7 @@ async def test_caching_disabled_leaves_system_unchanged():
         user_blocks=[{"type": "text", "text": "u"}],
         output_schema={"type": "object"},
         tool_registry=None,
-        thinking_budget=None,
+        enable_thinking=False,
         max_tokens=4096,
         temperature=0.3,
     )

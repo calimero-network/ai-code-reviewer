@@ -10,7 +10,6 @@ class PatternsAgent(ReviewAgent):
     AGENT_TYPE = "patterns-reviewer"
     FOCUS_AREAS = ["consistency", "patterns", "architecture", "maintainability"]
     THINKING_ENABLED = True
-    THINKING_BUDGET = 8192
 
     SYSTEM_PROMPT = """You are an expert code reviewer focused on code quality and consistency.
 

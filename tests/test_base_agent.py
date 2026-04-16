@@ -13,7 +13,6 @@ class DummyAgent(ReviewAgent):
     FOCUS_AREAS = ["security"]
     SYSTEM_PROMPT = "You are a dummy reviewer."
     THINKING_ENABLED = True
-    THINKING_BUDGET = 4096
 
 
 @pytest.mark.asyncio
@@ -69,4 +68,4 @@ async def test_review_agent_uses_anthropic_client():
     assert review.summary == "sum"
     kwargs = client.run_review.call_args.kwargs
     assert kwargs["model"] == "claude-opus-4-6"
-    assert kwargs["thinking_budget"] == 4096
+    assert kwargs["enable_thinking"] is True

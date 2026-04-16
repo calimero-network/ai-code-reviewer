@@ -16,13 +16,13 @@ def test_fetch_conventions_returns_texts():
     session = ReviewSession(repo="o/r", head_sha="abc", github_budget=50)
     gh = MagicMock()
 
-    def contents(path, ref=None):  # noqa: ARG001
+    def contents(repo_name, path, ref=None):  # noqa: ARG001
         mapping = {"AGENTS.md": "conv-a", "CONTRIBUTING.md": "conv-c"}
         if path in mapping:
             return _encoded(mapping[path])
         raise FileNotFoundError(path)
 
-    gh._gh.get_repo.return_value.get_contents.side_effect = contents
+    gh.get_file_contents.side_effect = contents
 
     texts = fetch_conventions(
         session,
@@ -43,7 +43,7 @@ def test_build_repo_map_lists_top_level():
         SimpleNamespace(path="README.md", type="blob"),
         SimpleNamespace(path="src/app/x.py", type="blob"),
     ]
-    gh._gh.get_repo.return_value.get_git_tree.return_value.tree = tree
+    gh.get_tree.return_value.tree = tree
 
     out = build_repo_map(session, gh)
     assert "src/" in out

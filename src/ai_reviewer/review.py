@@ -1008,7 +1008,6 @@ async def _prepare_shared_context(
     )
 
     neighbors: dict[str, str] = {}
-    repo_obj = gh._gh.get_repo(session.repo)
     for path in neighbor_paths:
         if session.is_github_budget_exhausted():
             break
@@ -1018,7 +1017,7 @@ async def _prepare_shared_context(
             continue
         try:
             session.consume_github_request()
-            contents = repo_obj.get_contents(path, ref=session.head_sha)
+            contents = gh.get_file_contents(session.repo, path, ref=session.head_sha)
             text = _b64.b64decode(getattr(contents, "content", "")).decode(
                 "utf-8", errors="replace"
             )
@@ -1083,9 +1082,9 @@ async def _run_single_cross_agent(
             model="claude-sonnet-4-6",
             system_blocks=[{"type": "text", "text": "You are a code review validator."}],
             user_blocks=[{"type": "text", "text": cross_prompt}],
-            output_schema={"type": "object"},
+            output_schema={"type": "object", "additionalProperties": False},
             tool_registry=None,
-            thinking_budget=None,
+            enable_thinking=False,
             max_tokens=8192,
             temperature=0.2,
         )
@@ -1312,6 +1311,7 @@ async def review_pr_with_cursor_agent(
                 tool_registry=registry,
                 max_tokens=agent_cfg.max_tokens if agent_cfg else 8192,
                 temperature=agent_cfg.temperature if agent_cfg else 0.3,
+                thinking_enabled=agent_cfg.thinking_enabled if agent_cfg else None,
             )
             instantiated.append((agent_name, agent))
             tasks.append(_run_agent_safe(agent, context, on_status))
