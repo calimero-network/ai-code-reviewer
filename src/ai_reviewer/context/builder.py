@@ -31,8 +31,8 @@ FINDINGS_SCHEMA: dict[str, Any] = {
             ],
             "properties": {
                 "file_path": {"type": "string"},
-                "line_start": {"type": "integer", "minimum": 1},
-                "line_end": {"type": ["integer", "null"], "minimum": 1},
+                "line_start": {"type": "integer"},
+                "line_end": {"type": ["integer", "null"]},
                 "severity": {"enum": ["critical", "warning", "suggestion", "nitpick"]},
                 "category": {
                     "enum": [
@@ -48,7 +48,7 @@ FINDINGS_SCHEMA: dict[str, Any] = {
                 "title": {"type": "string"},
                 "description": {"type": "string"},
                 "suggested_fix": {"type": ["string", "null"]},
-                "confidence": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "confidence": {"type": "number"},
             },
         },
     },
