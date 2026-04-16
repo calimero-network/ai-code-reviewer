@@ -43,7 +43,9 @@ class ReviewAgent:
         self._max_tokens = max_tokens
         self._temperature = temperature
         # Config override takes precedence over class-level default
-        self._thinking_enabled = thinking_enabled if thinking_enabled is not None else self.THINKING_ENABLED
+        self._thinking_enabled = (
+            thinking_enabled if thinking_enabled is not None else self.THINKING_ENABLED
+        )
 
     @property
     def agent_id(self) -> str:
