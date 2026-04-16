@@ -89,7 +89,7 @@ class AnthropicClient:
             if tools:
                 kwargs["tools"] = tools
             if thinking_budget:
-                kwargs["thinking"] = {"type": "adaptive", "budget_tokens": thinking_budget}
+                kwargs["thinking"] = {"type": "adaptive"}
 
             response = await self._sdk.messages.create(**kwargs)
             _accumulate_usage(usage, response)

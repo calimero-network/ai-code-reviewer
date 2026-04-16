@@ -115,7 +115,7 @@ async def test_run_review_with_thinking_budget_sets_thinking_config():
         temperature=1.0,
     )
     kwargs = client._sdk.messages.create.call_args.kwargs
-    assert kwargs["thinking"] == {"type": "adaptive", "budget_tokens": 8192}
+    assert kwargs["thinking"] == {"type": "adaptive"}
 
 
 @pytest.mark.asyncio
