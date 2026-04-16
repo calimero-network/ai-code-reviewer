@@ -19,7 +19,7 @@ def fetch_conventions(
 ) -> dict[str, str]:
     """Fetch convention files that exist; skip missing silently."""
     out: dict[str, str] = {}
-    repo = gh.client.get_repo(session.repo)
+    repo = gh._gh.get_repo(session.repo)
     for path in paths:
         cached = session.cached_file(path)
         if cached is not None:
@@ -53,7 +53,7 @@ def build_repo_map(session: ReviewSession, gh: GitHubClient) -> str:
             return "(repo map unavailable: budget exhausted)"
         session.consume_github_request()
         try:
-            repo = gh.client.get_repo(session.repo)
+            repo = gh._gh.get_repo(session.repo)
             tree = repo.get_git_tree(session.head_sha, recursive=True)
         except Exception as e:  # noqa: BLE001
             logger.warning("Tree fetch failed: %s", e)

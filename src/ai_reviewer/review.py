@@ -1008,7 +1008,7 @@ async def _prepare_shared_context(
     )
 
     neighbors: dict[str, str] = {}
-    repo_obj = gh.client.get_repo(session.repo)
+    repo_obj = gh._gh.get_repo(session.repo)
     for path in neighbor_paths:
         if session.is_github_budget_exhausted():
             break
@@ -1119,7 +1119,7 @@ async def run_cross_review_round(
         _run_single_cross_agent(
             client=client,
             cross_prompt=cross_prompt,
-            agent_name=(cfg.get("name") if isinstance(cfg, dict) else cfg),
+            agent_name=str(cfg.get("name") if isinstance(cfg, dict) else cfg),
             on_status=on_status,
         )
         for cfg in agents_to_run

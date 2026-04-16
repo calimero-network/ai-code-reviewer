@@ -18,7 +18,7 @@ def fake_gh():
     gh = MagicMock()
     contents = MagicMock()
     contents.content = base64.b64encode(b"print('hi')").decode()
-    gh.client.get_repo.return_value.get_contents.return_value = contents
+    gh._gh.get_repo.return_value.get_contents.return_value = contents
     return gh
 
 
@@ -35,7 +35,7 @@ async def test_read_file_cache_hit_does_not_call_github(session, fake_gh):
     reg = ToolRegistry(session, fake_gh, agent_id="a1", max_calls=10, per_file_max_bytes=512 * 1024)
     out = await reg.execute("read_file", {"path": "a.py"})
     assert out == "cached-content"
-    fake_gh.client.get_repo.assert_not_called()
+    fake_gh._gh.get_repo.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -55,7 +55,7 @@ def fake_gh_with_tree():
         SimpleNamespace(path="README.md", type="blob"),
         SimpleNamespace(path="src/sub", type="tree"),
     ]
-    gh.client.get_repo.return_value.get_git_tree.return_value.tree = tree_items
+    gh._gh.get_repo.return_value.get_git_tree.return_value.tree = tree_items
 
     def _contents(path, ref=None):  # noqa: ARG001
         payloads = {
@@ -67,7 +67,7 @@ def fake_gh_with_tree():
         c.content = base64.b64encode(payloads.get(path, b"")).decode()
         return c
 
-    gh.client.get_repo.return_value.get_contents.side_effect = _contents
+    gh._gh.get_repo.return_value.get_contents.side_effect = _contents
     return gh
 
 

@@ -22,7 +22,7 @@ def test_fetch_conventions_returns_texts():
             return _encoded(mapping[path])
         raise FileNotFoundError(path)
 
-    gh.client.get_repo.return_value.get_contents.side_effect = contents
+    gh._gh.get_repo.return_value.get_contents.side_effect = contents
 
     texts = fetch_conventions(
         session,
@@ -43,7 +43,7 @@ def test_build_repo_map_lists_top_level():
         SimpleNamespace(path="README.md", type="blob"),
         SimpleNamespace(path="src/app/x.py", type="blob"),
     ]
-    gh.client.get_repo.return_value.get_git_tree.return_value.tree = tree
+    gh._gh.get_repo.return_value.get_git_tree.return_value.tree = tree
 
     out = build_repo_map(session, gh)
     assert "src/" in out
