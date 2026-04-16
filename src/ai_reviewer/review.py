@@ -1069,83 +1069,71 @@ async def _run_agent_safe(
         return e
 
 
-async def run_cross_review_round(
+async def _run_single_cross_agent(
     client: AnthropicClient,
-    session: ReviewSession,
-    gh: GitHubClient,
-    pr: Any,
+    cross_prompt: str,
+    agent_name: str,
+    on_status: Callable[..., Any] | None,
+) -> tuple[str, list[dict[str, Any]] | None]:
+    """Run one cross-review agent and return (name, assessments) or (name, None)."""
+    try:
+        if on_status:
+            on_status(f"Cross-review: {agent_name}")
+        result = await client.run_review(
+            model="claude-sonnet-4-6",
+            system_blocks=[{"type": "text", "text": "You are a code review validator."}],
+            user_blocks=[{"type": "text", "text": cross_prompt}],
+            output_schema={"type": "object"},
+            tool_registry=None,
+            thinking_budget=None,
+            max_tokens=8192,
+            temperature=0.2,
+        )
+        assessments, _ = parse_cross_review_response(result.raw_text)
+        return (agent_name, assessments)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Cross-review agent %s failed: %s", agent_name, e)
+        return (agent_name, None)
+
+
+async def run_cross_review_round(
+    *,
+    client: AnthropicClient,
     review: ConsolidatedReview,
     context: ReviewContext,
     diff: str,
     agents_to_run: list[dict],
-    anthropic_cfg: AnthropicApiConfig,
     on_status: Callable[..., Any] | None = None,
+    # Legacy kwargs accepted for call-site compat (unused by new impl)
+    session: ReviewSession | None = None,
+    gh: GitHubClient | None = None,
+    pr: Any = None,
+    anthropic_cfg: AnthropicApiConfig | None = None,
 ) -> list[tuple[str, list[dict[str, Any]]]]:
-    """Cross-review round: each agent re-evaluates the consolidated findings."""
+    """Cross-review round: each agent validates and ranks findings.
+
+    Uses get_cross_review_prompt + get_cross_review_output_format to produce
+    the {id, valid, rank} assessment format that apply_cross_review expects.
+    """
     if not review.findings:
         return []
 
-    prior_findings = [
-        {
-            "file_path": f.file_path,
-            "line_start": f.line_start,
-            "line_end": f.line_end,
-            "severity": f.severity.value,
-            "category": f.category.value,
-            "title": f.title,
-            "description": f.description,
-        }
-        for f in review.findings
-    ]
-
-    system_blocks, base_user_blocks = await _prepare_shared_context(
-        session=session,
-        gh=gh,
-        pr=pr,
-        diff=diff,
-        changed_file_contents={},
-        anthropic_cfg=anthropic_cfg,
-    )
-    cross_instructions = {
-        "type": "text",
-        "text": (
-            "## Cross-review task\n\n"
-            "The findings below were produced by earlier agents. Re-evaluate each: "
-            "is it a true positive? What is your confidence? Return findings list in "
-            "the same schema. For each finding you agree with, copy its file_path / "
-            "line_start / title / category and set your own confidence. Drop findings "
-            "you consider false positives.\n\n"
-            f"```json\n{json.dumps(prior_findings, indent=2)}\n```"
-        ),
-    }
-    cross_user_blocks = [*base_user_blocks, cross_instructions]
-
-    tasks: list[Any] = []
-    for i, cfg in enumerate(agents_to_run):
-        name = cfg.get("name") if isinstance(cfg, dict) else cfg
-        cls = _AGENT_CLASSES.get(name)
-        if not cls:
-            continue
-        agent = cls(
+    cross_prompt = get_cross_review_prompt(context, review, diff) + get_cross_review_output_format()
+    tasks = [
+        _run_single_cross_agent(
             client=client,
-            agent_id=f"{name}-cross-{i}",
-            system_blocks=system_blocks,
-            user_blocks=cross_user_blocks,
-            tool_registry=None,
-            max_tokens=8192,
-            temperature=0.2,
+            cross_prompt=cross_prompt,
+            agent_name=(cfg.get("name") if isinstance(cfg, dict) else cfg),
+            on_status=on_status,
         )
-        tasks.append(_run_agent_safe(agent, context, on_status))
-
-    results: list[tuple[str, list[dict[str, Any]]]] = []
-    for cfg, res in zip(agents_to_run, await asyncio.gather(*tasks), strict=False):
-        name = cfg.get("name") if isinstance(cfg, dict) else cfg
-        if isinstance(res, Exception):
-            continue
-        as_dicts = [_review_finding_to_dict(f) for f in res.findings]
-        if as_dicts:
-            results.append((name, as_dicts))
-    return results
+        for cfg in agents_to_run
+    ]
+    gathered = await asyncio.gather(*tasks)
+    return [
+        (name, assessments)
+        for name, assessments in gathered
+        if assessments is not None and len(assessments) > 0
+    ]
 
 
 def _effective_agent_count(
@@ -1260,6 +1248,9 @@ async def review_pr_with_cursor_agent(
     agent_order = effective_order[: min(num_agents, len(effective_order))]
     agents_to_run = [{"name": n} for n in agent_order]
 
+    # When a single agent runs, it must cover ALL perspectives (not just security).
+    _single_agent_comprehensive = num_agents == 1
+
     session = ReviewSession(
         repo=repo,
         head_sha=pr.head.sha,
@@ -1302,10 +1293,25 @@ async def review_pr_with_cursor_agent(
                 if allow_tools
                 else None
             )
+            # When only 1 agent runs (small PR), override its system blocks
+            # with a comprehensive prompt covering ALL review perspectives.
+            agent_system = system_blocks
+            if _single_agent_comprehensive:
+                comprehensive_block = {
+                    "type": "text",
+                    "text": (
+                        "**IMPORTANT: You are the ONLY reviewer for this PR. "
+                        "Analyze from ALL perspectives**: security, performance, "
+                        "logic, architecture, and code quality. Do NOT limit "
+                        "yourself to your default focus area."
+                    ),
+                }
+                agent_system = [comprehensive_block, *system_blocks]
+
             agent = cls(
                 client=client,
                 agent_id=f"{agent_name}-{i}",
-                system_blocks=system_blocks,
+                system_blocks=agent_system,
                 user_blocks=user_blocks,
                 tool_registry=registry,
                 max_tokens=agent_cfg.max_tokens if agent_cfg else 8192,

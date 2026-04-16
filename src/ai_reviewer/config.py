@@ -184,21 +184,19 @@ def _expand_env_vars(obj: Any) -> Any:
 
 def _parse_config(raw: dict[str, Any]) -> Config:
     """Parse raw config dict into Config object."""
-    # Anthropic config
+    # Anthropic config — always constructed; falls back to env var when YAML block absent
     anthropic_raw = raw.get("anthropic", {})
-    anthropic: AnthropicApiConfig | None = None
-    if anthropic_raw:
-        anthropic = AnthropicApiConfig(
-            api_key=anthropic_raw.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", ""),
-            base_url=anthropic_raw.get("base_url", "https://api.anthropic.com"),
-            timeout_seconds=anthropic_raw.get("timeout_seconds", 300),
-            max_retries=anthropic_raw.get("max_retries", 3),
-            default_model=anthropic_raw.get("default_model", "claude-opus-4-6"),
-            enable_prompt_caching=anthropic_raw.get("enable_prompt_caching", True),
-            max_combined_context_tokens=anthropic_raw.get("max_combined_context_tokens", 150_000),
-            per_file_max_bytes=anthropic_raw.get("per_file_max_bytes", 512 * 1024),
-            per_review_github_request_budget=anthropic_raw.get("per_review_github_request_budget", 200),
-        )
+    anthropic = AnthropicApiConfig(
+        api_key=anthropic_raw.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", ""),
+        base_url=anthropic_raw.get("base_url", "https://api.anthropic.com"),
+        timeout_seconds=anthropic_raw.get("timeout_seconds", 300),
+        max_retries=anthropic_raw.get("max_retries", 3),
+        default_model=anthropic_raw.get("default_model", "claude-opus-4-6"),
+        enable_prompt_caching=anthropic_raw.get("enable_prompt_caching", True),
+        max_combined_context_tokens=anthropic_raw.get("max_combined_context_tokens", 150_000),
+        per_file_max_bytes=anthropic_raw.get("per_file_max_bytes", 512 * 1024),
+        per_review_github_request_budget=anthropic_raw.get("per_review_github_request_budget", 200),
+    )
 
     # GitHub config
     github_raw = raw.get("github", {})

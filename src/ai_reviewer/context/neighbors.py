@@ -136,11 +136,9 @@ def select_neighbors(
     repo_set = set(repo_paths)
     picks: list[str] = []
 
-    def add(path: str) -> bool:
-        if path in changed_set or path in picks or path not in repo_set:
-            return False
-        picks.append(path)
-        return len(picks) < max_total
+    def add(path: str) -> None:
+        if path not in changed_set and path not in picks and path in repo_set:
+            picks.append(path)
 
     for path in changed_files:
         parent = str(PurePosixPath(path).parent)
@@ -149,14 +147,17 @@ def select_neighbors(
             if str(PurePosixPath(p).parent) == parent and p != path
         ]
         for s in siblings[:max_siblings]:
-            if not add(s):
+            add(s)
+            if len(picks) >= max_total:
                 return picks
 
     for path, src in changed_files.items():
         imports = parse_imports_by_path(path, src)
         for module in imports:
             for cand in _module_to_possible_paths(module):
-                if cand in repo_set and not add(cand):
-                    return picks
+                if cand in repo_set:
+                    add(cand)
+                    if len(picks) >= max_total:
+                        return picks
 
     return picks
