@@ -28,7 +28,7 @@ from ai_reviewer.github.client import (
 from ai_reviewer.github.formatter import GitHubFormatter, format_review_as_json
 from ai_reviewer.github.webhook import create_webhook_app, set_review_handler
 from ai_reviewer.models.review import ConsolidatedReview
-from ai_reviewer.review import review_pr_with_cursor_agent
+from ai_reviewer.review import review_pr as run_review
 
 console = Console()
 
@@ -208,7 +208,7 @@ async def review_pr_async(
                     "[dim]🔍 LGTM candidate detected — running lightweight 1-agent re-check…[/dim]"
                 )
                 try:
-                    recheck_review = await review_pr_with_cursor_agent(
+                    recheck_review = await run_review(
                         repo=repo,
                         pr_number=pr_number,
                         anthropic_cfg=anthropic_cfg,
@@ -270,7 +270,7 @@ async def review_pr_async(
             last_status[0] = status
 
     try:
-        review = await review_pr_with_cursor_agent(
+        review = await run_review(
             repo=repo,
             pr_number=pr_number,
             anthropic_cfg=anthropic_cfg,

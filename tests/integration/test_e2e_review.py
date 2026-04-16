@@ -31,12 +31,12 @@ async def test_review_against_pinned_public_pr() -> None:
         pytest.skip("pinned PR not configured")
 
     from ai_reviewer.config import load_config
-    from ai_reviewer.review import review_pr_with_cursor_agent
+    from ai_reviewer.review import review_pr
 
     config = load_config()
     assert config.anthropic is not None and config.anthropic.api_key
 
-    review = await review_pr_with_cursor_agent(
+    review = await review_pr(
         repo=PINNED_REPO,
         pr_number=PINNED_PR,
         anthropic_cfg=config.anthropic,

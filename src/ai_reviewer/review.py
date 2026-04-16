@@ -1149,7 +1149,7 @@ def _effective_agent_count(
     return requested
 
 
-async def review_pr_with_cursor_agent(
+async def review_pr(
     repo: str,
     pr_number: int,
     anthropic_cfg: AnthropicApiConfig,

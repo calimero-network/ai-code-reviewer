@@ -139,7 +139,7 @@ def _setup_default_review_handler() -> None:
         should_skip_review,
     )
     from ai_reviewer.github.formatter import GitHubFormatter
-    from ai_reviewer.review import review_pr_with_cursor_agent
+    from ai_reviewer.review import review_pr
 
     async def default_review_handler(repo: str, pr_number: int) -> None:
         """Default review handler that reads config from environment."""
@@ -222,7 +222,7 @@ def _setup_default_review_handler() -> None:
                         pr_number,
                     )
                     try:
-                        recheck_review = await review_pr_with_cursor_agent(
+                        recheck_review = await review_pr(
                             repo=repo,
                             pr_number=pr_number,
                             anthropic_cfg=anthropic_cfg,
@@ -270,7 +270,7 @@ def _setup_default_review_handler() -> None:
                             pr_number,
                         )
 
-            review = await review_pr_with_cursor_agent(
+            review = await review_pr(
                 repo=repo,
                 pr_number=pr_number,
                 anthropic_cfg=anthropic_cfg,
