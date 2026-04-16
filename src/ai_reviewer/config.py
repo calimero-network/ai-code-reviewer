@@ -232,18 +232,22 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         agents = [
             AgentConfig(
                 name="security-reviewer",
-                model="claude-4.5-opus-high-thinking",
+                model="claude-opus-4-6",
                 focus_areas=["security", "authentication"],
+                thinking_enabled=True,
+                thinking_budget_tokens=8192,
             ),
             AgentConfig(
                 name="performance-reviewer",
-                model="gpt-5.2",
+                model="claude-sonnet-4-6",
                 focus_areas=["performance", "complexity"],
             ),
             AgentConfig(
                 name="patterns-reviewer",
-                model="claude-4.5-opus-high-thinking",
+                model="claude-opus-4-6",
                 focus_areas=["consistency", "patterns"],
+                thinking_enabled=True,
+                thinking_budget_tokens=8192,
             ),
         ]
 

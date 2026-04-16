@@ -90,12 +90,26 @@ def parse_imports_regex_java(source: str) -> set[str]:
     return {m.group(1) for m in _JAVA_IMPORT_RE.finditer(source)}
 
 
+def _path_to_module(path: str) -> str | None:
+    """Derive a dotted module name from a repo-relative .py path."""
+    p = PurePosixPath(path)
+    if p.suffix != ".py":
+        return None
+    parts = list(p.with_suffix("").parts)
+    # Strip leading 'src/' if present (common Python layout)
+    if parts and parts[0] == "src":
+        parts = parts[1:]
+    if parts and parts[-1] == "__init__":
+        parts = parts[:-1]
+    return ".".join(parts) if parts else None
+
+
 def parse_imports_by_path(path: str, source: str) -> set[str]:
     """Dispatch by file extension."""
     p = PurePosixPath(path)
     ext = p.suffix.lower()
     if ext == ".py":
-        return parse_imports_python(source)
+        return parse_imports_python(source, current_module=_path_to_module(path))
     if ext in {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"}:
         return parse_imports_regex_ts(source)
     if ext == ".go":
