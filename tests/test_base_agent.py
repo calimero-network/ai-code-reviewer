@@ -19,22 +19,26 @@ class DummyAgent(ReviewAgent):
 @pytest.mark.asyncio
 async def test_review_agent_uses_anthropic_client():
     client = MagicMock()
-    client.run_review = AsyncMock(return_value=AnthropicReviewResult(
-        parsed={
-            "findings": [{
-                "file_path": "a.py",
-                "line_start": 1,
-                "severity": "warning",
-                "category": "security",
-                "title": "t",
-                "description": "d",
-                "confidence": 0.9,
-            }],
-            "summary": "sum",
-        },
-        raw_text="",
-        usage=UsageStats(input_tokens=100, output_tokens=20),
-    ))
+    client.run_review = AsyncMock(
+        return_value=AnthropicReviewResult(
+            parsed={
+                "findings": [
+                    {
+                        "file_path": "a.py",
+                        "line_start": 1,
+                        "severity": "warning",
+                        "category": "security",
+                        "title": "t",
+                        "description": "d",
+                        "confidence": 0.9,
+                    }
+                ],
+                "summary": "sum",
+            },
+            raw_text="",
+            usage=UsageStats(input_tokens=100, output_tokens=20),
+        )
+    )
 
     agent = DummyAgent(
         client=client,

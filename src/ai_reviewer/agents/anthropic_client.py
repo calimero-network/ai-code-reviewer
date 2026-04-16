@@ -46,7 +46,7 @@ class AnthropicClient:
     async def close(self) -> None:
         await self._sdk.close()
 
-    async def __aenter__(self) -> "AnthropicClient":
+    async def __aenter__(self) -> AnthropicClient:
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
@@ -119,11 +119,13 @@ class AnthropicClient:
                 except Exception as e:  # noqa: BLE001
                     tool_output = f"[tool error: {e}]"
                     logger.warning("Tool %s failed: %s", block.name, e)
-                tool_result_blocks.append({
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": tool_output,
-                })
+                tool_result_blocks.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": tool_output,
+                    }
+                )
             messages.append({"role": "user", "content": tool_result_blocks})
 
         logger.warning("Tool-use loop exceeded max_tool_rounds=%d", max_tool_rounds)
@@ -161,18 +163,22 @@ def _serialize_blocks(blocks: list[Any]) -> list[dict[str, Any]]:
         if t == "text":
             out.append({"type": "text", "text": getattr(b, "text", "")})
         elif t == "tool_use":
-            out.append({
-                "type": "tool_use",
-                "id": getattr(b, "id"),
-                "name": getattr(b, "name"),
-                "input": getattr(b, "input"),
-            })
+            out.append(
+                {
+                    "type": "tool_use",
+                    "id": b.id,
+                    "name": b.name,
+                    "input": b.input,
+                }
+            )
         elif t == "thinking":
-            out.append({
-                "type": "thinking",
-                "thinking": getattr(b, "thinking", ""),
-                "signature": getattr(b, "signature", ""),
-            })
+            out.append(
+                {
+                    "type": "thinking",
+                    "thinking": getattr(b, "thinking", ""),
+                    "signature": getattr(b, "signature", ""),
+                }
+            )
     return out
 
 

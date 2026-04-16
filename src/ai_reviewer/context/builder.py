@@ -65,14 +65,13 @@ def build_system_blocks(
     """
     role_block = {
         "type": "text",
-        "text": f"{agent_role.strip()}\n\n"
-                "Respond only in the JSON format described by the schema.",
+        "text": f"{agent_role.strip()}\n\nRespond only in the JSON format described by the schema.",
     }
     schema_block = {
         "type": "text",
         "text": "## Output schema (enforced)\n\n```json\n"
-                + json.dumps(FINDINGS_SCHEMA, indent=2)
-                + "\n```",
+        + json.dumps(FINDINGS_SCHEMA, indent=2)
+        + "\n```",
     }
     convention_parts = []
     for name, text in convention_texts.items():
@@ -111,7 +110,9 @@ def build_user_blocks(
     Truncation priority (lowest first): neighbors, changed files.
     The diff is never truncated.
     """
-    pr_meta = f"## PR metadata\n\n**Title:** {pr_title}\n\n**Description:**\n\n{pr_body or '(empty)'}"
+    pr_meta = (
+        f"## PR metadata\n\n**Title:** {pr_title}\n\n**Description:**\n\n{pr_body or '(empty)'}"
+    )
     diff_block = f"## Diff\n\n```diff\n{diff}\n```"
     changed_block = _files_block("Changed files (full contents)", changed_files)
     neighbor_block = _files_block("Neighbor files (context)", neighbor_files)
@@ -120,7 +121,9 @@ def build_user_blocks(
     if len(assembled) <= max_total_chars:
         return [{"type": "text", "text": assembled}]
 
-    neighbor_block = _files_block("Neighbor files (context)", {}) + "\n[... neighbors truncated ...]"
+    neighbor_block = (
+        _files_block("Neighbor files (context)", {}) + "\n[... neighbors truncated ...]"
+    )
     assembled = "\n\n".join([pr_meta, diff_block, changed_block, neighbor_block])
     if len(assembled) <= max_total_chars:
         return [{"type": "text", "text": assembled}]

@@ -1104,11 +1104,7 @@ async def run_cross_review_round(
     diff: str,
     agents_to_run: list[dict],
     on_status: Callable[..., Any] | None = None,
-    # Legacy kwargs accepted for call-site compat (unused by new impl)
-    session: ReviewSession | None = None,
-    gh: GitHubClient | None = None,
-    pr: Any = None,
-    anthropic_cfg: AnthropicApiConfig | None = None,
+    **_kwargs: Any,
 ) -> list[tuple[str, list[dict[str, Any]]]]:
     """Cross-review round: each agent validates and ranks findings.
 

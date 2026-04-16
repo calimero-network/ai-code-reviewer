@@ -167,10 +167,12 @@ async def test_tool_use_loop_dispatches_and_feeds_result_back():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(side_effect=[
-        _tool_use_response("t1", "read_file", {"path": "x.py"}),
-        _fake_response('{"findings": [], "summary": "done"}'),
-    ])
+    client._sdk.messages.create = AsyncMock(
+        side_effect=[
+            _tool_use_response("t1", "read_file", {"path": "x.py"}),
+            _fake_response('{"findings": [], "summary": "done"}'),
+        ]
+    )
 
     registry = MagicMock()
     registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]

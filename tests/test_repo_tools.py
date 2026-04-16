@@ -57,7 +57,7 @@ def fake_gh_with_tree():
     ]
     gh.client.get_repo.return_value.get_git_tree.return_value.tree = tree_items
 
-    def _contents(path, ref=None):
+    def _contents(path, ref=None):  # noqa: ARG001
         payloads = {
             "src/a.py": b"import os\nprint('a')\n",
             "src/b.py": b"def f():\n    return 42\n",
@@ -73,7 +73,9 @@ def fake_gh_with_tree():
 
 @pytest.mark.asyncio
 async def test_glob_filters_blobs_only(session, fake_gh_with_tree):
-    reg = ToolRegistry(session, fake_gh_with_tree, agent_id="a1", max_calls=50, per_file_max_bytes=1024)
+    reg = ToolRegistry(
+        session, fake_gh_with_tree, agent_id="a1", max_calls=50, per_file_max_bytes=1024
+    )
     out = await reg.execute("glob", {"pattern": "src/*.py"})
     assert "src/a.py" in out
     assert "src/b.py" in out
@@ -83,13 +85,17 @@ async def test_glob_filters_blobs_only(session, fake_gh_with_tree):
 
 @pytest.mark.asyncio
 async def test_grep_returns_path_line_match(session, fake_gh_with_tree):
-    reg = ToolRegistry(session, fake_gh_with_tree, agent_id="a1", max_calls=50, per_file_max_bytes=1024)
+    reg = ToolRegistry(
+        session, fake_gh_with_tree, agent_id="a1", max_calls=50, per_file_max_bytes=1024
+    )
     out = await reg.execute("grep", {"pattern": r"print", "path_glob": "**/*.py"})
     assert "src/a.py:2: print('a')" in out
 
 
 @pytest.mark.asyncio
 async def test_grep_invalid_regex_returns_error(session, fake_gh_with_tree):
-    reg = ToolRegistry(session, fake_gh_with_tree, agent_id="a1", max_calls=5, per_file_max_bytes=1024)
+    reg = ToolRegistry(
+        session, fake_gh_with_tree, agent_id="a1", max_calls=5, per_file_max_bytes=1024
+    )
     out = await reg.execute("grep", {"pattern": "[unclosed", "path_glob": "*.py"})
     assert out.startswith("[error: invalid regex")

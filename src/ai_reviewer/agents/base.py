@@ -100,17 +100,19 @@ def _parse_findings(parsed: dict[str, Any]) -> list[ReviewFinding]:
     findings: list[ReviewFinding] = []
     for raw in parsed.get("findings", []) or []:
         try:
-            findings.append(ReviewFinding(
-                file_path=raw["file_path"],
-                line_start=int(raw["line_start"]),
-                line_end=int(raw["line_end"]) if raw.get("line_end") else None,
-                severity=Severity(str(raw["severity"]).lower()),
-                category=Category(str(raw["category"]).lower()),
-                title=raw["title"],
-                description=raw["description"],
-                suggested_fix=raw.get("suggested_fix"),
-                confidence=float(raw.get("confidence", 0.8)),
-            ))
+            findings.append(
+                ReviewFinding(
+                    file_path=raw["file_path"],
+                    line_start=int(raw["line_start"]),
+                    line_end=int(raw["line_end"]) if raw.get("line_end") else None,
+                    severity=Severity(str(raw["severity"]).lower()),
+                    category=Category(str(raw["category"]).lower()),
+                    title=raw["title"],
+                    description=raw["description"],
+                    suggested_fix=raw.get("suggested_fix"),
+                    confidence=float(raw.get("confidence", 0.8)),
+                )
+            )
         except (KeyError, ValueError) as e:
             logger.warning("Failed to parse finding: %s, raw=%r", e, raw)
     return findings

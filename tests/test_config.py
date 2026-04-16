@@ -10,7 +10,8 @@ def test_load_anthropic_config(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-123")
     monkeypatch.setenv("GITHUB_TOKEN", "gh-test")
     cfg_file = tmp_path / "config.yaml"
-    cfg_file.write_text(textwrap.dedent("""
+    cfg_file.write_text(
+        textwrap.dedent("""
         anthropic:
           api_key: ${ANTHROPIC_API_KEY}
           default_model: claude-opus-4-6
@@ -25,7 +26,8 @@ def test_load_anthropic_config(tmp_path: Path, monkeypatch):
             thinking_budget_tokens: 8192
             allow_tool_use: true
             max_tool_calls: 20
-    """))
+    """)
+    )
     cfg = load_config(cfg_file)
     assert cfg.anthropic is not None
     assert cfg.anthropic.api_key == "sk-test-123"

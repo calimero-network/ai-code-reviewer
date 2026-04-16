@@ -334,9 +334,7 @@ def validate_config(config: Config) -> list[str]:
     errors = []
 
     if not config.anthropic or not config.anthropic.api_key:
-        errors.append(
-            "Missing Anthropic API key (set ANTHROPIC_API_KEY or anthropic.api_key)"
-        )
+        errors.append("Missing Anthropic API key (set ANTHROPIC_API_KEY or anthropic.api_key)")
 
     if not config.github.token:
         errors.append("Missing GitHub token (set GITHUB_TOKEN or github.token)")

@@ -16,7 +16,7 @@ def test_fetch_conventions_returns_texts():
     session = ReviewSession(repo="o/r", head_sha="abc", github_budget=50)
     gh = MagicMock()
 
-    def contents(path, ref=None):
+    def contents(path, ref=None):  # noqa: ARG001
         mapping = {"AGENTS.md": "conv-a", "CONTRIBUTING.md": "conv-c"}
         if path in mapping:
             return _encoded(mapping[path])

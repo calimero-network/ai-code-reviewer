@@ -127,7 +127,7 @@ def _module_to_possible_paths(module: str) -> list[str]:
 def select_neighbors(
     changed_files: dict[str, str],
     repo_paths: list[str],
-    read_file: Callable[[str], str],
+    read_file: Callable[[str], str] | None = None,  # noqa: ARG001 — reserved for inbound-edge use
     max_siblings: int = 5,
     max_total: int = 20,
 ) -> list[str]:
@@ -142,10 +142,7 @@ def select_neighbors(
 
     for path in changed_files:
         parent = str(PurePosixPath(path).parent)
-        siblings = [
-            p for p in repo_paths
-            if str(PurePosixPath(p).parent) == parent and p != path
-        ]
+        siblings = [p for p in repo_paths if str(PurePosixPath(p).parent) == parent and p != path]
         for s in siblings[:max_siblings]:
             add(s)
             if len(picks) >= max_total:
