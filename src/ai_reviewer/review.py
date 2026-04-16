@@ -1078,17 +1078,23 @@ async def _run_single_cross_agent(
     try:
         if on_status:
             on_status(f"Cross-review: {agent_name}")
-        result = await client.run_review(
+        response = await client._sdk.messages.create(
             model="claude-sonnet-4-6",
-            system_blocks=[{"type": "text", "text": "You are a code review validator."}],
-            user_blocks=[{"type": "text", "text": cross_prompt}],
-            output_schema={"type": "object", "additionalProperties": False},
-            tool_registry=None,
-            enable_thinking=False,
+            system=[
+                {
+                    "type": "text",
+                    "text": "You are a code review validator. Respond with valid JSON.",
+                }
+            ],
+            messages=[{"role": "user", "content": cross_prompt}],
             max_tokens=8192,
             temperature=0.2,
         )
-        assessments, _ = parse_cross_review_response(result.raw_text)
+        raw_text = ""
+        for block in getattr(response, "content", []) or []:
+            if getattr(block, "type", None) == "text":
+                raw_text += getattr(block, "text", "")
+        assessments, _ = parse_cross_review_response(raw_text)
         return (agent_name, assessments)
     except Exception as e:  # noqa: BLE001
         logger.warning("Cross-review agent %s failed: %s", agent_name, e)

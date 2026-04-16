@@ -151,16 +151,21 @@ class ToolRegistry:
         hits = hits[:500]
         return "\n".join(hits) if hits else "[no matches]"
 
-    def _grep(self, pattern: str, path_glob: str) -> str:
+    def _grep(self, pattern: str, path_glob: str, max_files: int = 50) -> str:
         try:
             regex = re.compile(pattern)
         except re.error as e:
             return f"[error: invalid regex: {e}]"
         matches: list[str] = []
+        files_scanned = 0
         for path in self._tree():
             if not PurePosixPath(path).match(path_glob):
                 continue
+            if files_scanned >= max_files:
+                matches.append(f"[... grep stopped after scanning {max_files} files ...]")
+                break
             content = self._read_file(path)
+            files_scanned += 1
             if content.startswith("[error"):
                 continue
             for lineno, line in enumerate(content.splitlines(), start=1):
