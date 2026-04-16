@@ -8,6 +8,7 @@ from typing import Any
 FINDINGS_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["findings", "summary"],
+    "additionalProperties": False,
     "properties": {
         "findings": {
             "type": "array",
@@ -18,6 +19,7 @@ FINDINGS_SCHEMA: dict[str, Any] = {
     "$defs": {
         "Finding": {
             "type": "object",
+            "additionalProperties": False,
             "required": [
                 "file_path",
                 "line_start",

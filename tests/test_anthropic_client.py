@@ -115,7 +115,7 @@ async def test_run_review_with_thinking_budget_sets_thinking_config():
         temperature=1.0,
     )
     kwargs = client._sdk.messages.create.call_args.kwargs
-    assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 8192}
+    assert kwargs["thinking"] == {"type": "adaptive", "budget_tokens": 8192}
 
 
 @pytest.mark.asyncio
@@ -139,27 +139,6 @@ async def test_run_review_without_thinking_omits_config():
     )
     kwargs = client._sdk.messages.create.call_args.kwargs
     assert "thinking" not in kwargs
-
-
-@pytest.mark.asyncio
-async def test_thinking_forces_temperature_one():
-    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
-    client = AnthropicClient(cfg)
-    client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(
-        return_value=_fake_response('{"findings": [], "summary": "ok"}')
-    )
-    await client.run_review(
-        model="claude-opus-4-6",
-        system_blocks=[{"type": "text", "text": "s"}],
-        user_blocks=[{"type": "text", "text": "u"}],
-        output_schema={"type": "object"},
-        tool_registry=None,
-        thinking_budget=8192,
-        max_tokens=16384,
-        temperature=0.2,
-    )
-    assert client._sdk.messages.create.call_args.kwargs["temperature"] == 1.0
 
 
 @pytest.mark.asyncio

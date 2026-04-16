@@ -89,10 +89,7 @@ class AnthropicClient:
             if tools:
                 kwargs["tools"] = tools
             if thinking_budget:
-                kwargs["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
-                if temperature != 1.0:
-                    logger.info("Thinking enabled; overriding temperature -> 1.0")
-                    kwargs["temperature"] = 1.0
+                kwargs["thinking"] = {"type": "adaptive", "budget_tokens": thinking_budget}
 
             response = await self._sdk.messages.create(**kwargs)
             _accumulate_usage(usage, response)
