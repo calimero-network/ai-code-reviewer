@@ -175,6 +175,21 @@ doc_review:
   comment_marker: "<!-- AI-CODE-REVIEWER-DOC-BOT -->"
 
 # ============================================================================
+# DOCUMENTATION DRAFT GENERATION
+# ============================================================================
+# When enabled, the doc reviewer calls Claude Sonnet to draft updated sections
+# for stale documentation files found via source_to_docs_mapping.  Drafts are
+# posted as expandable suggestions inside the existing doc-bot PR comment so
+# the author can review and apply them manually — nothing is committed or
+# merged automatically.
+#
+# Disabled by default. Enable per-repo in .ai-reviewer.yaml.
+doc_generation:
+  enabled: false
+  model: claude-sonnet-4-6   # Sonnet is sufficient for prose drafting
+  max_files: 5               # cap Sonnet calls per review run
+
+# ============================================================================
 # LOGGING
 # ============================================================================
 logging:

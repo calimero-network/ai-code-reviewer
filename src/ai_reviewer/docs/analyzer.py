@@ -256,6 +256,102 @@ class DocAnalyzer:
         return deduped
 
 
+@dataclass
+class DocDraft:
+    """AI-generated full-file update for a stale documentation file."""
+
+    suggestion: DocSuggestion
+    updated_content: str
+    error: str | None = None
+
+
+_DOC_DRAFT_SYSTEM = """\
+You are a technical writer updating documentation after a code change.
+Given the current content of a documentation file and a code diff, rewrite the
+COMPLETE file incorporating all necessary updates.
+
+Rules:
+- Return the ENTIRE updated file, not just the changed sections.
+- Only change sections that are actually affected by the diff.
+- Preserve all sections that don't need updating, word for word.
+- Be precise and concise. No marketing language.
+- Do not add any commentary before or after the file content — just the file.
+"""
+
+_MAX_DIFF_CHARS = 4000
+_MAX_DOC_CHARS = 8000
+
+
+async def generate_doc_drafts(
+    suggestions: list[DocSuggestion],
+    diff: str,
+    repo_name: str,
+    ref: str,
+    anthropic_cfg: object,
+    gh: object,
+    model: str = "claude-sonnet-4-6",
+    max_files: int = 5,
+) -> list[DocDraft]:
+    """Generate AI-drafted full-file updates for stale documentation files.
+
+    Only processes suggestions that map to real files (produced by
+    ``check_source_to_docs_mapping``).  Architecture/convention suggestions
+    without a concrete file target are skipped.
+
+    Returns one ``DocDraft`` per processed suggestion with the complete updated
+    file content ready for committing.
+    """
+    from ai_reviewer.agents.anthropic_client import AnthropicClient  # local to avoid circular
+
+    drafts: list[DocDraft] = []
+    truncated_diff = diff[:_MAX_DIFF_CHARS] + ("…" if len(diff) > _MAX_DIFF_CHARS else "")
+
+    candidates = [s for s in suggestions if not s.file.endswith("/")][:max_files]
+
+    async with AnthropicClient(anthropic_cfg) as client:  # type: ignore[arg-type]
+        for suggestion in candidates:
+            try:
+                raw = gh.get_file_contents(repo_name, suggestion.file, ref)  # type: ignore[union-attr]
+                if isinstance(raw, list):
+                    drafts.append(
+                        DocDraft(
+                            suggestion=suggestion,
+                            updated_content="",
+                            error="file resolved to multiple entries",
+                        )
+                    )
+                    continue
+                current_content = raw.decoded_content.decode("utf-8", errors="replace")
+            except Exception as exc:
+                drafts.append(DocDraft(suggestion=suggestion, updated_content="", error=str(exc)))
+                continue
+
+            truncated_doc = current_content[:_MAX_DOC_CHARS] + (
+                "\n…(truncated)" if len(current_content) > _MAX_DOC_CHARS else ""
+            )
+
+            user_prompt = (
+                f"## Documentation File: {suggestion.file}\n\n"
+                f"{truncated_doc}\n\n"
+                f"## Code Diff\n\n{truncated_diff}\n\n"
+                f"## Why This File Needs Updating\n\n{suggestion.reason}\n\n"
+                "Return the complete updated file content."
+            )
+
+            try:
+                result = await client.run_completion(
+                    model=model,
+                    system=_DOC_DRAFT_SYSTEM,
+                    user=user_prompt,
+                    max_tokens=8192,
+                )
+                drafts.append(DocDraft(suggestion=suggestion, updated_content=result.strip()))
+            except Exception as exc:
+                drafts.append(DocDraft(suggestion=suggestion, updated_content="", error=str(exc)))
+
+    return drafts
+
+
 def format_doc_comment(suggestions: list[DocSuggestion], marker: str) -> str:
     lines = [marker, "", "## Documentation Review", ""]
     if not suggestions:

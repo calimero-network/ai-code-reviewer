@@ -16,7 +16,7 @@ from rich.table import Table
 
 from ai_reviewer import __version__
 from ai_reviewer.config import Config, DocReviewSettings, load_config, validate_config
-from ai_reviewer.docs.analyzer import DocAnalyzer, format_doc_comment
+from ai_reviewer.docs.analyzer import DocAnalyzer, DocDraft, format_doc_comment, generate_doc_drafts
 from ai_reviewer.github.client import (
     GitHubClient,
     ReviewMeta,
@@ -537,6 +537,162 @@ def _run_doc_review(
             gh.post_or_update_doc_comment(pr, body, marker)
         else:
             console.print("[dim]📄 Documentation looks current — no comment needed[/dim]")
+
+
+@cli.command("update-docs")
+@click.argument("repo")
+@click.argument("pr_number", type=int)
+@click.option("--dry-run", is_flag=True, help="Print what would change without opening a PR")
+@click.option("--base", default=None, help="Base branch to target for the doc PR (default: auto-detect)")
+@click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
+def update_docs_cmd(
+    repo: str,
+    pr_number: int,
+    dry_run: bool,
+    base: str | None,
+    config_path: str | None,
+) -> None:
+    """Generate and commit AI-drafted doc updates for a merged PR.
+
+    Detects stale documentation files via source_to_docs_mapping in
+    .ai-reviewer.yaml, generates full updated file content using Claude Sonnet,
+    then commits the changes to a new branch and opens a PR for human review.
+
+    Use --dry-run to preview the generated content locally without opening a PR.
+    """
+    asyncio.run(
+        _update_docs_async(
+            repo=repo,
+            pr_number=pr_number,
+            dry_run=dry_run,
+            base=base,
+            config_path=Path(config_path) if config_path else None,
+        )
+    )
+
+
+async def _update_docs_async(
+    repo: str,
+    pr_number: int,
+    dry_run: bool,
+    base: str | None,
+    config_path: Path | None,
+) -> None:
+    config = load_config(config_path)
+    errors = validate_config(config)
+    if errors:
+        for error in errors:
+            console.print(f"[red]Config error:[/red] {error}")
+        sys.exit(1)
+
+    if not config.anthropic or not config.anthropic.api_key:
+        console.print("[red]error:[/red] ANTHROPIC_API_KEY not set")
+        sys.exit(2)
+
+    docgen = getattr(config, "doc_generation", None)
+    model = docgen.model if docgen else "claude-sonnet-4-6"
+    max_files = docgen.max_files if docgen else 5
+
+    gh = GitHubClient(config.github.token)
+    console.print(f"📄 Fetching PR #{pr_number} from [bold]{repo}[/bold]...")
+    pr = gh.get_pull_request(repo, pr_number)
+
+    base_branch = base or pr.base.ref
+
+    # Load repo config for source_to_docs_mapping
+    repo_config = gh.load_repo_config(repo, pr.merge_commit_sha or pr.head.sha)
+    doc_config = repo_config.get("documentation") if repo_config else None
+
+    if not doc_config or not doc_config.get("source_to_docs_mapping"):
+        console.print("[yellow]No source_to_docs_mapping found in .ai-reviewer.yaml — nothing to do.[/yellow]")
+        return
+
+    # Run DocAnalyzer to find stale docs
+    pr_files = list(pr.get_files())
+    changed_paths = [f.filename for f in pr_files]
+    changed_paths_with_status = {f.filename: getattr(f, "status", "modified") for f in pr_files}
+
+    analyzer = DocAnalyzer(
+        changed_paths=changed_paths,
+        changed_paths_with_status=changed_paths_with_status,
+        existing_repo_paths=set(),
+        doc_config=doc_config,
+    )
+    mapping_suggestions = analyzer.check_source_to_docs_mapping()
+
+    if not mapping_suggestions:
+        console.print("[green]✅ No stale documentation detected for this PR.[/green]")
+        return
+
+    console.print(f"📝 Found {len(mapping_suggestions)} stale doc file(s): {', '.join(s.file for s in mapping_suggestions)}")
+    console.print(f"🤖 Generating updated content with {model}...")
+
+    diff = gh.get_pr_diff(pr)
+    ref = pr.merge_commit_sha or pr.head.sha
+
+    drafts = await generate_doc_drafts(
+        suggestions=mapping_suggestions,
+        diff=diff,
+        repo_name=repo,
+        ref=ref,
+        anthropic_cfg=config.anthropic,
+        gh=gh,
+        model=model,
+        max_files=max_files,
+    )
+
+    successful = [d for d in drafts if d.updated_content and not d.error]
+    failed = [d for d in drafts if d.error]
+
+    if failed:
+        for d in failed:
+            console.print(f"[yellow]⚠️  Skipped {d.suggestion.file}: {d.error}[/yellow]")
+
+    if not successful:
+        console.print("[red]No docs could be generated — check errors above.[/red]")
+        sys.exit(1)
+
+    if dry_run:
+        console.print(f"\n[yellow]Dry run — would update {len(successful)} file(s):[/yellow]\n")
+        for draft in successful:
+            console.print(f"[bold]━━ {draft.suggestion.file} ━━[/bold]")
+            # Show first 60 lines as preview
+            preview_lines = draft.updated_content.splitlines()[:60]
+            console.print("\n".join(preview_lines))
+            if len(draft.updated_content.splitlines()) > 60:
+                console.print(f"[dim]… ({len(draft.updated_content.splitlines()) - 60} more lines)[/dim]")
+            console.print()
+        return
+
+    # Build PR body
+    files_list = "\n".join(f"- `{d.suggestion.file}`" for d in successful)
+    pr_body = (
+        f"## Automatic Documentation Update\n\n"
+        f"This PR was opened automatically by the AI Code Reviewer after "
+        f"[PR #{pr_number}]({pr.html_url}) was merged.\n\n"
+        f"### Updated files\n\n{files_list}\n\n"
+        f"### What changed\n\n"
+        + "\n".join(f"**{d.suggestion.file}**: {d.suggestion.reason}" for d in successful)
+        + "\n\n---\n*Generated by `ai-reviewer update-docs`. "
+        "Review the changes and merge if correct — nothing was auto-merged.*"
+    )
+
+    console.print(f"🔀 Creating doc update PR against [bold]{base_branch}[/bold]...")
+    try:
+        url = gh.create_doc_update_pr(
+            repo_name=repo,
+            base_branch=base_branch,
+            base_sha=pr.merge_commit_sha or pr.head.sha,
+            updates=successful,
+            pr_title=f"docs: auto-update for PR #{pr_number} — {pr.title}",
+            pr_body=pr_body,
+            assignee=pr.user.login if pr.user else None,
+            labels=["automated-docs"],
+        )
+        console.print(f"[green]✅ Doc update PR opened: {url}[/green]")
+    except Exception as e:
+        console.print(f"[red]Failed to create PR:[/red] {e}")
+        sys.exit(1)
 
 
 @cli.group("config")

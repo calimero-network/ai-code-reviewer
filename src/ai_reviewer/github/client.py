@@ -1511,6 +1511,87 @@ class GitHubClient:
             logger.warning("Could not search issue comments for doc-bot marker: %s", e)
         return None
 
+    def create_doc_update_pr(
+        self,
+        repo_name: str,
+        base_branch: str,
+        base_sha: str,
+        updates: list,
+        pr_title: str,
+        pr_body: str,
+        assignee: str | None = None,
+        labels: list[str] | None = None,
+    ) -> str:
+        """Create a branch, commit updated doc files, and open a PR.
+
+        *updates* is a list of ``DocDraft`` objects.  Only drafts with non-empty
+        ``updated_content`` and no ``error`` are committed.
+
+        Returns the HTML URL of the newly opened PR.
+        """
+        branch_name = f"docs/auto-{base_sha[:7]}"
+        repo = self._gh.get_repo(repo_name)
+
+        # Create branch off the base SHA
+        try:
+            repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_sha)
+        except Exception as e:
+            _raise_if_forbidden(e)
+            raise RuntimeError(f"Could not create branch {branch_name}: {e}") from e
+
+        # Commit each updated file onto the new branch
+        committed: list[str] = []
+        for draft in updates:
+            if not draft.updated_content or draft.error:
+                logger.warning("Skipping %s: %s", draft.suggestion.file, draft.error or "empty content")
+                continue
+            path = draft.suggestion.file
+            try:
+                existing_sha: str | None = None
+                try:
+                    existing = repo.get_contents(path, ref=branch_name)
+                    if not isinstance(existing, list):
+                        existing_sha = existing.sha
+                except Exception:
+                    pass  # file doesn't exist yet — create it
+
+                commit_msg = f"docs: auto-update {path}"
+                if existing_sha:
+                    repo.update_file(path, commit_msg, draft.updated_content, existing_sha, branch=branch_name)
+                else:
+                    repo.create_file(path, commit_msg, draft.updated_content, branch=branch_name)
+                committed.append(path)
+                logger.info("Committed updated %s to %s", path, branch_name)
+            except Exception as e:
+                _raise_if_forbidden(e)
+                logger.warning("Could not commit %s: %s", path, e)
+
+        if not committed:
+            raise RuntimeError("No files were successfully committed — aborting PR creation")
+
+        # Open the PR
+        try:
+            pr = repo.create_pull(
+                title=pr_title,
+                body=pr_body,
+                head=branch_name,
+                base=base_branch,
+            )
+        except Exception as e:
+            _raise_if_forbidden(e)
+            raise RuntimeError(f"Could not create PR: {e}") from e
+
+        if assignee:
+            with contextlib.suppress(Exception):
+                pr.add_to_assignees(assignee)
+
+        if labels:
+            with contextlib.suppress(Exception):
+                pr.add_to_labels(*labels)
+
+        logger.info("Opened doc update PR #%d: %s", pr.number, pr.html_url)
+        return pr.html_url
+
     def post_or_update_doc_comment(self, pr: PullRequest, body: str, marker: str) -> None:
         """Create or update the doc-bot issue comment on a PR.
 

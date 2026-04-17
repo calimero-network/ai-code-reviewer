@@ -126,6 +126,21 @@ class DocReviewSettings:
 
 
 @dataclass
+class DocGenerationSettings:
+    """AI-powered documentation draft generation configuration.
+
+    When enabled, the doc reviewer calls Claude Sonnet to draft updated sections
+    for stale documentation files and posts them as expandable suggestions inside
+    the existing doc-bot PR comment.  Disabled by default — opt in per-repo via
+    ``doc_generation.enabled: true`` in ``.ai-reviewer.yaml``.
+    """
+
+    enabled: bool = False
+    model: str = "claude-sonnet-4-6"
+    max_files: int = 5
+
+
+@dataclass
 class Config:
     """Complete application configuration."""
 
@@ -138,6 +153,7 @@ class Config:
     review_policy: ReviewPolicy = field(default_factory=ReviewPolicy)
     server: ServerSettings = field(default_factory=ServerSettings)
     doc_review: DocReviewSettings = field(default_factory=DocReviewSettings)
+    doc_generation: DocGenerationSettings = field(default_factory=DocGenerationSettings)
 
 
 def load_config(config_path: Path | None = None) -> Config:
@@ -313,6 +329,14 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         comment_marker=doc_raw.get("comment_marker", "<!-- AI-CODE-REVIEWER-DOC-BOT -->"),
     )
 
+    # Doc generation settings
+    docgen_raw = raw.get("doc_generation", {})
+    doc_generation = DocGenerationSettings(
+        enabled=docgen_raw.get("enabled", False),
+        model=docgen_raw.get("model", "claude-sonnet-4-6"),
+        max_files=docgen_raw.get("max_files", 5),
+    )
+
     return Config(
         anthropic=anthropic,
         github=github,
@@ -323,6 +347,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         review_policy=review_policy,
         server=server,
         doc_review=doc_review,
+        doc_generation=doc_generation,
     )
 
 

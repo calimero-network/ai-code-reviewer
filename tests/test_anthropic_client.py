@@ -228,3 +228,46 @@ async def test_caching_disabled_leaves_system_unchanged():
     )
     sent = client._sdk.messages.create.call_args.kwargs["system"]
     assert "cache_control" not in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_run_completion_returns_plain_text():
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    client._sdk.messages.create = AsyncMock(
+        return_value=_fake_response("# Updated README\n\nNew content here.")
+    )
+
+    result = await client.run_completion(
+        model="claude-sonnet-4-6",
+        system="You are a technical writer.",
+        user="Update these docs.",
+        max_tokens=2048,
+    )
+
+    assert result == "# Updated README\n\nNew content here."
+    call_kwargs = client._sdk.messages.create.call_args.kwargs
+    assert call_kwargs["model"] == "claude-sonnet-4-6"
+    assert call_kwargs["max_tokens"] == 2048
+    # run_completion must not pass output_config or tools
+    assert "output_config" not in call_kwargs
+    assert "tools" not in call_kwargs
+
+
+@pytest.mark.asyncio
+async def test_run_completion_uses_system_and_user():
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    client._sdk.messages.create = AsyncMock(return_value=_fake_response("result"))
+
+    await client.run_completion(
+        model="claude-sonnet-4-6",
+        system="sys prompt",
+        user="user prompt",
+    )
+
+    call_kwargs = client._sdk.messages.create.call_args.kwargs
+    assert call_kwargs["system"] == "sys prompt"
+    assert call_kwargs["messages"] == [{"role": "user", "content": "user prompt"}]

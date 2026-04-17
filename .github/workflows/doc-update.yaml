@@ -1,0 +1,84 @@
+# Reusable workflow: AI-powered doc update PR generator.
+#
+# How other repos call this (add to their .github/workflows/doc-update.yaml):
+#
+#   on:
+#     push:
+#       branches: [main, master]
+#   jobs:
+#     doc-update:
+#       uses: calimero-network/ai-code-reviewer/.github/workflows/doc-update.yaml@main
+#       secrets:
+#         ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+#         GH_PAT: ${{ secrets.GH_PAT }}
+#
+# Requirements in the calling repo:
+#   - .ai-reviewer.yaml with doc_generation.enabled: true and source_to_docs_mapping
+#   - ANTHROPIC_API_KEY secret
+#   - GH_PAT secret (Classic PAT with repo scope — needed to open PRs)
+
+name: Doc Auto-Update
+
+on:
+  workflow_call:
+    secrets:
+      ANTHROPIC_API_KEY:
+        required: true
+      GH_PAT:
+        required: false
+
+  # Also runs directly on this repo (dogfooding)
+  push:
+    branches: [main, master]
+
+jobs:
+  update-docs:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install ai-code-reviewer
+        run: pip install ai-code-reviewer
+
+      - name: Get merged PR number
+        id: pr
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          # First try: extract from merge commit message ("Merge pull request #123")
+          MSG="${{ github.event.head_commit.message }}"
+          PR_NUM=$(echo "$MSG" | grep -oP '(?<=pull request #)\d+' | head -1 || true)
+
+          # Second try: most recently merged PR via gh CLI
+          if [ -z "$PR_NUM" ]; then
+            PR_NUM=$(gh pr list \
+              --repo "${{ github.repository }}" \
+              --state merged \
+              --base "${{ github.event.repository.default_branch }}" \
+              --limit 1 \
+              --json number \
+              -q '.[0].number' 2>/dev/null || true)
+          fi
+
+          echo "number=$PR_NUM" >> "$GITHUB_OUTPUT"
+
+      - name: Generate and open doc update PR
+        if: steps.pr.outputs.number != ''
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+        run: |
+          ai-reviewer update-docs "${{ github.repository }}" "${{ steps.pr.outputs.number }}"
+
+      - name: No PR detected
+        if: steps.pr.outputs.number == ''
+        run: echo "Could not detect a merged PR — skipping doc update."
