@@ -167,7 +167,7 @@ class TestUpdateDocsCLI:
             result = runner.invoke(cli, ["update-docs", "org/repo", "42", "--dry-run"])
 
         assert result.exit_code == 0
-        assert "No stale documentation detected" in result.output
+        assert "no stale documentation detected" in result.output
 
 
 class TestDocGenerationSettings:

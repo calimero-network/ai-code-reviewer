@@ -9,10 +9,16 @@ Two-tier design:
 
 from __future__ import annotations
 
+import asyncio
 import fnmatch
 import os
 import re as _re
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from ai_reviewer.config import AnthropicApiConfig
+    from ai_reviewer.github.client import GitHubClient
 
 
 @dataclass(frozen=True)
@@ -257,11 +263,17 @@ class DocAnalyzer:
             suggestions.append(DocSuggestion(file=target, reason=reason))
         return suggestions
 
-    def check_static_html_docs(self) -> list[DocSuggestion]:
+    def check_static_html_docs(
+        self, already_covered: set[str] | None = None
+    ) -> list[DocSuggestion]:
         """Flag static HTML doc directories when architecture-impacting changes occur.
 
         Only emits suggestions when the PR touches something architecture-relevant
         AND a configured static docs directory actually exists in the repo.
+
+        *already_covered* should be the set of file paths already flagged by
+        :meth:`check_source_to_docs_mapping` so that :meth:`run` can pass the
+        pre-computed result and avoid calling the mapping check twice.
         """
         if not self.static_docs_dirs:
             return []
@@ -272,12 +284,16 @@ class DocAnalyzer:
         ):
             return []
 
+        covered = (
+            already_covered
+            if already_covered is not None
+            else {s.file for s in self.check_source_to_docs_mapping()}
+        )
         suggestions = []
-        already_covered = {s.file for s in self.check_source_to_docs_mapping()}
         for d in self.static_docs_dirs:
             normalized = d if d.endswith("/") else d + "/"
             # Only flag dirs that exist in the repo and aren't already flagged by the mapping
-            if normalized in self.existing_repo_paths and normalized not in already_covered:
+            if normalized in self.existing_repo_paths and normalized not in covered:
                 suggestions.append(
                     DocSuggestion(
                         file=normalized,
@@ -298,8 +314,9 @@ class DocAnalyzer:
         suggestions: list[DocSuggestion] = []
         suggestions.extend(self.check_architecture_folder())
         suggestions.extend(self.check_convention_files())
-        suggestions.extend(self.check_source_to_docs_mapping())
-        suggestions.extend(self.check_static_html_docs())
+        mapping = self.check_source_to_docs_mapping()
+        suggestions.extend(mapping)
+        suggestions.extend(self.check_static_html_docs(already_covered={s.file for s in mapping}))
 
         seen: set[str] = set()
         deduped: list[DocSuggestion] = []
@@ -354,8 +371,11 @@ Rules for HTML updates:
 # Sentinel returned by Claude when an HTML page does not need updating.
 _NO_UPDATE_SENTINEL = "NO_UPDATE_NEEDED"
 
+# ~4K chars ≈ ~1K tokens — keeps prompt cost low while providing enough context.
 _MAX_DIFF_CHARS = 4000
+# ~8K chars ≈ ~2K tokens — sufficient for most Markdown docs.
 _MAX_DOC_CHARS = 8000
+# HTML docs are larger due to markup; allow more context for accurate updates.
 _MAX_DOC_CHARS_HTML = 20_000
 
 
@@ -371,8 +391,8 @@ async def generate_doc_drafts(
     diff: str,
     repo_name: str,
     ref: str,
-    anthropic_cfg: object,
-    gh: object,
+    anthropic_cfg: AnthropicApiConfig,
+    gh: GitHubClient,
     model: str = "claude-sonnet-4-6",
     max_files: int = 15,
 ) -> list[DocDraft]:
@@ -385,80 +405,79 @@ async def generate_doc_drafts(
     For HTML files, uses a separate prompt that allows Claude to return
     ``NO_UPDATE_NEEDED`` when the page content is already accurate.
 
+    Files are processed concurrently (up to 5 at a time) to reduce wall-clock
+    time when many pages need updating.
+
     Returns one ``DocDraft`` per processed suggestion with the complete updated
     file content ready for committing.  Drafts where ``error`` is set or
     ``updated_content`` is empty should be discarded by the caller.
     """
     from ai_reviewer.agents.anthropic_client import AnthropicClient  # local to avoid circular
 
-    drafts: list[DocDraft] = []
     truncated_diff = diff[:_MAX_DIFF_CHARS] + ("…" if len(diff) > _MAX_DIFF_CHARS else "")
-
     candidates = [s for s in suggestions if not s.file.endswith("/")][:max_files]
 
-    async with AnthropicClient(anthropic_cfg) as client:  # type: ignore[arg-type]
-        for suggestion in candidates:
-            is_html = suggestion.file.lower().endswith(".html")
-            max_chars = _MAX_DOC_CHARS_HTML if is_html else _MAX_DOC_CHARS
-            system_prompt = _DOC_DRAFT_SYSTEM_HTML if is_html else _DOC_DRAFT_SYSTEM
+    async with AnthropicClient(anthropic_cfg) as client:
+        semaphore = asyncio.Semaphore(5)
 
-            try:
-                raw = gh.get_file_contents(repo_name, suggestion.file, ref)  # type: ignore[union-attr]
-                if isinstance(raw, list):
-                    drafts.append(
-                        DocDraft(
+        async def _process_one(suggestion: DocSuggestion) -> DocDraft | None:
+            async with semaphore:
+                is_html = suggestion.file.lower().endswith(".html")
+                max_chars = _MAX_DOC_CHARS_HTML if is_html else _MAX_DOC_CHARS
+                system_prompt = _DOC_DRAFT_SYSTEM_HTML if is_html else _DOC_DRAFT_SYSTEM
+
+                try:
+                    raw = gh.get_file_contents(repo_name, suggestion.file, ref)
+                    if isinstance(raw, list):
+                        return DocDraft(
                             suggestion=suggestion,
                             updated_content="",
                             error="file resolved to multiple entries",
                         )
+                    current_content = raw.decoded_content.decode("utf-8", errors="replace")
+                except Exception as exc:
+                    return DocDraft(suggestion=suggestion, updated_content="", error=str(exc))
+
+                truncated_doc = current_content[:max_chars] + (
+                    "\n…(truncated)" if len(current_content) > max_chars else ""
+                )
+
+                if is_html:
+                    plain_text = _strip_html_tags(current_content)[:2000]
+                    user_prompt = (
+                        f"## HTML File: {suggestion.file}\n\n"
+                        f"### Raw HTML\n\n{truncated_doc}\n\n"
+                        f"### Plain-text content (for relevance check)\n\n{plain_text}\n\n"
+                        f"## Code Diff\n\n{truncated_diff}\n\n"
+                        f"## Why This File May Need Updating\n\n{suggestion.reason}\n\n"
+                        "Return NO_UPDATE_NEEDED if unchanged, or the complete updated HTML file."
                     )
-                    continue
-                current_content = raw.decoded_content.decode("utf-8", errors="replace")
-            except Exception as exc:
-                drafts.append(DocDraft(suggestion=suggestion, updated_content="", error=str(exc)))
-                continue
+                else:
+                    user_prompt = (
+                        f"## Documentation File: {suggestion.file}\n\n"
+                        f"{truncated_doc}\n\n"
+                        f"## Code Diff\n\n{truncated_diff}\n\n"
+                        f"## Why This File Needs Updating\n\n{suggestion.reason}\n\n"
+                        "Return the complete updated file content."
+                    )
 
-            truncated_doc = current_content[:max_chars] + (
-                "\n…(truncated)" if len(current_content) > max_chars else ""
-            )
+                try:
+                    result = await client.run_completion(
+                        model=model,
+                        system=system_prompt,
+                        user=user_prompt,
+                        max_tokens=8192,
+                    )
+                    content = result.strip()
+                    if content == _NO_UPDATE_SENTINEL:
+                        return None  # Claude says no update needed
+                    return DocDraft(suggestion=suggestion, updated_content=content)
+                except Exception as exc:
+                    return DocDraft(suggestion=suggestion, updated_content="", error=str(exc))
 
-            # For HTML files pass stripped text after the raw HTML so Claude can
-            # judge relevance without parsing markup.
-            if is_html:
-                plain_text = _strip_html_tags(current_content)[:2000]
-                user_prompt = (
-                    f"## HTML File: {suggestion.file}\n\n"
-                    f"### Raw HTML\n\n{truncated_doc}\n\n"
-                    f"### Plain-text content (for relevance check)\n\n{plain_text}\n\n"
-                    f"## Code Diff\n\n{truncated_diff}\n\n"
-                    f"## Why This File May Need Updating\n\n{suggestion.reason}\n\n"
-                    "Return NO_UPDATE_NEEDED if unchanged, or the complete updated HTML file."
-                )
-            else:
-                user_prompt = (
-                    f"## Documentation File: {suggestion.file}\n\n"
-                    f"{truncated_doc}\n\n"
-                    f"## Code Diff\n\n{truncated_diff}\n\n"
-                    f"## Why This File Needs Updating\n\n{suggestion.reason}\n\n"
-                    "Return the complete updated file content."
-                )
+        raw_results = await asyncio.gather(*[_process_one(s) for s in candidates])
 
-            try:
-                result = await client.run_completion(
-                    model=model,
-                    system=system_prompt,
-                    user=user_prompt,
-                    max_tokens=8192,
-                )
-                content = result.strip()
-                if content == _NO_UPDATE_SENTINEL:
-                    # Claude determined no update is needed — skip without an error
-                    continue
-                drafts.append(DocDraft(suggestion=suggestion, updated_content=content))
-            except Exception as exc:
-                drafts.append(DocDraft(suggestion=suggestion, updated_content="", error=str(exc)))
-
-    return drafts
+    return [r for r in raw_results if r is not None]
 
 
 def format_doc_comment(suggestions: list[DocSuggestion], marker: str) -> str:

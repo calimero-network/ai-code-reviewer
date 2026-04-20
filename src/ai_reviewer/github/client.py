@@ -13,6 +13,7 @@ import time
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import requests
 import yaml
@@ -25,6 +26,9 @@ from github.Repository import Repository
 from ai_reviewer.models.context import ReviewContext
 from ai_reviewer.models.findings import ConsolidatedFinding, Severity, compute_fuzzy_hash
 from ai_reviewer.models.review import ConsolidatedReview
+
+if TYPE_CHECKING:
+    from ai_reviewer.docs.analyzer import DocDraft
 
 logger = logging.getLogger(__name__)
 
@@ -1563,7 +1567,7 @@ class GitHubClient:
         repo_name: str,
         base_branch: str,
         base_sha: str,
-        updates: list,
+        updates: list[DocDraft],
         pr_title: str,
         pr_body: str,
         assignee: str | None = None,
@@ -1604,8 +1608,9 @@ class GitHubClient:
                     existing = repo.get_contents(path, ref=branch_name)
                     if not isinstance(existing, list):
                         existing_sha = existing.sha
-                except Exception:
-                    pass  # file doesn't exist yet — create it
+                except Exception as inner_e:
+                    _raise_if_forbidden(inner_e)
+                    # file doesn't exist yet — create it
 
                 commit_msg = f"docs: auto-update {path}"
                 if existing_sha:
