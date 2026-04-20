@@ -82,9 +82,16 @@ async def run_doc_update(
     repo_docgen: dict = repo_config.get("doc_generation", {}) if repo_config else {}
     if repo_docgen.get("enabled") is False:
         return DocUpdateResult(skipped=True, skip_reason="doc_generation disabled in repo config")
-    effective_model: str = repo_docgen.get("model") or doc_generation.model
-    effective_max_files: int = int(repo_docgen.get("max_files") or doc_generation.max_files)
-    effective_pr_labels: list[str] = repo_docgen.get("pr_labels") or doc_generation.pr_labels
+    _repo_model = repo_docgen.get("model")
+    effective_model: str = _repo_model if _repo_model is not None else doc_generation.model
+    _repo_max_files = repo_docgen.get("max_files")
+    effective_max_files: int = (
+        int(_repo_max_files) if _repo_max_files is not None else doc_generation.max_files
+    )
+    _repo_pr_labels = repo_docgen.get("pr_labels")
+    effective_pr_labels: list[str] = (
+        _repo_pr_labels if _repo_pr_labels is not None else doc_generation.pr_labels
+    )
     effective_pr_draft: bool = repo_docgen.get("pr_draft", doc_generation.pr_draft)
 
     pr_files = list(pr.get_files())
@@ -104,10 +111,14 @@ async def run_doc_update(
 
     # HTML scan suggestions — repo config takes precedence over server defaults.
     html_suggestions: list[DocSuggestion] = []
+    _repo_static = repo_docgen.get("static_docs_dirs")
+    _doc_static = doc_config.get("static_docs_dirs") if doc_config else None
     effective_static_dirs: list[str] = (
-        repo_docgen.get("static_docs_dirs")
-        or (doc_config.get("static_docs_dirs") if doc_config else None)
-        or doc_generation.static_docs_dirs
+        _repo_static
+        if _repo_static is not None
+        else _doc_static
+        if _doc_static is not None
+        else doc_generation.static_docs_dirs
     )
     if effective_static_dirs:
         already_covered = {s.file for s in mapping_suggestions}

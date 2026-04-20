@@ -27,7 +27,7 @@ from ai_reviewer.github.client import (
     should_skip_review,
 )
 from ai_reviewer.github.formatter import GitHubFormatter, format_review_as_json
-from ai_reviewer.github.webhook import create_webhook_app, set_push_handler, set_review_handler
+from ai_reviewer.github.webhook import create_webhook_app, set_review_handler
 from ai_reviewer.models.review import ConsolidatedReview
 from ai_reviewer.review import review_pr as run_review
 
@@ -716,27 +716,6 @@ def serve(port: int, host: str, config_path: str | None) -> None:
         await review_pr_async(repo=repo, pr_number=pr_number, output="github")
 
     set_review_handler(review_handler)
-
-    # Set up push handler for doc-update-on-merge
-    async def push_handler(repo: str, ref: str, head_commit_message: str) -> None:
-        import re
-
-        branch = ref.removeprefix("refs/heads/")
-        if branch not in ("main", "master"):
-            return
-        match = re.search(r"pull request #(\d+)", head_commit_message)
-        if not match:
-            return
-        pr_number_from_push = int(match.group(1))
-        await _update_docs_async(
-            repo=repo,
-            pr_number=pr_number_from_push,
-            dry_run=False,
-            base=branch,
-            config_path=None,
-        )
-
-    set_push_handler(push_handler)
 
     # Create and run app
     app = create_webhook_app(config.github.webhook_secret)
