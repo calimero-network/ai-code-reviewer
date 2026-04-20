@@ -206,7 +206,5 @@ class TestDocGenerationSettings:
     def test_disabled_by_default_in_parsed_config(self):
         from ai_reviewer.config import _parse_config
 
-        cfg = _parse_config(
-            {"anthropic": {"api_key": "sk-test"}, "github": {"token": "ghp_test"}}
-        )
+        cfg = _parse_config({"anthropic": {"api_key": "sk-test"}, "github": {"token": "ghp_test"}})
         assert cfg.doc_generation.enabled is False
