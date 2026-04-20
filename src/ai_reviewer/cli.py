@@ -16,7 +16,7 @@ from rich.table import Table
 
 from ai_reviewer import __version__
 from ai_reviewer.config import Config, DocReviewSettings, load_config, validate_config
-from ai_reviewer.docs.analyzer import DocAnalyzer, DocDraft, format_doc_comment, generate_doc_drafts
+from ai_reviewer.docs.analyzer import DocAnalyzer, format_doc_comment, generate_doc_drafts
 from ai_reviewer.github.client import (
     GitHubClient,
     ReviewMeta,
@@ -547,7 +547,9 @@ def _run_doc_review(
 @click.argument("repo")
 @click.argument("pr_number", type=int)
 @click.option("--dry-run", is_flag=True, help="Print what would change without opening a PR")
-@click.option("--base", default=None, help="Base branch to target for the doc PR (default: auto-detect)")
+@click.option(
+    "--base", default=None, help="Base branch to target for the doc PR (default: auto-detect)"
+)
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
 def update_docs_cmd(
     repo: str,
@@ -564,15 +566,19 @@ def update_docs_cmd(
 
     Use --dry-run to preview the generated content locally without opening a PR.
     """
-    asyncio.run(
-        _update_docs_async(
-            repo=repo,
-            pr_number=pr_number,
-            dry_run=dry_run,
-            base=base,
-            config_path=Path(config_path) if config_path else None,
+    try:
+        asyncio.run(
+            _update_docs_async(
+                repo=repo,
+                pr_number=pr_number,
+                dry_run=dry_run,
+                base=base,
+                config_path=Path(config_path) if config_path else None,
+            )
         )
-    )
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
 
 
 async def _update_docs_async(
@@ -587,11 +593,11 @@ async def _update_docs_async(
     if errors:
         for error in errors:
             console.print(f"[red]Config error:[/red] {error}")
-        sys.exit(1)
+        raise RuntimeError(f"Invalid config: {'; '.join(errors)}")
 
     if not config.anthropic or not config.anthropic.api_key:
         console.print("[red]error:[/red] ANTHROPIC_API_KEY not set")
-        sys.exit(2)
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
 
     docgen = getattr(config, "doc_generation", None)
     model = docgen.model if docgen else "claude-sonnet-4-6"
@@ -636,9 +642,7 @@ async def _update_docs_async(
     ref = pr.merge_commit_sha or pr.head.sha
     html_suggestions: list = []
     effective_static_dirs = (
-        doc_config.get("static_docs_dirs", static_docs_dirs)
-        if doc_config
-        else static_docs_dirs
+        doc_config.get("static_docs_dirs", static_docs_dirs) if doc_config else static_docs_dirs
     )
     if effective_static_dirs:
         already_covered = {s.file for s in mapping_suggestions}
@@ -646,6 +650,7 @@ async def _update_docs_async(
         for html_path in html_paths:
             if html_path not in already_covered:
                 from ai_reviewer.docs.analyzer import DocSuggestion
+
                 html_suggestions.append(
                     DocSuggestion(
                         file=html_path,
@@ -690,7 +695,7 @@ async def _update_docs_async(
 
     if not successful:
         console.print("[green]✅ No doc updates needed after scanning all candidates.[/green]")
-        return
+        return  # not an error — Claude said nothing needs changing
 
     if dry_run:
         console.print(f"\n[yellow]Dry run — would update {len(successful)} file(s):[/yellow]\n")
@@ -699,7 +704,9 @@ async def _update_docs_async(
             preview_lines = draft.updated_content.splitlines()[:60]
             console.print("\n".join(preview_lines))
             if len(draft.updated_content.splitlines()) > 60:
-                console.print(f"[dim]… ({len(draft.updated_content.splitlines()) - 60} more lines)[/dim]")
+                console.print(
+                    f"[dim]… ({len(draft.updated_content.splitlines()) - 60} more lines)[/dim]"
+                )
             console.print()
         return
 
@@ -732,7 +739,7 @@ async def _update_docs_async(
         console.print(f"[green]✅ Doc update PR opened: {url}[/green]")
     except Exception as e:
         console.print(f"[red]Failed to create PR:[/red] {e}")
-        sys.exit(1)
+        raise
 
 
 @cli.group("config")

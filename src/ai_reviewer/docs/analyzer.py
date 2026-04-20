@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re as _re
 from dataclasses import dataclass
 
 
@@ -356,9 +357,6 @@ _NO_UPDATE_SENTINEL = "NO_UPDATE_NEEDED"
 _MAX_DIFF_CHARS = 4000
 _MAX_DOC_CHARS = 8000
 _MAX_DOC_CHARS_HTML = 20_000
-
-
-import re as _re
 
 
 def _strip_html_tags(html: str) -> str:

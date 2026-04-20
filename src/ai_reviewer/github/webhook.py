@@ -430,7 +430,8 @@ async def handle_push_event(payload: dict) -> None:
     """Handle a push event by running update-docs when a PR merges to main/master."""
     ref = payload.get("ref", "")
     repo = payload.get("repository", {}).get("full_name", "")
-    head_commit_message = payload.get("head_commit", {}).get("message", "")
+    head_commit = payload.get("head_commit") or {}
+    head_commit_message = head_commit.get("message", "") if isinstance(head_commit, dict) else ""
 
     if _push_handler:
         await _push_handler(repo=repo, ref=ref, head_commit_message=head_commit_message)

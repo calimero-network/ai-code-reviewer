@@ -1471,9 +1471,7 @@ class GitHubClient:
 
         return resolved_ids
 
-    def get_html_files_in_dirs(
-        self, repo_name: str, ref: str, dirs: list[str]
-    ) -> list[str]:
+    def get_html_files_in_dirs(self, repo_name: str, ref: str, dirs: list[str]) -> list[str]:
         """Return paths of all .html files found directly inside the given directories.
 
         Does not recurse into sub-directories — flat docs-site layouts are assumed.
@@ -1591,11 +1589,15 @@ class GitHubClient:
 
         # Commit each updated file onto the new branch
         committed: list[str] = []
-        for draft in updates:
-            if not draft.updated_content or draft.error:
-                logger.warning("Skipping %s: %s", draft.suggestion.file, draft.error or "empty content")
+        for doc_update in updates:
+            if not doc_update.updated_content or doc_update.error:
+                logger.warning(
+                    "Skipping %s: %s",
+                    doc_update.suggestion.file,
+                    doc_update.error or "empty content",
+                )
                 continue
-            path = draft.suggestion.file
+            path = doc_update.suggestion.file
             try:
                 existing_sha: str | None = None
                 try:
@@ -1607,9 +1609,17 @@ class GitHubClient:
 
                 commit_msg = f"docs: auto-update {path}"
                 if existing_sha:
-                    repo.update_file(path, commit_msg, draft.updated_content, existing_sha, branch=branch_name)
+                    repo.update_file(
+                        path,
+                        commit_msg,
+                        doc_update.updated_content,
+                        existing_sha,
+                        branch=branch_name,
+                    )
                 else:
-                    repo.create_file(path, commit_msg, draft.updated_content, branch=branch_name)
+                    repo.create_file(
+                        path, commit_msg, doc_update.updated_content, branch=branch_name
+                    )
                 committed.append(path)
                 logger.info("Committed updated %s to %s", path, branch_name)
             except Exception as e:
