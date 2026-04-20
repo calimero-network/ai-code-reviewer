@@ -613,6 +613,8 @@ async def _update_docs_async(
     )
 
     if result.skipped:
+        for d in result.failed:
+            console.print(f"[yellow]⚠️  Skipped {d.suggestion.file}: {d.error}[/yellow]")
         console.print(f"[dim]ℹ️  {result.skip_reason}[/dim]")
         return
 

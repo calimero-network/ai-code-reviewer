@@ -62,6 +62,9 @@ async def run_doc_update(
     """
     from ai_reviewer.docs.analyzer import DocAnalyzer, DocSuggestion, generate_doc_drafts
 
+    if not doc_generation.enabled:
+        return DocUpdateResult(skipped=True, skip_reason="doc_generation not enabled")
+
     pr = gh.get_pull_request(repo, pr_number)
     base_branch = base or pr.base.ref
 
@@ -74,6 +77,15 @@ async def run_doc_update(
     ref = pr.merge_commit_sha or pr.head.sha
     repo_config = gh.load_repo_config(repo, ref)
     doc_config = repo_config.get("documentation") if repo_config else None
+
+    # Apply per-repo doc_generation overrides on top of the server's defaults.
+    repo_docgen: dict = repo_config.get("doc_generation", {}) if repo_config else {}
+    if repo_docgen.get("enabled") is False:
+        return DocUpdateResult(skipped=True, skip_reason="doc_generation disabled in repo config")
+    effective_model: str = repo_docgen.get("model") or doc_generation.model
+    effective_max_files: int = int(repo_docgen.get("max_files") or doc_generation.max_files)
+    effective_pr_labels: list[str] = repo_docgen.get("pr_labels") or doc_generation.pr_labels
+    effective_pr_draft: bool = repo_docgen.get("pr_draft", doc_generation.pr_draft)
 
     pr_files = list(pr.get_files())
     changed_paths = [f.filename for f in pr_files]
@@ -90,12 +102,12 @@ async def run_doc_update(
         )
         mapping_suggestions = analyzer.check_source_to_docs_mapping()
 
-    # HTML scan suggestions (static_docs_dirs)
+    # HTML scan suggestions — repo config takes precedence over server defaults.
     html_suggestions: list[DocSuggestion] = []
     effective_static_dirs: list[str] = (
-        doc_config.get("static_docs_dirs", doc_generation.static_docs_dirs)
-        if doc_config
-        else doc_generation.static_docs_dirs
+        repo_docgen.get("static_docs_dirs")
+        or (doc_config.get("static_docs_dirs") if doc_config else None)
+        or doc_generation.static_docs_dirs
     )
     if effective_static_dirs:
         already_covered = {s.file for s in mapping_suggestions}
@@ -124,8 +136,8 @@ async def run_doc_update(
         ref=ref,
         anthropic_cfg=anthropic_cfg,
         gh=gh,
-        model=doc_generation.model,
-        max_files=doc_generation.max_files,
+        model=effective_model,
+        max_files=effective_max_files,
     )
 
     successful = [d for d in drafts if d.updated_content and not d.error]
@@ -149,7 +161,7 @@ async def run_doc_update(
         pr_title=f"docs: auto-update for PR #{pr_number} — {pr.title}",
         pr_body=_build_pr_body(pr_number, pr.html_url, successful),
         assignee=pr.user.login if pr.user else None,
-        labels=doc_generation.pr_labels,
-        draft=doc_generation.pr_draft,
+        labels=effective_pr_labels,
+        draft=effective_pr_draft,
     )
     return DocUpdateResult(successful=successful, failed=failed, pr_url=pr_url)
