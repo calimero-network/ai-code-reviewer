@@ -112,7 +112,7 @@ class DocReviewSettings:
 
     enabled: bool = True
     architecture_paths: list[str] = field(
-        default_factory=lambda: ["architecture/", "docs/", "doc/"]
+        default_factory=lambda: ["architecture/", "docs/", "doc/", "docs-static/"]
     )
     convention_files: list[str] = field(
         default_factory=lambda: [
@@ -137,7 +137,14 @@ class DocGenerationSettings:
 
     enabled: bool = False
     model: str = "claude-sonnet-4-6"
-    max_files: int = 5
+    max_files: int = 15
+    # Directories containing static HTML docs (GitHub Pages sites).
+    # When set, update-docs scans these dirs for HTML pages to update on merge.
+    static_docs_dirs: list[str] = field(default_factory=lambda: ["docs/", "docs-static/"])
+    # Labels to apply to auto-generated doc update PRs.
+    pr_labels: list[str] = field(default_factory=lambda: ["automated-docs", "documentation"])
+    # Open doc update PRs as drafts so they don't appear ready to merge.
+    pr_draft: bool = True
 
 
 @dataclass
@@ -321,7 +328,9 @@ def _parse_config(raw: dict[str, Any]) -> Config:
     doc_raw = raw.get("doc_review", {})
     doc_review = DocReviewSettings(
         enabled=doc_raw.get("enabled", True),
-        architecture_paths=doc_raw.get("architecture_paths", ["architecture/", "docs/", "doc/"]),
+        architecture_paths=doc_raw.get(
+            "architecture_paths", ["architecture/", "docs/", "doc/", "docs-static/"]
+        ),
         convention_files=doc_raw.get(
             "convention_files",
             ["AGENTS.md", "CLAUDE.md", "CONTRIBUTING.md", ".cursor/rules/README.md"],
@@ -334,7 +343,10 @@ def _parse_config(raw: dict[str, Any]) -> Config:
     doc_generation = DocGenerationSettings(
         enabled=docgen_raw.get("enabled", False),
         model=docgen_raw.get("model", "claude-sonnet-4-6"),
-        max_files=docgen_raw.get("max_files", 5),
+        max_files=docgen_raw.get("max_files", 15),
+        static_docs_dirs=docgen_raw.get("static_docs_dirs", ["docs/", "docs-static/"]),
+        pr_labels=docgen_raw.get("pr_labels", ["automated-docs", "documentation"]),
+        pr_draft=docgen_raw.get("pr_draft", True),
     )
 
     return Config(

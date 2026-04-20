@@ -45,12 +45,20 @@ class PREvent:
 
 # Review trigger - will be set by the application
 _review_handler: Callable | None = None
+# Push trigger for doc-update-on-merge - will be set by the application
+_push_handler: Callable | None = None
 
 
 def set_review_handler(handler: Callable) -> None:
     """Set the review handler function."""
     global _review_handler
     _review_handler = handler
+
+
+def set_push_handler(handler: Callable) -> None:
+    """Set the push handler used to trigger doc updates on merge."""
+    global _push_handler
+    _push_handler = handler
 
 
 def _get_github_app_token(app_id: str, private_key: str, repo: str) -> str | None:
@@ -379,6 +387,57 @@ def _setup_default_review_handler() -> None:
     set_review_handler(default_review_handler)
 
 
+def _setup_default_push_handler() -> None:
+    """Set up a default push handler that runs update-docs on merges to main/master."""
+    from ai_reviewer.cli import _update_docs_async
+
+    async def default_push_handler(repo: str, ref: str, head_commit_message: str) -> None:
+        branch = ref.removeprefix("refs/heads/")
+        if branch not in ("main", "master"):
+            logger.debug("Push to %s — not main/master, skipping doc update", branch)
+            return
+
+        github_token = os.environ.get("GITHUB_TOKEN")
+        if not github_token:
+            logger.error("GITHUB_TOKEN not set — cannot run update-docs")
+            return
+
+        # Extract merged PR number from commit message ("Merge pull request #123")
+        import re
+
+        match = re.search(r"pull request #(\d+)", head_commit_message)
+        if not match:
+            logger.info("Push to %s — no merged PR number in commit message, skipping", branch)
+            return
+
+        pr_number = int(match.group(1))
+        logger.info("Running update-docs for %s PR #%d (push to %s)", repo, pr_number, branch)
+        try:
+            await _update_docs_async(
+                repo=repo,
+                pr_number=pr_number,
+                dry_run=False,
+                base=branch,
+                config_path=None,
+            )
+        except Exception as e:
+            logger.exception("update-docs failed for %s PR #%d: %s", repo, pr_number, e)
+
+    set_push_handler(default_push_handler)
+
+
+async def handle_push_event(payload: dict) -> None:
+    """Handle a push event by running update-docs when a PR merges to main/master."""
+    ref = payload.get("ref", "")
+    repo = payload.get("repository", {}).get("full_name", "")
+    head_commit_message = payload.get("head_commit", {}).get("message", "")
+
+    if _push_handler:
+        await _push_handler(repo=repo, ref=ref, head_commit_message=head_commit_message)
+    else:
+        logger.warning("No push handler configured")
+
+
 async def handle_pr_event(event: PREvent) -> None:
     """Handle a PR event by triggering a review if appropriate.
 
@@ -446,9 +505,11 @@ def create_webhook_app(webhook_secret: str | None = None) -> FastAPI:
     if webhook_secret is None:
         webhook_secret = os.environ.get("GITHUB_WEBHOOK_SECRET")
 
-    # Set up review handler from environment if not already set
+    # Set up review and push handlers from environment if not already set
     if _review_handler is None:
         _setup_default_review_handler()
+    if _push_handler is None:
+        _setup_default_push_handler()
 
     app = FastAPI(
         title="AI Code Reviewer Webhook",
@@ -493,6 +554,9 @@ def create_webhook_app(webhook_secret: str | None = None) -> FastAPI:
 
         elif event_type == "issue_comment":
             asyncio.create_task(_handle_issue_comment_event(payload))
+
+        elif event_type == "push":
+            asyncio.create_task(handle_push_event(payload))
 
         elif event_type == "ping":
             logger.info("Received ping from GitHub")

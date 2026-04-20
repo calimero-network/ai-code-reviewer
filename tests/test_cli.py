@@ -146,7 +146,11 @@ class TestUpdateDocsCLI:
             mock_cfg.return_value.anthropic = MagicMock(api_key="sk-test")
             mock_cfg.return_value.github.token = "ghp_test"
             mock_cfg.return_value.doc_generation = MagicMock(
-                model="claude-sonnet-4-6", max_files=5
+                model="claude-sonnet-4-6",
+                max_files=15,
+                static_docs_dirs=["docs/", "docs-static/"],
+                pr_labels=["automated-docs"],
+                pr_draft=True,
             )
 
             mock_pr = MagicMock()
@@ -157,11 +161,13 @@ class TestUpdateDocsCLI:
             gh_instance = MockGH.return_value
             gh_instance.get_pull_request.return_value = mock_pr
             gh_instance.load_repo_config.return_value = {}  # no doc_generation config
+            gh_instance.has_open_doc_update_pr.return_value = False
+            gh_instance.get_html_files_in_dirs.return_value = []  # no HTML files found
 
             result = runner.invoke(cli, ["update-docs", "org/repo", "42", "--dry-run"])
 
         assert result.exit_code == 0
-        assert "Nothing to do" in result.output or "No source_to_docs_mapping" in result.output
+        assert "No stale documentation detected" in result.output
 
 
 class TestDocGenerationSettings:
@@ -173,7 +179,11 @@ class TestDocGenerationSettings:
         s = DocGenerationSettings()
         assert s.enabled is False
         assert s.model == "claude-sonnet-4-6"
-        assert s.max_files == 5
+        assert s.max_files == 15
+        assert "docs/" in s.static_docs_dirs
+        assert "docs-static/" in s.static_docs_dirs
+        assert s.pr_draft is True
+        assert "automated-docs" in s.pr_labels
 
     def test_parsed_from_config(self):
         from ai_reviewer.config import _parse_config

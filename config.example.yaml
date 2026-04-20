@@ -167,6 +167,7 @@ doc_review:
     - "architecture/"
     - "docs/"
     - "doc/"
+    - "docs-static/"
   convention_files:
     - "AGENTS.md"
     - "CLAUDE.md"
@@ -177,17 +178,32 @@ doc_review:
 # ============================================================================
 # DOCUMENTATION DRAFT GENERATION
 # ============================================================================
-# When enabled, the doc reviewer calls Claude Sonnet to draft updated sections
-# for stale documentation files found via source_to_docs_mapping.  Drafts are
-# posted as expandable suggestions inside the existing doc-bot PR comment so
-# the author can review and apply them manually — nothing is committed or
-# merged automatically.
+# When enabled, the doc reviewer calls Claude Sonnet to:
+#   1. Generate full-file updates for stale Markdown docs (source_to_docs_mapping).
+#   2. Scan static HTML doc directories (docs/ or docs-static/) and update any
+#      pages that are made inaccurate by the merged PR.
+# On merge to main/master a new DRAFT PR is opened with the changes for human
+# review — nothing is auto-merged.
 #
 # Disabled by default. Enable per-repo in .ai-reviewer.yaml.
 doc_generation:
   enabled: false
-  model: claude-sonnet-4-6   # Sonnet is sufficient for prose drafting
-  max_files: 5               # cap Sonnet calls per review run
+  model: claude-sonnet-4-6   # Sonnet is sufficient for prose/HTML drafting
+  max_files: 15              # max Claude calls per run (HTML pages + Markdown)
+
+  # Directories containing static HTML GitHub Pages docs.
+  # update-docs will scan these for .html files and update stale pages on merge.
+  static_docs_dirs:
+    - "docs/"
+    - "docs-static/"
+
+  # Labels applied to the auto-generated doc update PR.
+  pr_labels:
+    - "automated-docs"
+    - "documentation"
+
+  # Open the doc PR as a draft so it doesn't appear ready to merge immediately.
+  pr_draft: true
 
 # ============================================================================
 # LOGGING

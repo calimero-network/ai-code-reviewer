@@ -26,7 +26,7 @@ from ai_reviewer.github.client import (
     should_skip_review,
 )
 from ai_reviewer.github.formatter import GitHubFormatter, format_review_as_json
-from ai_reviewer.github.webhook import create_webhook_app, set_review_handler
+from ai_reviewer.github.webhook import create_webhook_app, set_push_handler, set_review_handler
 from ai_reviewer.models.review import ConsolidatedReview
 from ai_reviewer.review import review_pr as run_review
 
@@ -506,6 +506,9 @@ def _run_doc_review(
         console.print("[dim]ℹ️  Documentation review disabled in repo .ai-reviewer.yaml[/dim]")
         return
 
+    docgen_settings = getattr(config, "doc_generation", None)
+    static_docs_dirs = docgen_settings.static_docs_dirs if docgen_settings else None
+
     analyzer = DocAnalyzer(
         changed_paths=changed_paths,
         changed_paths_with_status=changed_paths_with_status,
@@ -513,6 +516,7 @@ def _run_doc_review(
         doc_config=doc_config,
         architecture_dirs=doc_settings.architecture_paths,
         convention_files=doc_settings.convention_files,
+        static_docs_dirs=static_docs_dirs,
     )
     suggestions = analyzer.run()
 
@@ -591,7 +595,10 @@ async def _update_docs_async(
 
     docgen = getattr(config, "doc_generation", None)
     model = docgen.model if docgen else "claude-sonnet-4-6"
-    max_files = docgen.max_files if docgen else 5
+    max_files = docgen.max_files if docgen else 15
+    static_docs_dirs = docgen.static_docs_dirs if docgen else ["docs/", "docs-static/"]
+    pr_labels = docgen.pr_labels if docgen else ["automated-docs", "documentation"]
+    pr_draft = docgen.pr_draft if docgen else True
 
     gh = GitHubClient(config.github.token)
     console.print(f"📄 Fetching PR #{pr_number} from [bold]{repo}[/bold]...")
@@ -599,39 +606,72 @@ async def _update_docs_async(
 
     base_branch = base or pr.base.ref
 
+    # Idempotency guard: skip if a doc-update PR is already open for this base branch.
+    if not dry_run and gh.has_open_doc_update_pr(repo, base_branch):
+        console.print(
+            f"[dim]ℹ️  A doc-update PR is already open for {base_branch} — skipping.[/dim]"
+        )
+        return
+
     # Load repo config for source_to_docs_mapping
     repo_config = gh.load_repo_config(repo, pr.merge_commit_sha or pr.head.sha)
     doc_config = repo_config.get("documentation") if repo_config else None
 
-    if not doc_config or not doc_config.get("source_to_docs_mapping"):
-        console.print("[yellow]No source_to_docs_mapping found in .ai-reviewer.yaml — nothing to do.[/yellow]")
-        return
-
-    # Run DocAnalyzer to find stale docs
+    # Run DocAnalyzer to find stale docs via source_to_docs_mapping
     pr_files = list(pr.get_files())
     changed_paths = [f.filename for f in pr_files]
     changed_paths_with_status = {f.filename: getattr(f, "status", "modified") for f in pr_files}
 
-    analyzer = DocAnalyzer(
-        changed_paths=changed_paths,
-        changed_paths_with_status=changed_paths_with_status,
-        existing_repo_paths=set(),
-        doc_config=doc_config,
-    )
-    mapping_suggestions = analyzer.check_source_to_docs_mapping()
+    mapping_suggestions: list = []
+    if doc_config and doc_config.get("source_to_docs_mapping"):
+        analyzer = DocAnalyzer(
+            changed_paths=changed_paths,
+            changed_paths_with_status=changed_paths_with_status,
+            existing_repo_paths=set(),
+            doc_config=doc_config,
+        )
+        mapping_suggestions = analyzer.check_source_to_docs_mapping()
 
-    if not mapping_suggestions:
+    # Scan static HTML doc dirs if configured (union with mapping suggestions)
+    ref = pr.merge_commit_sha or pr.head.sha
+    html_suggestions: list = []
+    effective_static_dirs = (
+        doc_config.get("static_docs_dirs", static_docs_dirs)
+        if doc_config
+        else static_docs_dirs
+    )
+    if effective_static_dirs:
+        already_covered = {s.file for s in mapping_suggestions}
+        html_paths = gh.get_html_files_in_dirs(repo, ref, effective_static_dirs)
+        for html_path in html_paths:
+            if html_path not in already_covered:
+                from ai_reviewer.docs.analyzer import DocSuggestion
+                html_suggestions.append(
+                    DocSuggestion(
+                        file=html_path,
+                        reason=(
+                            f"Static HTML page in `{html_path}` — scanning for updates "
+                            "triggered by code changes in this PR."
+                        ),
+                    )
+                )
+
+    all_suggestions = mapping_suggestions + html_suggestions
+
+    if not all_suggestions:
         console.print("[green]✅ No stale documentation detected for this PR.[/green]")
         return
 
-    console.print(f"📝 Found {len(mapping_suggestions)} stale doc file(s): {', '.join(s.file for s in mapping_suggestions)}")
+    console.print(
+        f"📝 Found {len(all_suggestions)} doc candidate(s): "
+        f"{', '.join(s.file for s in all_suggestions)}"
+    )
     console.print(f"🤖 Generating updated content with {model}...")
 
     diff = gh.get_pr_diff(pr)
-    ref = pr.merge_commit_sha or pr.head.sha
 
     drafts = await generate_doc_drafts(
-        suggestions=mapping_suggestions,
+        suggestions=all_suggestions,
         diff=diff,
         repo_name=repo,
         ref=ref,
@@ -649,14 +689,13 @@ async def _update_docs_async(
             console.print(f"[yellow]⚠️  Skipped {d.suggestion.file}: {d.error}[/yellow]")
 
     if not successful:
-        console.print("[red]No docs could be generated — check errors above.[/red]")
-        sys.exit(1)
+        console.print("[green]✅ No doc updates needed after scanning all candidates.[/green]")
+        return
 
     if dry_run:
         console.print(f"\n[yellow]Dry run — would update {len(successful)} file(s):[/yellow]\n")
         for draft in successful:
             console.print(f"[bold]━━ {draft.suggestion.file} ━━[/bold]")
-            # Show first 60 lines as preview
             preview_lines = draft.updated_content.splitlines()[:60]
             console.print("\n".join(preview_lines))
             if len(draft.updated_content.splitlines()) > 60:
@@ -687,7 +726,8 @@ async def _update_docs_async(
             pr_title=f"docs: auto-update for PR #{pr_number} — {pr.title}",
             pr_body=pr_body,
             assignee=pr.user.login if pr.user else None,
-            labels=["automated-docs"],
+            labels=pr_labels,
+            draft=pr_draft,
         )
         console.print(f"[green]✅ Doc update PR opened: {url}[/green]")
     except Exception as e:
@@ -765,6 +805,27 @@ def serve(port: int, host: str, config_path: str | None) -> None:
         await review_pr_async(repo=repo, pr_number=pr_number, output="github")
 
     set_review_handler(review_handler)
+
+    # Set up push handler for doc-update-on-merge
+    async def push_handler(repo: str, ref: str, head_commit_message: str) -> None:
+        import re
+
+        branch = ref.removeprefix("refs/heads/")
+        if branch not in ("main", "master"):
+            return
+        match = re.search(r"pull request #(\d+)", head_commit_message)
+        if not match:
+            return
+        pr_number_from_push = int(match.group(1))
+        await _update_docs_async(
+            repo=repo,
+            pr_number=pr_number_from_push,
+            dry_run=False,
+            base=branch,
+            config_path=None,
+        )
+
+    set_push_handler(push_handler)
 
     # Create and run app
     app = create_webhook_app(config.github.webhook_secret)

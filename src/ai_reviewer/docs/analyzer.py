@@ -28,7 +28,10 @@ DEFAULT_CONVENTION_FILES = [
     ".cursor/rules/README.md",
 ]
 
-DEFAULT_ARCHITECTURE_DIRS = ["architecture/", "docs/", "doc/"]
+DEFAULT_ARCHITECTURE_DIRS = ["architecture/", "docs/", "doc/", "docs-static/"]
+
+# Directories that may contain static HTML docs (GitHub Pages sites).
+DEFAULT_STATIC_DOC_DIRS: list[str] = ["docs/", "docs-static/"]
 
 _MANIFEST_FILES = {
     "pyproject.toml",
@@ -160,6 +163,7 @@ class DocAnalyzer:
         doc_config: dict | None = None,
         architecture_dirs: list[str] | None = None,
         convention_files: list[str] | None = None,
+        static_docs_dirs: list[str] | None = None,
     ) -> None:
         self.changed_paths = changed_paths
         self.changed_paths_with_status = changed_paths_with_status
@@ -167,6 +171,13 @@ class DocAnalyzer:
         self.doc_config = doc_config
         self.architecture_dirs = architecture_dirs or DEFAULT_ARCHITECTURE_DIRS
         self.convention_files = convention_files or DEFAULT_CONVENTION_FILES
+        # static_docs_dirs: explicit override or fall through to doc_config then default
+        if static_docs_dirs is not None:
+            self.static_docs_dirs = static_docs_dirs
+        elif doc_config is not None:
+            self.static_docs_dirs = doc_config.get("static_docs_dirs", DEFAULT_STATIC_DOC_DIRS)
+        else:
+            self.static_docs_dirs = DEFAULT_STATIC_DOC_DIRS
 
     def check_architecture_folder(self) -> list[DocSuggestion]:
         for d in self.architecture_dirs:
@@ -215,26 +226,69 @@ class DocAnalyzer:
             return []
 
         changed_set = set(self.changed_paths)
-        unupdated_targets: dict[str, str] = {}
+        # Track (glob_pattern, any_source_deleted) per unupdated target
+        unupdated_targets: dict[str, tuple[str, bool]] = {}
 
         for glob_pattern, doc_targets in mapping.items():
             matched_sources = [p for p in self.changed_paths if fnmatch.fnmatch(p, glob_pattern)]
             if not matched_sources:
                 continue
+            any_deleted = any(
+                self.changed_paths_with_status.get(p) == "removed" for p in matched_sources
+            )
             for target in doc_targets:
                 if target not in changed_set and target not in unupdated_targets:
-                    unupdated_targets[target] = glob_pattern
+                    unupdated_targets[target] = (glob_pattern, any_deleted)
 
-        return [
-            DocSuggestion(
-                file=target,
-                reason=(
+        suggestions = []
+        for target, (pattern, deleted) in sorted(unupdated_targets.items()):
+            if deleted:
+                reason = (
+                    f"Files matching `{pattern}` were **deleted** but `{target}` "
+                    "was not updated — references to removed code may now be stale "
+                    "(per `source_to_docs_mapping`)."
+                )
+            else:
+                reason = (
                     f"Files matching `{pattern}` were changed but `{target}` "
                     "was not updated (per `source_to_docs_mapping`)."
-                ),
-            )
-            for target, pattern in sorted(unupdated_targets.items())
-        ]
+                )
+            suggestions.append(DocSuggestion(file=target, reason=reason))
+        return suggestions
+
+    def check_static_html_docs(self) -> list[DocSuggestion]:
+        """Flag static HTML doc directories when architecture-impacting changes occur.
+
+        Only emits suggestions when the PR touches something architecture-relevant
+        AND a configured static docs directory actually exists in the repo.
+        """
+        if not self.static_docs_dirs:
+            return []
+        if not is_architecture_impacting(
+            self.changed_paths,
+            self.changed_paths_with_status,
+            self.existing_repo_paths,
+        ):
+            return []
+
+        suggestions = []
+        already_covered = {s.file for s in self.check_source_to_docs_mapping()}
+        for d in self.static_docs_dirs:
+            normalized = d if d.endswith("/") else d + "/"
+            # Only flag dirs that exist in the repo and aren't already flagged by the mapping
+            if normalized in self.existing_repo_paths and normalized not in already_covered:
+                suggestions.append(
+                    DocSuggestion(
+                        file=normalized,
+                        reason=(
+                            f"Static HTML docs in `{normalized}` may need updating — "
+                            "architecture-impacting changes detected. "
+                            "On merge, `update-docs` will scan this directory and open a PR "
+                            "if any pages need to change."
+                        ),
+                    )
+                )
+        return suggestions
 
     def run(self) -> list[DocSuggestion]:
         if self.doc_config is not None and not self.doc_config.get("enabled", True):
@@ -244,6 +298,7 @@ class DocAnalyzer:
         suggestions.extend(self.check_architecture_folder())
         suggestions.extend(self.check_convention_files())
         suggestions.extend(self.check_source_to_docs_mapping())
+        suggestions.extend(self.check_static_html_docs())
 
         seen: set[str] = set()
         deduped: list[DocSuggestion] = []
@@ -278,8 +333,39 @@ Rules:
 - Do not add any commentary before or after the file content — just the file.
 """
 
+_DOC_DRAFT_SYSTEM_HTML = """\
+You are a technical writer updating a static HTML documentation page after a code change.
+Given the current HTML file and a code diff, decide whether the page needs updating.
+
+If NO update is needed, return exactly this single token and nothing else:
+NO_UPDATE_NEEDED
+
+If an update IS needed, return the COMPLETE updated HTML file.
+
+Rules for HTML updates:
+- Preserve ALL HTML structure, tags, attributes, CSS classes, inline styles, and scripts exactly.
+- Only update human-readable text content that is made inaccurate by the code change.
+- Do not reformat, re-indent, or restructure the HTML.
+- Do not escape or unescape entities that were already correct.
+- Do not add commentary before or after the HTML — return only the file or NO_UPDATE_NEEDED.
+"""
+
+# Sentinel returned by Claude when an HTML page does not need updating.
+_NO_UPDATE_SENTINEL = "NO_UPDATE_NEEDED"
+
 _MAX_DIFF_CHARS = 4000
 _MAX_DOC_CHARS = 8000
+_MAX_DOC_CHARS_HTML = 20_000
+
+
+import re as _re
+
+
+def _strip_html_tags(html: str) -> str:
+    """Strip HTML markup to plain text for relevance comparison."""
+    text = _re.sub(r"<[^>]+>", " ", html)
+    text = _re.sub(r"\s+", " ", text)
+    return text.strip()
 
 
 async def generate_doc_drafts(
@@ -290,16 +376,20 @@ async def generate_doc_drafts(
     anthropic_cfg: object,
     gh: object,
     model: str = "claude-sonnet-4-6",
-    max_files: int = 5,
+    max_files: int = 15,
 ) -> list[DocDraft]:
     """Generate AI-drafted full-file updates for stale documentation files.
 
-    Only processes suggestions that map to real files (produced by
-    ``check_source_to_docs_mapping``).  Architecture/convention suggestions
-    without a concrete file target are skipped.
+    Processes suggestions that map to real files.  Directory-level suggestions
+    (path ending with ``/``) are skipped — those are handled by scanning the
+    directory for HTML files in the caller.
+
+    For HTML files, uses a separate prompt that allows Claude to return
+    ``NO_UPDATE_NEEDED`` when the page content is already accurate.
 
     Returns one ``DocDraft`` per processed suggestion with the complete updated
-    file content ready for committing.
+    file content ready for committing.  Drafts where ``error`` is set or
+    ``updated_content`` is empty should be discarded by the caller.
     """
     from ai_reviewer.agents.anthropic_client import AnthropicClient  # local to avoid circular
 
@@ -310,6 +400,10 @@ async def generate_doc_drafts(
 
     async with AnthropicClient(anthropic_cfg) as client:  # type: ignore[arg-type]
         for suggestion in candidates:
+            is_html = suggestion.file.lower().endswith(".html")
+            max_chars = _MAX_DOC_CHARS_HTML if is_html else _MAX_DOC_CHARS
+            system_prompt = _DOC_DRAFT_SYSTEM_HTML if is_html else _DOC_DRAFT_SYSTEM
+
             try:
                 raw = gh.get_file_contents(repo_name, suggestion.file, ref)  # type: ignore[union-attr]
                 if isinstance(raw, list):
@@ -326,26 +420,43 @@ async def generate_doc_drafts(
                 drafts.append(DocDraft(suggestion=suggestion, updated_content="", error=str(exc)))
                 continue
 
-            truncated_doc = current_content[:_MAX_DOC_CHARS] + (
-                "\n…(truncated)" if len(current_content) > _MAX_DOC_CHARS else ""
+            truncated_doc = current_content[:max_chars] + (
+                "\n…(truncated)" if len(current_content) > max_chars else ""
             )
 
-            user_prompt = (
-                f"## Documentation File: {suggestion.file}\n\n"
-                f"{truncated_doc}\n\n"
-                f"## Code Diff\n\n{truncated_diff}\n\n"
-                f"## Why This File Needs Updating\n\n{suggestion.reason}\n\n"
-                "Return the complete updated file content."
-            )
+            # For HTML files pass stripped text after the raw HTML so Claude can
+            # judge relevance without parsing markup.
+            if is_html:
+                plain_text = _strip_html_tags(current_content)[:2000]
+                user_prompt = (
+                    f"## HTML File: {suggestion.file}\n\n"
+                    f"### Raw HTML\n\n{truncated_doc}\n\n"
+                    f"### Plain-text content (for relevance check)\n\n{plain_text}\n\n"
+                    f"## Code Diff\n\n{truncated_diff}\n\n"
+                    f"## Why This File May Need Updating\n\n{suggestion.reason}\n\n"
+                    "Return NO_UPDATE_NEEDED if unchanged, or the complete updated HTML file."
+                )
+            else:
+                user_prompt = (
+                    f"## Documentation File: {suggestion.file}\n\n"
+                    f"{truncated_doc}\n\n"
+                    f"## Code Diff\n\n{truncated_diff}\n\n"
+                    f"## Why This File Needs Updating\n\n{suggestion.reason}\n\n"
+                    "Return the complete updated file content."
+                )
 
             try:
                 result = await client.run_completion(
                     model=model,
-                    system=_DOC_DRAFT_SYSTEM,
+                    system=system_prompt,
                     user=user_prompt,
                     max_tokens=8192,
                 )
-                drafts.append(DocDraft(suggestion=suggestion, updated_content=result.strip()))
+                content = result.strip()
+                if content == _NO_UPDATE_SENTINEL:
+                    # Claude determined no update is needed — skip without an error
+                    continue
+                drafts.append(DocDraft(suggestion=suggestion, updated_content=content))
             except Exception as exc:
                 drafts.append(DocDraft(suggestion=suggestion, updated_content="", error=str(exc)))
 
