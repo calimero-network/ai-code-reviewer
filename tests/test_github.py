@@ -2460,7 +2460,7 @@ class TestCreateDocUpdatePR:
     """Tests for GitHubClient.create_doc_update_pr()."""
 
     def _make_client(self):
-        from unittest.mock import MagicMock, patch
+        from unittest.mock import patch
 
         from ai_reviewer.github.client import GitHubClient
 
@@ -2469,7 +2469,7 @@ class TestCreateDocUpdatePR:
         return client
 
     def test_creates_branch_and_commits_files(self):
-        from unittest.mock import MagicMock, call, patch
+        from unittest.mock import MagicMock, patch
 
         from ai_reviewer.docs.analyzer import DocDraft, DocSuggestion
         from ai_reviewer.github.client import GitHubClient
