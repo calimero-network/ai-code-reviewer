@@ -180,6 +180,9 @@ class GitHubFormatter:
         consensus_pct = int(review.review_quality_score * 100)
         time_sec = review.total_review_time_ms / 1000
 
+        if review.id == "lgtm-fast-path":
+            return f"**All previous comments resolved** | Quality score: {consensus_pct}%"
+
         return (
             f"**Reviewed by {review.agent_count} agents** | "
             f"Quality score: {consensus_pct}% | "
