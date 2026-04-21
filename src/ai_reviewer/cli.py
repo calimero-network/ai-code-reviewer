@@ -486,8 +486,16 @@ def _run_doc_review(
 
     console.print("📄 Running documentation review...")
 
-    # Probe the repo for convention files and architecture directories
-    probe_paths = doc_settings.convention_files + doc_settings.architecture_paths
+    static_docs_dirs = config.doc_generation.static_docs_dirs
+
+    # Probe the repo for convention files, architecture directories, and static doc dirs.
+    # static_docs_dirs must be included here so check_static_html_docs can find them in
+    # existing_repo_paths — entries absent from the probe are silently skipped.
+    probe_paths = list(
+        dict.fromkeys(
+            doc_settings.convention_files + doc_settings.architecture_paths + static_docs_dirs
+        )
+    )
     try:
         existing_repo_paths = gh.probe_repo_paths(repo, pr.head.sha, probe_paths)
     except Exception as e:
@@ -506,8 +514,6 @@ def _run_doc_review(
     if doc_config is not None and not doc_config.get("enabled", True):
         console.print("[dim]ℹ️  Documentation review disabled in repo .ai-reviewer.yaml[/dim]")
         return
-
-    static_docs_dirs = config.doc_generation.static_docs_dirs
 
     analyzer = DocAnalyzer(
         changed_paths=changed_paths,
