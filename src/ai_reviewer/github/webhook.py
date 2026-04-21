@@ -137,7 +137,8 @@ def _setup_default_review_handler() -> None:
     This is used when running as a standalone server (e.g., Cloud Run)
     without the CLI's explicit handler setup.
     """
-    from ai_reviewer.config import AnthropicApiConfig, load_config
+    from ai_reviewer.cli import _run_doc_review
+    from ai_reviewer.config import AnthropicApiConfig, Config, GitHubConfig, load_config
     from ai_reviewer.github.client import (
         GitHubClient,
         ReviewMeta,
@@ -380,6 +381,16 @@ def _setup_default_review_handler() -> None:
             if delta.fixed_findings:
                 resolved = gh.resolve_fixed_comments(pr, delta)
                 logger.info(f"Resolved {resolved} comments")
+
+            _run_doc_review(
+                gh=gh,
+                pr=pr,
+                repo=repo,
+                config=webhook_config
+                or Config(anthropic=None, github=GitHubConfig(token=""), agents=[]),
+                doc_check=None,
+                dry_run=False,
+            )
 
         except Exception as e:
             logger.exception(f"Error reviewing {repo} PR #{pr_number}: {e}")

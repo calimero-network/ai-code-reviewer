@@ -38,7 +38,7 @@ DEFAULT_CONVENTION_FILES = [
 DEFAULT_ARCHITECTURE_DIRS = ["architecture/", "docs/", "doc/", "docs-static/"]
 
 # Directories that may contain static HTML docs (GitHub Pages sites).
-DEFAULT_STATIC_DOC_DIRS: list[str] = ["docs/", "docs-static/"]
+DEFAULT_STATIC_DOC_DIRS: list[str] = ["architecture/", "docs/", "docs-static/"]
 
 _MANIFEST_FILES = {
     "pyproject.toml",

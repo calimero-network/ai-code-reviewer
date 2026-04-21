@@ -140,7 +140,9 @@ class DocGenerationSettings:
     max_files: int = 15
     # Directories containing static HTML docs (GitHub Pages sites).
     # When set, update-docs scans these dirs for HTML pages to update on merge.
-    static_docs_dirs: list[str] = field(default_factory=lambda: ["docs/", "docs-static/"])
+    static_docs_dirs: list[str] = field(
+        default_factory=lambda: ["architecture/", "docs/", "docs-static/"]
+    )
     # Labels to apply to auto-generated doc update PRs.
     pr_labels: list[str] = field(default_factory=lambda: ["automated-docs", "documentation"])
     # Open doc update PRs as drafts so they don't appear ready to merge.
@@ -344,7 +346,9 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         enabled=docgen_raw.get("enabled", False),
         model=docgen_raw.get("model", "claude-sonnet-4-6"),
         max_files=docgen_raw.get("max_files", 15),
-        static_docs_dirs=docgen_raw.get("static_docs_dirs", ["docs/", "docs-static/"]),
+        static_docs_dirs=docgen_raw.get(
+            "static_docs_dirs", ["architecture/", "docs/", "docs-static/"]
+        ),
         pr_labels=docgen_raw.get("pr_labels", ["automated-docs", "documentation"]),
         pr_draft=docgen_raw.get("pr_draft", True),
     )
