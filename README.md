@@ -247,6 +247,64 @@ The repository ships structured AI context to help coding assistants work with t
 
 The `review-pr` command includes a built-in documentation review that runs alongside the AI code review. It detects architecture-impacting changes (new modules, manifest edits, CI changes, infrastructure files) and checks whether convention files like `CLAUDE.md` or `AGENTS.md` were updated. For repos with `.ai-reviewer.yaml`, it also checks explicit `source_to_docs_mapping` rules. The check is rule-based (no LLM calls) and posts a separate PR comment with suggestions. Disable with `--no-doc-check` or `doc_review.enabled: false` in config.
 
+### Automatic Doc Update PRs
+
+When stale documentation is detected, the reviewer can automatically generate updated file content and open a PR with the real changes — not just a comment telling you to update them.
+
+**Flow:**
+1. Feature PR merges to `main`
+2. CI triggers `ai-reviewer update-docs` on the merge
+3. `update-docs` runs `DocAnalyzer`, finds stale docs via `source_to_docs_mapping`
+4. Calls **Claude Sonnet** to rewrite each stale file in full
+5. Commits the updated files to a new branch `docs/auto-<sha>`
+6. Opens a PR against `main`, assigned to the original PR author
+7. Author reviews the diff and merges — **nothing auto-merges**
+
+**Setup: two steps**
+
+1. Enable generation in the repo's `.ai-reviewer.yaml`:
+
+```yaml
+documentation:
+  enabled: true
+  source_to_docs_mapping:
+    "src/**": [docs/api.md, README.md]
+
+doc_generation:
+  enabled: true
+  model: claude-sonnet-4-6
+  max_files: 5
+```
+
+2. Add a one-line workflow to each repo (calls the shared reusable workflow):
+
+```yaml
+# .github/workflows/doc-update.yaml
+on:
+  push:
+    branches: [main, master]
+jobs:
+  doc-update:
+    uses: calimero-network/ai-code-reviewer/.github/workflows/doc-update.yaml@main
+    secrets:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      GH_PAT: ${{ secrets.GH_PAT }}
+```
+
+No copy-pasted workflow logic — the shared workflow lives in this repo and all repos call it via `uses:`.
+
+**Test locally before wiring up CI:**
+
+```bash
+# Preview what would be generated — no PR opened, no files committed
+ai-reviewer update-docs calimero-network/auth-frontend 42 --dry-run
+
+# Actually generate and open the PR
+ai-reviewer update-docs calimero-network/auth-frontend 42
+```
+
+Cost: ~$0.05–0.15 per merge with stale docs (Claude Sonnet, 1–5 files). Zero LLM cost when no stale docs are detected.
+
 ---
 
 ## Related Projects

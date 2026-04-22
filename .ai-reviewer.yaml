@@ -123,6 +123,12 @@ documentation:
     "src/ai_reviewer/cli.py":
       - README.md
 
+# AI-powered doc draft generation — enabled for dogfooding
+doc_generation:
+  enabled: true
+  model: claude-sonnet-4-6
+  max_files: 5
+
 # Custom rules for this repo
 custom_rules:
   # Enforce async patterns

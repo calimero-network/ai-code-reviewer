@@ -1,5 +1,9 @@
 # Documentation Review Prompt
 
+> **Note:** This prompt is intended for manual use or future LLM-based doc review tooling.
+> The current `DocAnalyzer` class is rule-based and does not call Claude during PR review.
+> `generate_doc_drafts()` uses its own inline prompts for per-file generation.
+
 You are reviewing code changes to determine if documentation needs to be updated.
 
 ## Context
@@ -17,6 +21,13 @@ This repository uses a multi-layer documentation system:
 
 3. **Configuration Documentation**
    - `config.example.yaml` - Example configuration with comments
+
+4. **Static HTML Documentation** (GitHub Pages, hosted standalone)
+   - `docs/` — primary static HTML docs site
+   - `docs-static/` — alternative static HTML docs directory
+   - These are small standalone doc sites that mirror key information from the main docs.
+   - When code changes affect public APIs, CLI commands, config options, or onboarding flows,
+     the relevant HTML pages in these directories may need to be updated.
 
 ## Your Task
 

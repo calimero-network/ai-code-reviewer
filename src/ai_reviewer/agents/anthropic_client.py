@@ -43,6 +43,26 @@ class AnthropicClient:
             max_retries=config.max_retries,
         )
 
+    async def run_completion(
+        self,
+        model: str,
+        system: str,
+        user: str,
+        max_tokens: int = 4096,
+    ) -> str:
+        """Plain text completion — no tool use, no JSON schema.
+
+        Used for prose generation tasks (e.g. doc drafting) where structured
+        output is not needed.
+        """
+        response = await self._sdk.messages.create(
+            model=model,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            max_tokens=max_tokens,
+        )
+        return _extract_text(response)
+
     async def close(self) -> None:
         await self._sdk.close()
 

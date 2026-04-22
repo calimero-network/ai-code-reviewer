@@ -547,6 +547,163 @@ class TestFormatDocComment:
         assert reason in result
 
 
+class TestDocDraft:
+    """Tests for the DocDraft dataclass."""
+
+    def test_fields(self):
+        from ai_reviewer.docs.analyzer import DocDraft, DocSuggestion
+
+        s = DocSuggestion(file="README.md", reason="needs update")
+        d = DocDraft(suggestion=s, updated_content="# Updated\nfoo")
+        assert d.suggestion is s
+        assert d.updated_content == "# Updated\nfoo"
+        assert d.error is None
+
+    def test_error_field(self):
+        from ai_reviewer.docs.analyzer import DocDraft, DocSuggestion
+
+        s = DocSuggestion(file="README.md", reason="needs update")
+        d = DocDraft(suggestion=s, updated_content="", error="file not found")
+        assert d.error == "file not found"
+        assert d.updated_content == ""
+
+
+class TestGenerateDocDrafts:
+    """Tests for generate_doc_drafts() — mocks AnthropicClient and GitHubClient."""
+
+    @pytest.mark.asyncio
+    async def test_skips_directory_suggestions(self):
+        """Suggestions with a trailing '/' (directories) are skipped."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ai_reviewer.config import AnthropicApiConfig
+        from ai_reviewer.docs.analyzer import DocSuggestion, generate_doc_drafts
+
+        dir_suggestion = DocSuggestion(file="architecture/", reason="missing folder")
+        mock_gh = MagicMock()
+
+        with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+            mock_instance = AsyncMock()
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_instance)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            cfg = AnthropicApiConfig(api_key="sk-test")
+            drafts = await generate_doc_drafts(
+                suggestions=[dir_suggestion],
+                diff="some diff",
+                repo_name="org/repo",
+                ref="abc123",
+                anthropic_cfg=cfg,
+                gh=mock_gh,
+            )
+
+        assert drafts == []
+        mock_instance.run_completion.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_generates_draft_for_file_suggestion(self):
+        """A file suggestion produces a DocDraft with updated_content."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ai_reviewer.config import AnthropicApiConfig
+        from ai_reviewer.docs.analyzer import DocSuggestion, generate_doc_drafts
+
+        suggestion = DocSuggestion(file="README.md", reason="cli.py changed")
+        mock_file_content = MagicMock()
+        mock_file_content.decoded_content = b"# Old README\n"
+
+        mock_gh = MagicMock()
+        mock_gh.get_file_contents.return_value = mock_file_content
+
+        with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.run_completion = AsyncMock(return_value="# Updated README\n")
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_instance)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            cfg = AnthropicApiConfig(api_key="sk-test")
+            drafts = await generate_doc_drafts(
+                suggestions=[suggestion],
+                diff="diff --git a/src/cli.py...",
+                repo_name="org/repo",
+                ref="abc123",
+                anthropic_cfg=cfg,
+                gh=mock_gh,
+            )
+
+        assert len(drafts) == 1
+        assert drafts[0].updated_content == "# Updated README"  # strip() removes trailing \n
+        assert drafts[0].error is None
+        assert drafts[0].suggestion is suggestion
+
+    @pytest.mark.asyncio
+    async def test_handles_file_fetch_error(self):
+        """If fetching the current file fails, draft has error set."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ai_reviewer.config import AnthropicApiConfig
+        from ai_reviewer.docs.analyzer import DocSuggestion, generate_doc_drafts
+
+        suggestion = DocSuggestion(file="docs/api.md", reason="api changed")
+        mock_gh = MagicMock()
+        mock_gh.get_file_contents.side_effect = Exception("404 not found")
+
+        with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+            mock_instance = AsyncMock()
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_instance)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            cfg = AnthropicApiConfig(api_key="sk-test")
+            drafts = await generate_doc_drafts(
+                suggestions=[suggestion],
+                diff="diff",
+                repo_name="org/repo",
+                ref="abc123",
+                anthropic_cfg=cfg,
+                gh=mock_gh,
+            )
+
+        assert len(drafts) == 1
+        assert drafts[0].error == "404 not found"
+        assert drafts[0].updated_content == ""
+        mock_instance.run_completion.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_respects_max_files(self):
+        """max_files caps how many suggestions are processed."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ai_reviewer.config import AnthropicApiConfig
+        from ai_reviewer.docs.analyzer import DocSuggestion, generate_doc_drafts
+
+        suggestions = [DocSuggestion(file=f"docs/file{i}.md", reason="changed") for i in range(5)]
+        mock_file_content = MagicMock()
+        mock_file_content.decoded_content = b"content"
+
+        mock_gh = MagicMock()
+        mock_gh.get_file_contents.return_value = mock_file_content
+
+        with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.run_completion = AsyncMock(return_value="updated")
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_instance)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            cfg = AnthropicApiConfig(api_key="sk-test")
+            drafts = await generate_doc_drafts(
+                suggestions=suggestions,
+                diff="diff",
+                repo_name="org/repo",
+                ref="abc123",
+                anthropic_cfg=cfg,
+                gh=mock_gh,
+                max_files=2,
+            )
+
+        assert len(drafts) == 2
+        assert mock_instance.run_completion.call_count == 2
+
+
 class TestDocSuggestionDataclass:
     """Basic tests for the DocSuggestion dataclass."""
 

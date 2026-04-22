@@ -13,6 +13,7 @@ import time
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 import requests
 import yaml
@@ -25,6 +26,9 @@ from github.Repository import Repository
 from ai_reviewer.models.context import ReviewContext
 from ai_reviewer.models.findings import ConsolidatedFinding, Severity, compute_fuzzy_hash
 from ai_reviewer.models.review import ConsolidatedReview
+
+if TYPE_CHECKING:
+    from ai_reviewer.docs.analyzer import DocDraft
 
 logger = logging.getLogger(__name__)
 
@@ -1471,6 +1475,53 @@ class GitHubClient:
 
         return resolved_ids
 
+    def get_html_files_in_dirs(self, repo_name: str, ref: str, dirs: list[str]) -> list[str]:
+        """Return paths of all .html files found directly inside the given directories.
+
+        Does not recurse into sub-directories — flat docs-site layouts are assumed.
+        404s are swallowed; 403s are re-raised.
+        """
+        repo = self._gh.get_repo(repo_name)
+        found: list[str] = []
+        for dir_path in dirs:
+            lookup = dir_path.rstrip("/")
+            try:
+                contents = repo.get_contents(lookup, ref=ref)
+                items = contents if isinstance(contents, list) else [contents]
+                for item in items:
+                    if getattr(item, "type", None) == "file" and item.path.lower().endswith(
+                        ".html"
+                    ):
+                        found.append(item.path)
+            except Exception as e:
+                _raise_if_forbidden(e)
+                logger.debug("get_html_files_in_dirs: %s not found at %s: %s", dir_path, ref, e)
+        return found
+
+    def has_open_doc_update_pr(self, repo_name: str, base_branch: str) -> bool:
+        """Return True if an open doc-update PR already exists for *base_branch*.
+
+        Checks for any open PR whose head branch starts with ``docs/auto-`` and
+        targets *base_branch*.  Used as an idempotency guard in ``update-docs``
+        so that two rapid merges don't produce duplicate PRs.
+        """
+        repo = self._gh.get_repo(repo_name)
+        try:
+            open_prs = repo.get_pulls(state="open", base=base_branch)
+            for pr in open_prs:
+                if pr.head.ref.startswith("docs/auto-"):
+                    logger.info(
+                        "Idempotency: found existing doc-update PR #%d (%s) for %s",
+                        pr.number,
+                        pr.head.ref,
+                        base_branch,
+                    )
+                    return True
+        except Exception as e:
+            _raise_if_forbidden(e)
+            logger.warning("Could not check for existing doc-update PRs: %s", e)
+        return False
+
     def probe_repo_paths(self, repo_name: str, ref: str, paths: list[str]) -> set[str]:
         """Check which of the given file/directory paths exist in the repo.
 
@@ -1510,6 +1561,102 @@ class GitHubClient:
             _raise_if_forbidden(e)
             logger.warning("Could not search issue comments for doc-bot marker: %s", e)
         return None
+
+    def create_doc_update_pr(
+        self,
+        repo_name: str,
+        base_branch: str,
+        base_sha: str,
+        updates: list[DocDraft],
+        pr_title: str,
+        pr_body: str,
+        assignee: str | None = None,
+        labels: list[str] | None = None,
+        draft: bool = True,
+    ) -> str:
+        """Create a branch, commit updated doc files, and open a PR.
+
+        *updates* is a list of ``DocDraft`` objects.  Only drafts with non-empty
+        ``updated_content`` and no ``error`` are committed.
+
+        Returns the HTML URL of the newly opened PR.
+        """
+        branch_name = f"docs/auto-{base_sha[:7]}"
+        repo = self._gh.get_repo(repo_name)
+
+        # Create branch off the base SHA
+        try:
+            repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_sha)
+        except Exception as e:
+            _raise_if_forbidden(e)
+            raise RuntimeError(f"Could not create branch {branch_name}: {e}") from e
+
+        # Commit each updated file onto the new branch
+        committed: list[str] = []
+        for doc_update in updates:
+            if not doc_update.updated_content or doc_update.error:
+                logger.warning(
+                    "Skipping %s: %s",
+                    doc_update.suggestion.file,
+                    doc_update.error or "empty content",
+                )
+                continue
+            path = doc_update.suggestion.file
+            try:
+                existing_sha: str | None = None
+                try:
+                    existing = repo.get_contents(path, ref=branch_name)
+                    if not isinstance(existing, list):
+                        existing_sha = existing.sha
+                except Exception as inner_e:
+                    _raise_if_forbidden(inner_e)
+                    # file doesn't exist yet — create it
+
+                commit_msg = f"docs: auto-update {path}"
+                if existing_sha:
+                    repo.update_file(
+                        path,
+                        commit_msg,
+                        doc_update.updated_content,
+                        existing_sha,
+                        branch=branch_name,
+                    )
+                else:
+                    repo.create_file(
+                        path, commit_msg, doc_update.updated_content, branch=branch_name
+                    )
+                committed.append(path)
+                logger.info("Committed updated %s to %s", path, branch_name)
+            except Exception as e:
+                _raise_if_forbidden(e)
+                logger.warning("Could not commit %s: %s", path, e)
+
+        if not committed:
+            raise RuntimeError("No files were successfully committed — aborting PR creation")
+
+        # Open the PR
+        try:
+            pr = repo.create_pull(
+                title=pr_title,
+                body=pr_body,
+                head=branch_name,
+                base=base_branch,
+                draft=draft,
+            )
+        except Exception as e:
+            _raise_if_forbidden(e)
+            raise RuntimeError(f"Could not create PR: {e}") from e
+
+        if assignee:
+            with contextlib.suppress(Exception):
+                pr.add_to_assignees(assignee)
+
+        if labels:
+            with contextlib.suppress(Exception):
+                pr.add_to_labels(*labels)
+
+        logger.info("Opened doc update PR #%d: %s", pr.number, pr.html_url)
+        return pr.html_url
 
     def post_or_update_doc_comment(self, pr: PullRequest, body: str, marker: str) -> None:
         """Create or update the doc-bot issue comment on a PR.

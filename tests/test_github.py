@@ -2454,3 +2454,154 @@ class TestPreviousCommentsCacheLRU:
             client.get_previous_review_comments(self._make_pr(i))
 
         assert len(client._previous_comments_cache) == 5
+
+
+class TestCreateDocUpdatePR:
+    """Tests for GitHubClient.create_doc_update_pr()."""
+
+    def _make_client(self):
+        from unittest.mock import patch
+
+        from ai_reviewer.github.client import GitHubClient
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+        return client
+
+    def test_creates_branch_and_commits_files(self):
+        from unittest.mock import MagicMock, patch
+
+        from ai_reviewer.docs.analyzer import DocDraft, DocSuggestion
+        from ai_reviewer.github.client import GitHubClient
+
+        suggestion = DocSuggestion(file="README.md", reason="stale")
+        draft = DocDraft(suggestion=suggestion, updated_content="# New content\n")
+
+        mock_repo = MagicMock()
+        mock_repo.get_contents.side_effect = Exception("not found")  # file doesn't exist yet
+        mock_pr_obj = MagicMock()
+        mock_pr_obj.html_url = "https://github.com/org/repo/pull/99"
+        mock_repo.create_pull.return_value = mock_pr_obj
+
+        with patch("ai_reviewer.github.client.Github") as MockGithub:
+            MockGithub.return_value.get_repo.return_value = mock_repo
+            client = GitHubClient(token="test-token")
+            url = client.create_doc_update_pr(
+                repo_name="org/repo",
+                base_branch="main",
+                base_sha="abc1234",
+                updates=[draft],
+                pr_title="docs: auto-update for PR #42",
+                pr_body="Auto-generated.",
+            )
+
+        mock_repo.create_git_ref.assert_called_once_with(
+            ref="refs/heads/docs/auto-abc1234", sha="abc1234"
+        )
+        mock_repo.create_file.assert_called_once()
+        create_file_call = mock_repo.create_file.call_args
+        assert create_file_call.args[0] == "README.md"
+        assert create_file_call.args[2] == "# New content\n"
+        assert url == "https://github.com/org/repo/pull/99"
+
+    def test_updates_existing_file(self):
+        from unittest.mock import MagicMock, patch
+
+        from ai_reviewer.docs.analyzer import DocDraft, DocSuggestion
+        from ai_reviewer.github.client import GitHubClient
+
+        suggestion = DocSuggestion(file="docs/api.md", reason="stale")
+        draft = DocDraft(suggestion=suggestion, updated_content="# Updated API\n")
+
+        mock_existing = MagicMock()
+        mock_existing.sha = "blobsha123"
+
+        mock_repo = MagicMock()
+        mock_repo.get_contents.return_value = mock_existing
+        mock_pr_obj = MagicMock()
+        mock_pr_obj.html_url = "https://github.com/org/repo/pull/100"
+        mock_repo.create_pull.return_value = mock_pr_obj
+
+        with patch("ai_reviewer.github.client.Github") as MockGithub:
+            MockGithub.return_value.get_repo.return_value = mock_repo
+            client = GitHubClient(token="test-token")
+            client.create_doc_update_pr(
+                repo_name="org/repo",
+                base_branch="main",
+                base_sha="abc1234",
+                updates=[draft],
+                pr_title="docs: update",
+                pr_body="body",
+            )
+
+        mock_repo.update_file.assert_called_once()
+        update_call = mock_repo.update_file.call_args
+        assert update_call.args[0] == "docs/api.md"
+        assert update_call.args[2] == "# Updated API\n"
+        assert update_call.args[3] == "blobsha123"
+
+    def test_skips_drafts_with_errors(self):
+        from unittest.mock import MagicMock, patch
+
+        from ai_reviewer.docs.analyzer import DocDraft, DocSuggestion
+        from ai_reviewer.github.client import GitHubClient
+
+        good = DocDraft(
+            suggestion=DocSuggestion(file="README.md", reason="stale"),
+            updated_content="# Good\n",
+        )
+        bad = DocDraft(
+            suggestion=DocSuggestion(file="docs/bad.md", reason="stale"),
+            updated_content="",
+            error="fetch failed",
+        )
+
+        mock_repo = MagicMock()
+        mock_repo.get_contents.side_effect = Exception("not found")
+        mock_pr_obj = MagicMock()
+        mock_pr_obj.html_url = "https://github.com/org/repo/pull/1"
+        mock_repo.create_pull.return_value = mock_pr_obj
+
+        with patch("ai_reviewer.github.client.Github") as MockGithub:
+            MockGithub.return_value.get_repo.return_value = mock_repo
+            client = GitHubClient(token="test-token")
+            client.create_doc_update_pr(
+                repo_name="org/repo",
+                base_branch="main",
+                base_sha="abc1234",
+                updates=[good, bad],
+                pr_title="docs: update",
+                pr_body="body",
+            )
+
+        # Only one file committed — the bad draft was skipped
+        assert mock_repo.create_file.call_count == 1
+        assert mock_repo.create_file.call_args.args[0] == "README.md"
+
+    def test_raises_if_no_files_committed(self):
+        from unittest.mock import MagicMock, patch
+
+        from ai_reviewer.docs.analyzer import DocDraft, DocSuggestion
+        from ai_reviewer.github.client import GitHubClient
+
+        bad = DocDraft(
+            suggestion=DocSuggestion(file="docs/bad.md", reason="stale"),
+            updated_content="",
+            error="fetch failed",
+        )
+
+        mock_repo = MagicMock()
+        mock_repo.get_contents.side_effect = Exception("not found")
+
+        with patch("ai_reviewer.github.client.Github") as MockGithub:
+            MockGithub.return_value.get_repo.return_value = mock_repo
+            client = GitHubClient(token="test-token")
+            with pytest.raises(RuntimeError, match="No files were successfully committed"):
+                client.create_doc_update_pr(
+                    repo_name="org/repo",
+                    base_branch="main",
+                    base_sha="abc1234",
+                    updates=[bad],
+                    pr_title="docs: update",
+                    pr_body="body",
+                )

@@ -118,3 +118,93 @@ class TestCLI:
             call_args = mock_uvicorn.run.call_args
             assert call_args.kwargs["port"] == 9000
             assert call_args.kwargs["host"] == "127.0.0.1"
+
+
+class TestUpdateDocsCLI:
+    """Tests for the update-docs command."""
+
+    def test_update_docs_help(self):
+        from ai_reviewer.cli import cli
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["update-docs", "--help"])
+        assert result.exit_code == 0
+        assert "--dry-run" in result.output
+        assert "REPO" in result.output
+
+    def test_update_docs_dry_run_no_mapping(self):
+        """When repo has no source_to_docs_mapping, exits cleanly."""
+        from ai_reviewer.cli import cli
+
+        runner = CliRunner()
+        with (
+            patch("ai_reviewer.cli.load_config") as mock_cfg,
+            patch("ai_reviewer.cli.validate_config", return_value=[]),
+            patch("ai_reviewer.cli.GitHubClient") as MockGH,
+        ):
+            mock_cfg.return_value.anthropic.api_key = "sk-test"
+            mock_cfg.return_value.anthropic = MagicMock(api_key="sk-test")
+            mock_cfg.return_value.github.token = "ghp_test"
+            mock_cfg.return_value.doc_generation = MagicMock(
+                model="claude-sonnet-4-6",
+                max_files=15,
+                static_docs_dirs=["docs/", "docs-static/"],
+                pr_labels=["automated-docs"],
+                pr_draft=True,
+            )
+
+            mock_pr = MagicMock()
+            mock_pr.base.ref = "main"
+            mock_pr.merge_commit_sha = "abc123"
+            mock_pr.get_files.return_value = []
+
+            gh_instance = MockGH.return_value
+            gh_instance.get_pull_request.return_value = mock_pr
+            gh_instance.load_repo_config.return_value = {}  # no doc_generation config
+            gh_instance.has_open_doc_update_pr.return_value = False
+            gh_instance.get_html_files_in_dirs.return_value = []  # no HTML files found
+
+            result = runner.invoke(cli, ["update-docs", "org/repo", "42", "--dry-run"])
+
+        assert result.exit_code == 0
+        assert "no stale documentation detected" in result.output
+
+
+class TestDocGenerationSettings:
+    """Tests for DocGenerationSettings config."""
+
+    def test_defaults(self):
+        from ai_reviewer.config import DocGenerationSettings
+
+        s = DocGenerationSettings()
+        assert s.enabled is False
+        assert s.model == "claude-sonnet-4-6"
+        assert s.max_files == 15
+        assert "docs/" in s.static_docs_dirs
+        assert "docs-static/" in s.static_docs_dirs
+        assert s.pr_draft is True
+        assert "automated-docs" in s.pr_labels
+
+    def test_parsed_from_config(self):
+        from ai_reviewer.config import _parse_config
+
+        cfg = _parse_config(
+            {
+                "anthropic": {"api_key": "sk-test"},
+                "github": {"token": "ghp_test"},
+                "doc_generation": {
+                    "enabled": True,
+                    "model": "claude-opus-4-6",
+                    "max_files": 3,
+                },
+            }
+        )
+        assert cfg.doc_generation.enabled is True
+        assert cfg.doc_generation.model == "claude-opus-4-6"
+        assert cfg.doc_generation.max_files == 3
+
+    def test_disabled_by_default_in_parsed_config(self):
+        from ai_reviewer.config import _parse_config
+
+        cfg = _parse_config({"anthropic": {"api_key": "sk-test"}, "github": {"token": "ghp_test"}})
+        assert cfg.doc_generation.enabled is False

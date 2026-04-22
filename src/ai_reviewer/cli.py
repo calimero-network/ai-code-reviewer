@@ -17,6 +17,7 @@ from rich.table import Table
 from ai_reviewer import __version__
 from ai_reviewer.config import Config, DocReviewSettings, load_config, validate_config
 from ai_reviewer.docs.analyzer import DocAnalyzer, format_doc_comment
+from ai_reviewer.docs.updater import run_doc_update
 from ai_reviewer.github.client import (
     GitHubClient,
     ReviewMeta,
@@ -485,8 +486,16 @@ def _run_doc_review(
 
     console.print("📄 Running documentation review...")
 
-    # Probe the repo for convention files and architecture directories
-    probe_paths = doc_settings.convention_files + doc_settings.architecture_paths
+    static_docs_dirs = config.doc_generation.static_docs_dirs
+
+    # Probe the repo for convention files, architecture directories, and static doc dirs.
+    # static_docs_dirs must be included here so check_static_html_docs can find them in
+    # existing_repo_paths — entries absent from the probe are silently skipped.
+    probe_paths = list(
+        dict.fromkeys(
+            doc_settings.convention_files + doc_settings.architecture_paths + static_docs_dirs
+        )
+    )
     try:
         existing_repo_paths = gh.probe_repo_paths(repo, pr.head.sha, probe_paths)
     except Exception as e:
@@ -513,6 +522,7 @@ def _run_doc_review(
         doc_config=doc_config,
         architecture_dirs=doc_settings.architecture_paths,
         convention_files=doc_settings.convention_files,
+        static_docs_dirs=static_docs_dirs,
     )
     suggestions = analyzer.run()
 
@@ -537,6 +547,109 @@ def _run_doc_review(
             gh.post_or_update_doc_comment(pr, body, marker)
         else:
             console.print("[dim]📄 Documentation looks current — no comment needed[/dim]")
+
+
+@cli.command("update-docs")
+@click.argument("repo")
+@click.argument("pr_number", type=int)
+@click.option("--dry-run", is_flag=True, help="Print what would change without opening a PR")
+@click.option(
+    "--base", default=None, help="Base branch to target for the doc PR (default: auto-detect)"
+)
+@click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
+def update_docs_cmd(
+    repo: str,
+    pr_number: int,
+    dry_run: bool,
+    base: str | None,
+    config_path: str | None,
+) -> None:
+    """Generate and commit AI-drafted doc updates for a merged PR.
+
+    Detects stale documentation files via source_to_docs_mapping in
+    .ai-reviewer.yaml, generates full updated file content using Claude Sonnet,
+    then commits the changes to a new branch and opens a PR for human review.
+
+    Use --dry-run to preview the generated content locally without opening a PR.
+    """
+    try:
+        asyncio.run(
+            _update_docs_async(
+                repo=repo,
+                pr_number=pr_number,
+                dry_run=dry_run,
+                base=base,
+                config_path=Path(config_path) if config_path else None,
+            )
+        )
+    except Exception as e:
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+
+
+async def _update_docs_async(
+    repo: str,
+    pr_number: int,
+    dry_run: bool,
+    base: str | None,
+    config_path: Path | None,
+) -> None:
+    config = load_config(config_path)
+    errors = validate_config(config)
+    if errors:
+        for error in errors:
+            console.print(f"[red]Config error:[/red] {error}")
+        raise RuntimeError(f"Invalid config: {'; '.join(errors)}")
+
+    if not config.anthropic or not config.anthropic.api_key:
+        console.print("[red]error:[/red] ANTHROPIC_API_KEY not set")
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
+
+    gh = GitHubClient(config.github.token)
+    console.print(f"📄 Fetching PR #{pr_number} from [bold]{repo}[/bold]...")
+
+    result = await run_doc_update(
+        repo=repo,
+        pr_number=pr_number,
+        gh=gh,
+        anthropic_cfg=config.anthropic,
+        doc_generation=config.doc_generation,
+        base=base,
+        dry_run=dry_run,
+    )
+
+    if result.skipped:
+        for d in result.failed:
+            console.print(f"[yellow]⚠️  Skipped {d.suggestion.file}: {d.error}[/yellow]")
+        console.print(f"[dim]ℹ️  {result.skip_reason}[/dim]")
+        return
+
+    for d in result.failed:
+        console.print(f"[yellow]⚠️  Skipped {d.suggestion.file}: {d.error}[/yellow]")
+
+    if not result.successful:
+        console.print("[green]✅ No doc updates needed after scanning all candidates.[/green]")
+        return
+
+    if dry_run:
+        console.print(
+            f"\n[yellow]Dry run — would update {len(result.successful)} file(s):[/yellow]\n"
+        )
+        for draft in result.successful:
+            console.print(f"[bold]━━ {draft.suggestion.file} ━━[/bold]")
+            preview_lines = draft.updated_content.splitlines()[:60]
+            console.print("\n".join(preview_lines))
+            if len(draft.updated_content.splitlines()) > 60:
+                console.print(
+                    f"[dim]… ({len(draft.updated_content.splitlines()) - 60} more lines)[/dim]"
+                )
+            console.print()
+        return
+
+    if result.pr_url:
+        console.print(f"[green]✅ Doc update PR opened: {result.pr_url}[/green]")
+    else:
+        raise RuntimeError("PR creation returned no URL")
 
 
 @cli.group("config")
