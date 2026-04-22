@@ -62,9 +62,6 @@ async def run_doc_update(
     """
     from ai_reviewer.docs.analyzer import DocAnalyzer, DocSuggestion, generate_doc_drafts
 
-    if not doc_generation.enabled:
-        return DocUpdateResult(skipped=True, skip_reason="doc_generation not enabled")
-
     pr = gh.get_pull_request(repo, pr_number)
     base_branch = base or pr.base.ref
 
@@ -79,9 +76,13 @@ async def run_doc_update(
     doc_config = repo_config.get("documentation") if repo_config else None
 
     # Apply per-repo doc_generation overrides on top of the server's defaults.
+    # Repo config can explicitly enable or disable; server default is the fallback.
     repo_docgen: dict = repo_config.get("doc_generation", {}) if repo_config else {}
-    if repo_docgen.get("enabled") is False:
+    repo_enabled = repo_docgen.get("enabled")
+    if repo_enabled is False:
         return DocUpdateResult(skipped=True, skip_reason="doc_generation disabled in repo config")
+    if not (repo_enabled or doc_generation.enabled):
+        return DocUpdateResult(skipped=True, skip_reason="doc_generation not enabled")
     _repo_model = repo_docgen.get("model")
     effective_model: str = _repo_model if _repo_model is not None else doc_generation.model
     _repo_max_files = repo_docgen.get("max_files")
