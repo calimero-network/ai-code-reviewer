@@ -145,8 +145,8 @@ def _get_github_app_token(app_id: str, private_key: str, repo: str) -> str | Non
         return None
 
 
-def _setup_default_review_handler() -> None:
-    """Set up the default review handler using environment config.
+def _setup_default_review_handler() -> Callable:
+    """Build and return the default review handler using environment config.
 
     This is used when running as a standalone server (e.g., Cloud Run)
     without the CLI's explicit handler setup.
@@ -409,11 +409,11 @@ def _setup_default_review_handler() -> None:
         except Exception as e:
             logger.exception(f"Error reviewing {repo} PR #{pr_number}: {e}")
 
-    set_review_handler(default_review_handler)
+    return default_review_handler
 
 
-def _setup_default_push_handler() -> None:
-    """Set up a default push handler that runs update-docs on merges to main/master."""
+def _setup_default_push_handler() -> Callable:
+    """Build and return the default push handler that runs update-docs on merges to main/master."""
     from ai_reviewer.cli import _update_docs_async
 
     async def default_push_handler(repo: str, ref: str, head_commit_message: str) -> None:
@@ -448,7 +448,7 @@ def _setup_default_push_handler() -> None:
         except Exception as e:
             logger.exception("update-docs failed for %s PR #%d: %s", repo, pr_number, e)
 
-    set_push_handler(default_push_handler)
+    return default_push_handler
 
 
 async def handle_push_event(payload: dict) -> None:
@@ -529,10 +529,11 @@ def create_webhook_app(webhook_secret: str | None = None) -> FastAPI:
     # Set up review and push handlers from environment if not already set.
     # Lock prevents a race if create_webhook_app is called concurrently (e.g. in tests).
     with _handler_lock:
+        global _review_handler, _push_handler
         if _review_handler is None:
-            _setup_default_review_handler()
+            _review_handler = _setup_default_review_handler()
         if _push_handler is None:
-            _setup_default_push_handler()
+            _push_handler = _setup_default_push_handler()
 
     app = FastAPI(
         title="AI Code Reviewer Webhook",
