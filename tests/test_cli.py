@@ -178,7 +178,7 @@ class TestDocGenerationSettings:
 
         s = DocGenerationSettings()
         assert s.enabled is False
-        assert s.model == "claude-sonnet-4-6"
+        assert s.model == "claude-haiku-4-5-20251001"
         assert s.max_files == 15
         assert "docs/" in s.static_docs_dirs
         assert "docs-static/" in s.static_docs_dirs
@@ -194,13 +194,13 @@ class TestDocGenerationSettings:
                 "github": {"token": "ghp_test"},
                 "doc_generation": {
                     "enabled": True,
-                    "model": "claude-opus-4-6",
+                    "model": "claude-haiku-4-5-20251001",
                     "max_files": 3,
                 },
             }
         )
         assert cfg.doc_generation.enabled is True
-        assert cfg.doc_generation.model == "claude-opus-4-6"
+        assert cfg.doc_generation.model == "claude-haiku-4-5-20251001"
         assert cfg.doc_generation.max_files == 3
 
     def test_disabled_by_default_in_parsed_config(self):

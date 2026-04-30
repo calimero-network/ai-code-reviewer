@@ -8,11 +8,11 @@ from ai_reviewer.models.context import ReviewContext
 
 
 class DummyAgent(ReviewAgent):
-    MODEL = "claude-opus-4-6"
+    MODEL = "claude-sonnet-4-6"
     AGENT_TYPE = "dummy"
     FOCUS_AREAS = ["security"]
     SYSTEM_PROMPT = "You are a dummy reviewer."
-    THINKING_ENABLED = True
+    THINKING_ENABLED = False
 
 
 @pytest.mark.asyncio
@@ -67,5 +67,5 @@ async def test_review_agent_uses_anthropic_client():
     assert len(review.findings) == 1
     assert review.summary == "sum"
     kwargs = client.run_review.call_args.kwargs
-    assert kwargs["model"] == "claude-opus-4-6"
-    assert kwargs["enable_thinking"] is True
+    assert kwargs["model"] == "claude-sonnet-4-6"
+    assert kwargs["enable_thinking"] is False

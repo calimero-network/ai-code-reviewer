@@ -21,7 +21,7 @@
 
 AI Code Reviewer is a multi-agent system that orchestrates multiple LLMs to produce comprehensive, high-quality code reviews. Unlike single-agent approaches, this tool leverages the diversity of multiple AI models—each with different strengths—to generate consolidated reviews that catch more issues and provide better insights.
 
-The system integrates with GitHub for PR reviews. LLM access goes through Anthropic's Messages API via the official SDK (model mix: `claude-opus-4-6` for reasoning-heavy agents with extended thinking, `claude-sonnet-4-6` for broader/faster agents).
+The system integrates with GitHub for PR reviews. LLM access goes through Anthropic's Messages API via the official SDK (model mix: `claude-sonnet-4-6` for reasoning-heavy agents with extended thinking, `claude-sonnet-4-6` for broader/faster agents).
 
 ---
 

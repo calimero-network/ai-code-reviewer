@@ -82,7 +82,7 @@ class AnthropicClient:
         enable_thinking: bool = False,
         max_tokens: int = 8192,
         temperature: float = 0.3,
-        max_tool_rounds: int = 30,
+        max_tool_rounds: int = 8,
     ) -> AnthropicReviewResult:
         messages: list[dict[str, Any]] = [{"role": "user", "content": user_blocks}]
         usage = UsageStats()
@@ -95,7 +95,26 @@ class AnthropicClient:
             system_to_send = [dict(b) for b in system_blocks]
             system_to_send[-1]["cache_control"] = {"type": "ephemeral"}
 
+        circuit_limit = self.config.max_combined_context_tokens * 2
+
         for _ in range(max_tool_rounds + 1):
+            # Circuit breaker: abort before sending if accumulated input from prior rounds
+            # already exceeds twice the context limit — paying for this call would just
+            # make it worse without producing useful output.
+            if usage.input_tokens > circuit_limit:
+                logger.warning(
+                    "Circuit breaker: accumulated input_tokens=%d exceeds 2× context limit=%d — "
+                    "aborting tool loop before next request to contain cost",
+                    usage.input_tokens,
+                    self.config.max_combined_context_tokens,
+                )
+                return AnthropicReviewResult(
+                    parsed={"findings": [], "summary": "[circuit breaker: context limit exceeded]"},
+                    raw_text="",
+                    usage=usage,
+                    tool_calls=tool_calls,
+                )
+
             kwargs: dict[str, Any] = {
                 "model": model,
                 "system": system_to_send,
@@ -117,6 +136,15 @@ class AnthropicClient:
 
             stop = getattr(response, "stop_reason", None)
             if stop != "tool_use" or not tool_registry:
+                total_tokens = usage.input_tokens + usage.output_tokens
+                if total_tokens > 100_000:
+                    logger.warning(
+                        "High token usage: input=%d output=%d total=%d — "
+                        "consider reducing max_tool_rounds or context size",
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        total_tokens,
+                    )
                 raw_text = _extract_text(response)
                 return AnthropicReviewResult(
                     parsed=_parse_json(raw_text),
@@ -144,6 +172,16 @@ class AnthropicClient:
                         "content": tool_output,
                     }
                 )
+
+            if self.config.enable_prompt_caching and tool_result_blocks:
+                # Cache the conversation prefix up to this point. Placing
+                # cache_control on the last tool_result block marks all prior
+                # messages as a cache breakpoint — the next round pays ~10%
+                # of normal input price for the accumulated history instead of
+                # re-billing it at full price every round.
+                tool_result_blocks[-1] = dict(tool_result_blocks[-1])
+                tool_result_blocks[-1]["cache_control"] = {"type": "ephemeral"}
+
             messages.append({"role": "user", "content": tool_result_blocks})
 
         logger.warning("Tool-use loop exceeded max_tool_rounds=%d", max_tool_rounds)

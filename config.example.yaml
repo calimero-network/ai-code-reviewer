@@ -9,11 +9,11 @@ version: 1
 anthropic:
   api_key: ${ANTHROPIC_API_KEY}
   # base_url: https://api.anthropic.com   # default
-  default_model: claude-opus-4-6
+  default_model: claude-sonnet-4-6
   timeout_seconds: 300
-  max_retries: 3
+  max_retries: 1
   enable_prompt_caching: true
-  max_combined_context_tokens: 150000
+  max_combined_context_tokens: 80000
   per_file_max_bytes: 524288
   per_review_github_request_budget: 200
 
@@ -32,55 +32,47 @@ github:
 # ============================================================================
 # AGENT CONFIGURATION
 # ============================================================================
-# Diversity comes from model mix (Opus vs Sonnet), system prompts,
-# focus areas, and extended thinking.
-
 agents:
-  # Reasoning-heavy: Opus + extended thinking
   - name: security-reviewer
-    model: claude-opus-4-6
+    model: claude-sonnet-4-6
     focus_areas:
       - security
       - authentication
       - data_validation
     description: "Identifies security vulnerabilities and auth issues"
-    max_tokens: 16384
+    max_tokens: 8192
     temperature: 0.2
-    thinking_enabled: true
-    thinking_budget_tokens: 8192
+    thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 20
+    max_tool_calls: 8
 
   - name: patterns-reviewer
-    model: claude-opus-4-6
+    model: claude-sonnet-4-6
     focus_areas:
       - consistency
       - patterns
       - architecture
       - breaking_changes
     description: "Ensures code follows existing patterns; explores repo via tools"
-    max_tokens: 16384
+    max_tokens: 8192
     temperature: 0.2
-    thinking_enabled: true
-    thinking_budget_tokens: 8192
+    thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 30
+    max_tool_calls: 8
 
   - name: logic-reviewer
-    model: claude-opus-4-6
+    model: claude-sonnet-4-6
     focus_areas:
       - logic
       - edge_cases
       - error_handling
       - correctness
-    max_tokens: 16384
+    max_tokens: 8192
     temperature: 0.2
-    thinking_enabled: true
-    thinking_budget_tokens: 8192
+    thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 20
+    max_tool_calls: 8
 
-  # Broad/fast: Sonnet without thinking
   - name: performance-reviewer
     model: claude-sonnet-4-6
     focus_areas:
@@ -92,15 +84,15 @@ agents:
     temperature: 0.3
     thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 10
+    max_tool_calls: 8
 
   - name: style-reviewer
-    model: claude-sonnet-4-6
+    model: claude-haiku-4-5-20251001
     focus_areas:
       - style
       - documentation
       - readability
-    max_tokens: 8192
+    max_tokens: 4096
     temperature: 0.3
     thinking_enabled: false
     allow_tool_use: false
@@ -113,7 +105,7 @@ orchestrator:
   min_agents_required: 2
   max_parallel_agents: 5
   retry_on_failure: true
-  max_retries: 2
+  max_retries: 1
 
 # ============================================================================
 # AGGREGATOR SETTINGS
@@ -121,8 +113,7 @@ orchestrator:
 aggregator:
   similarity_threshold: 0.85
   min_consensus_for_critical: 0.5
-  use_embeddings: true
-  embedding_model: all-MiniLM-L6-v2
+  use_embeddings: false   # embedding-based clustering not yet implemented
 
 # ============================================================================
 # OUTPUT SETTINGS
@@ -188,7 +179,7 @@ doc_review:
 # Disabled by default. Enable per-repo in .ai-reviewer.yaml.
 doc_generation:
   enabled: false
-  model: claude-sonnet-4-6   # Sonnet is sufficient for prose/HTML drafting
+  model: claude-haiku-4-5-20251001   # Haiku is sufficient for prose/HTML drafting
   max_files: 15              # max Claude calls per run (HTML pages + Markdown)
 
   # Directories containing static HTML GitHub Pages docs.

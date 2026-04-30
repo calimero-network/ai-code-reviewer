@@ -35,7 +35,6 @@ dependencies = [
     "pyyaml>=6.0.0",
     "rich>=13.7.0",
     "tenacity>=8.2.0",
-    "sentence-transformers>=2.3.0",
     "PyJWT>=2.8.0",
     "cryptography>=42.0.0",
 ]
@@ -96,7 +95,6 @@ ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = [
-    "sentence_transformers.*",
     "requests.*",
     "jwt.*",
     "yaml.*",

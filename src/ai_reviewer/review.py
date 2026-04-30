@@ -576,10 +576,12 @@ def apply_cross_review(
 
     for fid in finding_ids:
         finding = id_to_finding[fid]
-        if finding.severity == Severity.CRITICAL and finding.category == Category.SECURITY:
-            kept.append((finding, 1.0, 0))
-            continue
         votes = id_to_votes.get(fid, [])
+        if finding.severity == Severity.CRITICAL and finding.category == Category.SECURITY:
+            # Keep unless every assessing agent explicitly rejected it; one valid vote is enough
+            if not votes or any(v for v, _ in votes):
+                kept.append((finding, 1.0, 0))
+            continue
         if not votes:
             kept.append((finding, 1.0, 99.0))
             continue
@@ -1137,14 +1139,19 @@ async def run_cross_review_round(
     ]
 
 
+_SMALL_PR_LINE_THRESHOLD = 150
+_MEDIUM_PR_LINE_THRESHOLD = 500
+_SMALL_PR_FILE_THRESHOLD = 3
+
+
 def _effective_agent_count(
     additions: int, deletions: int, changed_files: int, requested: int
 ) -> int:
     """Scale agent count with PR size to save cost and latency on small PRs."""
     total = additions + deletions
-    if total < 150 and changed_files <= 3:
+    if total < _SMALL_PR_LINE_THRESHOLD and changed_files <= _SMALL_PR_FILE_THRESHOLD:
         return min(1, requested)
-    elif total < 500:
+    elif total < _MEDIUM_PR_LINE_THRESHOLD:
         return min(2, requested)
     return requested
 

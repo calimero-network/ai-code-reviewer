@@ -14,13 +14,13 @@ def test_load_anthropic_config(tmp_path: Path, monkeypatch):
         textwrap.dedent("""
         anthropic:
           api_key: ${ANTHROPIC_API_KEY}
-          default_model: claude-opus-4-6
+          default_model: claude-sonnet-4-6
           enable_prompt_caching: true
         github:
           token: ${GITHUB_TOKEN}
         agents:
           - name: security-reviewer
-            model: claude-opus-4-6
+            model: claude-sonnet-4-6
             focus_areas: [security]
             thinking_enabled: true
             thinking_budget_tokens: 8192
@@ -31,7 +31,7 @@ def test_load_anthropic_config(tmp_path: Path, monkeypatch):
     cfg = load_config(cfg_file)
     assert cfg.anthropic is not None
     assert cfg.anthropic.api_key == "sk-test-123"
-    assert cfg.anthropic.default_model == "claude-opus-4-6"
+    assert cfg.anthropic.default_model == "claude-sonnet-4-6"
     assert cfg.anthropic.enable_prompt_caching is True
     assert cfg.agents[0].thinking_enabled is True
     assert cfg.agents[0].thinking_budget_tokens == 8192

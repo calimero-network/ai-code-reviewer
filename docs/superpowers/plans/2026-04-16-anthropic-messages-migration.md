@@ -115,13 +115,13 @@ def test_load_anthropic_config(tmp_path: Path, monkeypatch):
     cfg_file.write_text(textwrap.dedent("""
         anthropic:
           api_key: ${ANTHROPIC_API_KEY}
-          default_model: claude-opus-4-6
+          default_model: claude-sonnet-4-6
           enable_prompt_caching: true
         github:
           token: ${GITHUB_TOKEN}
         agents:
           - name: security-reviewer
-            model: claude-opus-4-6
+            model: claude-sonnet-4-6
             focus_areas: [security]
             thinking_enabled: true
             thinking_budget_tokens: 8192
@@ -130,7 +130,7 @@ def test_load_anthropic_config(tmp_path: Path, monkeypatch):
     """))
     cfg = load_config(cfg_file)
     assert cfg.anthropic.api_key == "sk-test-123"
-    assert cfg.anthropic.default_model == "claude-opus-4-6"
+    assert cfg.anthropic.default_model == "claude-sonnet-4-6"
     assert cfg.anthropic.enable_prompt_caching is True
     assert cfg.agents[0].thinking_enabled is True
     assert cfg.agents[0].thinking_budget_tokens == 8192
@@ -155,7 +155,7 @@ class AnthropicApiConfig:
     base_url: str = "https://api.anthropic.com"
     timeout_seconds: int = 300
     max_retries: int = 3
-    default_model: str = "claude-opus-4-6"
+    default_model: str = "claude-sonnet-4-6"
     enable_prompt_caching: bool = True
     max_combined_context_tokens: int = 150_000
     per_file_max_bytes: int = 512 * 1024
@@ -205,7 +205,7 @@ In `_parse_config()`, add after the Cursor block:
         base_url=anthropic_raw.get("base_url", "https://api.anthropic.com"),
         timeout_seconds=anthropic_raw.get("timeout_seconds", 300),
         max_retries=anthropic_raw.get("max_retries", 3),
-        default_model=anthropic_raw.get("default_model", "claude-opus-4-6"),
+        default_model=anthropic_raw.get("default_model", "claude-sonnet-4-6"),
         enable_prompt_caching=anthropic_raw.get("enable_prompt_caching", True),
         max_combined_context_tokens=anthropic_raw.get("max_combined_context_tokens", 150_000),
         per_file_max_bytes=anthropic_raw.get("per_file_max_bytes", 512 * 1024),
@@ -1123,7 +1123,7 @@ async def test_run_review_happy_path_parses_json():
     )
 
     result = await client.run_review(
-        model="claude-opus-4-6",
+        model="claude-sonnet-4-6",
         system_blocks=[{"type": "text", "text": "You are a reviewer."}],
         user_blocks=[{"type": "text", "text": "diff..."}],
         output_schema={"type": "object"},
@@ -1302,7 +1302,7 @@ async def test_run_review_passes_output_schema_as_json_schema():
 
     schema = {"type": "object", "properties": {"findings": {"type": "array"}}}
     await client.run_review(
-        model="claude-opus-4-6",
+        model="claude-sonnet-4-6",
         system_blocks=[{"type": "text", "text": "sys"}],
         user_blocks=[{"type": "text", "text": "u"}],
         output_schema=schema,
@@ -1375,7 +1375,7 @@ async def test_run_review_with_thinking_budget_sets_thinking_config():
     )
 
     await client.run_review(
-        model="claude-opus-4-6",
+        model="claude-sonnet-4-6",
         system_blocks=[{"type": "text", "text": "s"}],
         user_blocks=[{"type": "text", "text": "u"}],
         output_schema={"type": "object"},
@@ -1445,7 +1445,7 @@ async def test_thinking_forces_temperature_one():
         return_value=_fake_response('{"findings": [], "summary": "ok"}')
     )
     await client.run_review(
-        model="claude-opus-4-6",
+        model="claude-sonnet-4-6",
         system_blocks=[{"type": "text", "text": "s"}],
         user_blocks=[{"type": "text", "text": "u"}],
         output_schema={"type": "object"},
@@ -1516,7 +1516,7 @@ async def test_tool_use_loop_dispatches_and_feeds_result_back():
     registry.execute = AsyncMock(return_value="file-contents")
 
     result = await client.run_review(
-        model="claude-opus-4-6",
+        model="claude-sonnet-4-6",
         system_blocks=[{"type": "text", "text": "s"}],
         user_blocks=[{"type": "text", "text": "u"}],
         output_schema={"type": "object"},
@@ -1691,7 +1691,7 @@ async def test_caching_marks_last_system_block_when_enabled():
     )
 
     await client.run_review(
-        model="claude-opus-4-6",
+        model="claude-sonnet-4-6",
         system_blocks=[
             {"type": "text", "text": "role"},
             {"type": "text", "text": "conventions"},
@@ -1718,7 +1718,7 @@ async def test_caching_disabled_leaves_system_unchanged():
     )
 
     await client.run_review(
-        model="claude-opus-4-6",
+        model="claude-sonnet-4-6",
         system_blocks=[{"type": "text", "text": "role"}],
         user_blocks=[{"type": "text", "text": "u"}],
         output_schema={"type": "object"},
@@ -2052,7 +2052,7 @@ from ai_reviewer.models.context import ReviewContext
 
 
 class DummyAgent(ReviewAgent):
-    MODEL = "claude-opus-4-6"
+    MODEL = "claude-sonnet-4-6"
     AGENT_TYPE = "dummy"
     FOCUS_AREAS = ["security"]
     SYSTEM_PROMPT = "You are a dummy reviewer."
@@ -2097,7 +2097,7 @@ async def test_review_agent_uses_anthropic_client():
     assert len(review.findings) == 1
     assert review.summary == "sum"
     kwargs = client.run_review.call_args.kwargs
-    assert kwargs["model"] == "claude-opus-4-6"
+    assert kwargs["model"] == "claude-sonnet-4-6"
     assert kwargs["thinking_budget"] == 4096
 ```
 
@@ -2129,7 +2129,7 @@ logger = logging.getLogger(__name__)
 class ReviewAgent:
     """Base class for all review agents."""
 
-    MODEL: str = "claude-opus-4-6"
+    MODEL: str = "claude-sonnet-4-6"
     AGENT_TYPE: str = "base"
     FOCUS_AREAS: list[str] = []
     SYSTEM_PROMPT: str = "You are a code reviewer."
@@ -2252,7 +2252,7 @@ git commit -m "refactor(agents): rewrite ReviewAgent.review on AnthropicClient"
 
 In `SecurityAgent`:
 ```python
-    MODEL = "claude-opus-4-6"
+    MODEL = "claude-sonnet-4-6"
     AGENT_TYPE = "security-reviewer"
     FOCUS_AREAS = ["security", "authentication", "data_validation", "cryptography"]
     THINKING_ENABLED = True
@@ -2261,7 +2261,7 @@ In `SecurityAgent`:
 
 In `AuthenticationAgent`:
 ```python
-    MODEL = "claude-opus-4-6"
+    MODEL = "claude-sonnet-4-6"
     AGENT_TYPE = "authentication-reviewer"
     FOCUS_AREAS = ["authentication", "authorization", "session_management"]
     THINKING_ENABLED = True
@@ -2272,7 +2272,7 @@ In `AuthenticationAgent`:
 
 In `PatternsAgent`:
 ```python
-    MODEL = "claude-opus-4-6"
+    MODEL = "claude-sonnet-4-6"
     AGENT_TYPE = "patterns-reviewer"
     FOCUS_AREAS = ["consistency", "patterns", "architecture", "maintainability"]
     THINKING_ENABLED = True
@@ -2299,7 +2299,7 @@ In `PerformanceAgent`:
 
 In `LogicAgent`:
 ```python
-    MODEL = "claude-opus-4-6"
+    MODEL = "claude-sonnet-4-6"
     AGENT_TYPE = "logic-reviewer"
     FOCUS_AREAS = ["logic", "edge_cases", "error_handling", "correctness"]
     THINKING_ENABLED = True
@@ -2317,8 +2317,8 @@ Expected: these tests will partly fail because they still reference `CursorClien
 git add src/ai_reviewer/agents/security.py src/ai_reviewer/agents/patterns.py src/ai_reviewer/agents/performance.py
 git commit -m "refactor(agents): update subclass models to Claude only
 
-Security/Auth/Patterns/Logic use claude-opus-4-6 with thinking.
-Performance/Style use claude-sonnet-4-6 without thinking.
+Security/Auth/Patterns/Logic/Performance use claude-sonnet-4-6 (thinking disabled).
+Style/doc-gen use claude-haiku-4-5-20251001.
 GPT models removed — Anthropic only per migration spec."
 ```
 
@@ -2929,7 +2929,7 @@ with:
 ```yaml
 anthropic:
   api_key: ${ANTHROPIC_API_KEY}
-  default_model: claude-opus-4-6
+  default_model: claude-sonnet-4-6
   timeout_seconds: 300
   enable_prompt_caching: true
   max_combined_context_tokens: 150000
@@ -2940,15 +2940,15 @@ anthropic:
 - [ ] **Step 2: Update the agents list**
 
 Replace model strings:
-- `claude-4.5-opus-high-thinking` → `claude-opus-4-6` + `thinking_enabled: true`
+- `claude-4.5-opus-high-thinking` → `claude-sonnet-4-6` (thinking disabled — see `docs/optimization.md`)
 - `gpt-5.2` → `claude-sonnet-4-6`
+- style-reviewer → `claude-haiku-4-5-20251001`
 
-For each agent entry, add (as relevant):
+For each agent entry, add:
 ```yaml
-    thinking_enabled: true         # or false
-    thinking_budget_tokens: 8192
+    thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 20
+    max_tool_calls: 8
 ```
 
 - [ ] **Step 3: Mirror the same in `.ai-reviewer.yaml`**
@@ -3095,11 +3095,11 @@ Rewrite sections to describe:
 - Anthropic Messages API as the LLM gateway
 - Prompt caching, extended thinking, tool use, JSON schema
 - `ANTHROPIC_API_KEY` setup
-- Model mix (Opus + Sonnet)
+- Model mix (Sonnet + Haiku)
 
 - [ ] **Step 2: Update the architecture diagram / model list**
 
-Wherever models are listed, replace `claude-4.5-opus-high-thinking` / `gpt-5.2` with `claude-opus-4-6` / `claude-sonnet-4-6`.
+Wherever models are listed, replace `claude-4.5-opus-high-thinking` / `gpt-5.2` with `claude-sonnet-4-6` / `claude-sonnet-4-6`.
 
 - [ ] **Step 3: Add a CHANGELOG entry**
 
@@ -3109,8 +3109,8 @@ In the appropriate changelog file (`docs/CHANGELOG-AND-NEXT.md`), add:
 
 ### Migrated
 - LLM backend: Cursor Background Agent API → Anthropic Messages API (official SDK).
-- Model mapping: `claude-4.5-opus-high-thinking` → `claude-opus-4-6` + extended thinking;
-  `gpt-5.2` → `claude-sonnet-4-6` (Anthropic-only, no GPT).
+- Model mapping: `claude-4.5-opus-high-thinking` / `gpt-5.2` → `claude-sonnet-4-6` (Anthropic-only,
+  no GPT, extended thinking disabled). Style/doc-gen agents → `claude-haiku-4-5-20251001`.
 - Repo context: Cursor background agent exploration replaced by GitHub Contents API–backed
   `read_file`/`glob`/`grep` tools invoked by Claude (no local cloning).
 - Config: `cursor:` block replaced by `anthropic:`. New per-agent knobs:
@@ -3265,10 +3265,10 @@ Run:
 gh pr create --title "feat: migrate LLM backend to Anthropic Messages API" --body "$(cat <<'EOF'
 ## Summary
 - Replaces Cursor Background Agent API with Anthropic's official Messages API
-- Adds `AnthropicClient` with tool-use loop, extended thinking, JSON-schema structured output, and prompt caching
+- Adds `AnthropicClient` with tool-use loop, JSON-schema structured output, prompt caching, and circuit breaker
 - Adds `ToolRegistry` (read_file/glob/grep) backed by GitHub Contents API — no cloning
 - Rewires `review.py` to instantiate `ReviewAgent` subclasses and drive them directly
-- Models: `claude-opus-4-6` for reasoning-heavy agents, `claude-sonnet-4-6` for broad agents (GPT removed; Anthropic only)
+- Models: `claude-sonnet-4-6` for all main agents, `claude-haiku-4-5-20251001` for style/doc-gen (GPT removed; Anthropic only)
 - Renames secret `CURSOR_API_KEY` → `ANTHROPIC_API_KEY` across CI, Cloud Build, Cloud Run, and docs
 
 ## Design & plan

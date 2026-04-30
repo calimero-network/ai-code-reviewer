@@ -393,7 +393,7 @@ async def generate_doc_drafts(
     ref: str,
     anthropic_cfg: AnthropicApiConfig,
     gh: GitHubClient,
-    model: str = "claude-sonnet-4-6",
+    model: str = "claude-haiku-4-5-20251001",
     max_files: int = 15,
 ) -> list[DocDraft]:
     """Generate AI-drafted full-file updates for stale documentation files.

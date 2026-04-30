@@ -32,10 +32,10 @@ class AnthropicApiConfig:
     api_key: str
     base_url: str = "https://api.anthropic.com"
     timeout_seconds: int = 300
-    max_retries: int = 3
-    default_model: str = "claude-opus-4-6"
+    max_retries: int = 1
+    default_model: str = "claude-sonnet-4-6"
     enable_prompt_caching: bool = True
-    max_combined_context_tokens: int = 150_000
+    max_combined_context_tokens: int = 80_000
     per_file_max_bytes: int = 512 * 1024
     per_review_github_request_budget: int = 200
 
@@ -59,7 +59,7 @@ class OrchestratorSettings:
     min_agents_required: int = 2
     max_parallel_agents: int = 5
     retry_on_failure: bool = True
-    max_retries: int = 2
+    max_retries: int = 1
 
 
 @dataclass
@@ -136,7 +136,7 @@ class DocGenerationSettings:
     """
 
     enabled: bool = False
-    model: str = "claude-sonnet-4-6"
+    model: str = "claude-haiku-4-5-20251001"
     max_files: int = 15
     # Directories containing static HTML docs (GitHub Pages sites).
     # When set, update-docs scans these dirs for HTML pages to update on merge.
@@ -215,10 +215,10 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         api_key=anthropic_raw.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", ""),
         base_url=anthropic_raw.get("base_url", "https://api.anthropic.com"),
         timeout_seconds=anthropic_raw.get("timeout_seconds", 300),
-        max_retries=anthropic_raw.get("max_retries", 3),
-        default_model=anthropic_raw.get("default_model", "claude-opus-4-6"),
+        max_retries=anthropic_raw.get("max_retries", 1),
+        default_model=anthropic_raw.get("default_model", "claude-sonnet-4-6"),
         enable_prompt_caching=anthropic_raw.get("enable_prompt_caching", True),
-        max_combined_context_tokens=anthropic_raw.get("max_combined_context_tokens", 150_000),
+        max_combined_context_tokens=anthropic_raw.get("max_combined_context_tokens", 80_000),
         per_file_max_bytes=anthropic_raw.get("per_file_max_bytes", 512 * 1024),
         per_review_github_request_budget=anthropic_raw.get("per_review_github_request_budget", 200),
     )
@@ -235,11 +235,17 @@ def _parse_config(raw: dict[str, Any]) -> Config:
 
     # Agents config
     agents = []
-    for agent_raw in raw.get("agents", []):
+    for i, agent_raw in enumerate(raw.get("agents", [])):
+        name = agent_raw.get("name")
+        model = agent_raw.get("model")
+        if not name:
+            raise ValueError(f"Agent #{i} is missing required field 'name'")
+        if not model:
+            raise ValueError(f"Agent '{name}' is missing required field 'model'")
         agents.append(
             AgentConfig(
-                name=agent_raw["name"],
-                model=agent_raw["model"],
+                name=name,
+                model=model,
                 focus_areas=agent_raw.get("focus_areas", []),
                 max_tokens=agent_raw.get("max_tokens", 4096),
                 temperature=agent_raw.get("temperature", 0.3),
@@ -257,10 +263,8 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         agents = [
             AgentConfig(
                 name="security-reviewer",
-                model="claude-opus-4-6",
+                model="claude-sonnet-4-6",
                 focus_areas=["security", "authentication"],
-                thinking_enabled=True,
-                thinking_budget_tokens=8192,
             ),
             AgentConfig(
                 name="performance-reviewer",
@@ -269,10 +273,8 @@ def _parse_config(raw: dict[str, Any]) -> Config:
             ),
             AgentConfig(
                 name="patterns-reviewer",
-                model="claude-opus-4-6",
+                model="claude-sonnet-4-6",
                 focus_areas=["consistency", "patterns"],
-                thinking_enabled=True,
-                thinking_budget_tokens=8192,
             ),
         ]
 
@@ -283,7 +285,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         min_agents_required=orch_raw.get("min_agents_required", 2),
         max_parallel_agents=orch_raw.get("max_parallel_agents", 5),
         retry_on_failure=orch_raw.get("retry_on_failure", True),
-        max_retries=orch_raw.get("max_retries", 2),
+        max_retries=orch_raw.get("max_retries", 1),
     )
 
     # Aggregator settings
@@ -344,7 +346,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
     docgen_raw = raw.get("doc_generation", {})
     doc_generation = DocGenerationSettings(
         enabled=docgen_raw.get("enabled", False),
-        model=docgen_raw.get("model", "claude-sonnet-4-6"),
+        model=docgen_raw.get("model", "claude-haiku-4-5-20251001"),
         max_files=docgen_raw.get("max_files", 15),
         static_docs_dirs=docgen_raw.get(
             "static_docs_dirs", ["architecture/", "docs/", "docs-static/"]

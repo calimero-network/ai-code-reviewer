@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 class ReviewAgent:
     """Base class for all review agents."""
 
-    MODEL: str = "claude-opus-4-6"
+    MODEL: str = "claude-sonnet-4-6"
     AGENT_TYPE: str = "base"
     FOCUS_AREAS: list[str] = []
     SYSTEM_PROMPT: str = "You are a code reviewer."

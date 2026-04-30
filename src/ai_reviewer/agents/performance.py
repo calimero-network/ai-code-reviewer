@@ -53,10 +53,10 @@ Suggest concrete optimizations with example code when possible.
 class LogicAgent(ReviewAgent):
     """Agent specialized in logic errors and edge cases."""
 
-    MODEL = "claude-opus-4-6"
+    MODEL = "claude-sonnet-4-6"
     AGENT_TYPE = "logic-reviewer"
     FOCUS_AREAS = ["logic", "edge_cases", "error_handling", "correctness"]
-    THINKING_ENABLED = True
+    THINKING_ENABLED = False
 
     SYSTEM_PROMPT = """You are an expert code reviewer focused on correctness and logic.
 

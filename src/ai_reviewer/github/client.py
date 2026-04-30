@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 # Sentinel for failed user login fetch (distinct from empty string)
 _USER_FETCH_FAILED = "__FETCH_FAILED__"
 
+# Lines within this many positions of a fix are considered part of the fix zone
+# (used to suppress low-severity findings that re-appear on already-fixed lines).
+_FIX_ZONE_TOLERANCE = 3
+
 
 def _raise_if_forbidden(exc: Exception) -> None:
     """Re-raise 403 Forbidden immediately — it won't resolve on retry.
@@ -1063,20 +1067,20 @@ class GitHubClient:
 
         # Deduplicate by comment ID to prevent exponential growth on re-reviews
         seen: set[int] = set()
-        delta.fixed_findings = [
-            f
-            for f in delta.fixed_findings
-            if f.id not in seen and not seen.add(f.id)  # type: ignore[func-returns-value]
-        ]
+        deduped: list[PreviousComment] = []
+        for comment in delta.fixed_findings:
+            if comment.id not in seen:
+                seen.add(comment.id)
+                deduped.append(comment)
+        delta.fixed_findings = deduped
 
         # Build fix zones: file → set of line numbers (with tolerance) where a
         # previous finding was fixed.  New low-severity findings landing in these
         # zones are suppressed to break the noise loop.
         fix_zones: dict[str, set[int]] = defaultdict(set)
-        fix_zone_tolerance = 3
         for fixed_comment in delta.fixed_findings:
             line = fixed_comment.line
-            for offset in range(-fix_zone_tolerance, fix_zone_tolerance + 1):
+            for offset in range(-_FIX_ZONE_TOLERANCE, _FIX_ZONE_TOLERANCE + 1):
                 fix_zones[fixed_comment.file_path].add(line + offset)
 
         _SUPPRESSED_SEVERITIES = {Severity.SUGGESTION, Severity.NITPICK}
@@ -1141,16 +1145,18 @@ class GitHubClient:
                 continue
 
             if line.startswith("+") and not line.startswith("+++"):
-                # Added line - this is a modification
+                # Added line in the new file — mark and advance.
                 modified_lines.add(current_line)
                 current_line += 1
             elif line.startswith("-") and not line.startswith("---"):
-                # Deleted line - don't increment (it's not in the new file)
-                # But mark the current position as "modified" since something changed here
-                modified_lines.add(current_line)
+                # Deleted line: exists only in the old file, has no line number in the
+                # new file. Do NOT mark current_line — marking it caused a off-by-one
+                # where the context line immediately following a deletion was incorrectly
+                # flagged as modified. _is_line_in_modified_range() tolerance handles
+                # proximity detection for the surrounding additions.
+                pass
             else:
-                # Context line or other - increment line counter
-                # Skip "\ No newline at end of file"
+                # Context line or "\ No newline at end of file" marker.
                 if not line.startswith("\\"):
                     current_line += 1
 
@@ -1231,7 +1237,7 @@ class GitHubClient:
             Dict mapping comment database IDs to their thread's GraphQL node ID
             (only includes unresolved threads)
         """
-        owner, name = repo_name.split("/")
+        owner, name = repo_name.split("/", 1)
         comment_to_thread: dict[int, str] = {}
 
         query = """

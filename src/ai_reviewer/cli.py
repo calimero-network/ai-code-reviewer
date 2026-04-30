@@ -336,7 +336,10 @@ async def review_pr_async(
         formatter = GitHubFormatter(reviewer_name)
         print(formatter.format_review(review))
     else:  # github
-        assert gh is not None and pr is not None
+        if gh is None or pr is None:
+            raise click.ClickException(
+                "--output github requires a valid GitHub token and accessible PR"
+            )
         formatter = GitHubFormatter(reviewer_name)
         current_sha = pr.head.sha
 
