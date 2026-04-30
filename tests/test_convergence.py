@@ -546,12 +546,10 @@ class TestWebhookConvergenceGate:
             patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
             patch("ai_reviewer.github.formatter.GitHubFormatter"),
         ):
-            from ai_reviewer.github import webhook
             from ai_reviewer.github.webhook import _setup_default_review_handler
 
-            _setup_default_review_handler()
+            handler = _setup_default_review_handler()
 
-            handler = webhook._review_handler
             assert handler is not None
             await handler(repo="test/repo", pr_number=42)
 
@@ -608,12 +606,10 @@ class TestWebhookConvergenceGate:
             patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
             patch("ai_reviewer.github.formatter.GitHubFormatter"),
         ):
-            from ai_reviewer.github import webhook
             from ai_reviewer.github.webhook import _setup_default_review_handler
 
-            _setup_default_review_handler()
+            handler = _setup_default_review_handler()
 
-            handler = webhook._review_handler
             assert handler is not None
             await handler(repo="test/repo", pr_number=42)
 
@@ -669,12 +665,10 @@ class TestWebhookConvergenceGate:
             patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
             patch("ai_reviewer.github.formatter.GitHubFormatter"),
         ):
-            from ai_reviewer.github import webhook
             from ai_reviewer.github.webhook import _setup_default_review_handler
 
-            _setup_default_review_handler()
+            handler = _setup_default_review_handler()
 
-            handler = webhook._review_handler
             assert handler is not None
             await handler(repo="test/repo", pr_number=42)
 
@@ -1622,12 +1616,10 @@ class TestLgtmLightweightRecheck:
             patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
             patch("ai_reviewer.github.formatter.GitHubFormatter"),
         ):
-            from ai_reviewer.github import webhook
             from ai_reviewer.github.webhook import _setup_default_review_handler
 
-            _setup_default_review_handler()
+            handler = _setup_default_review_handler()
 
-            handler = webhook._review_handler
             assert handler is not None
             await handler(repo="test/repo", pr_number=42)
 
@@ -1719,12 +1711,10 @@ class TestLgtmLightweightRecheck:
             patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
             patch("ai_reviewer.github.formatter.GitHubFormatter"),
         ):
-            from ai_reviewer.github import webhook
             from ai_reviewer.github.webhook import _setup_default_review_handler
 
-            _setup_default_review_handler()
+            handler = _setup_default_review_handler()
 
-            handler = webhook._review_handler
             assert handler is not None
             await handler(repo="test/repo", pr_number=42)
 
@@ -1798,12 +1788,10 @@ class TestLgtmLightweightRecheck:
             patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
             patch("ai_reviewer.github.formatter.GitHubFormatter"),
         ):
-            from ai_reviewer.github import webhook
             from ai_reviewer.github.webhook import _setup_default_review_handler
 
-            _setup_default_review_handler()
+            handler = _setup_default_review_handler()
 
-            handler = webhook._review_handler
             assert handler is not None
             await handler(repo="test/repo", pr_number=42)
 
@@ -2252,12 +2240,10 @@ class TestWebhookCompactSummaryCounts:
             ),
             patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
         ):
-            from ai_reviewer.github import webhook
             from ai_reviewer.github.webhook import _setup_default_review_handler
 
-            _setup_default_review_handler()
+            handler = _setup_default_review_handler()
 
-            handler = webhook._review_handler
             assert handler is not None
             await handler(repo="test/repo", pr_number=42)
 
@@ -2507,12 +2493,10 @@ class TestSuppressedFindingsNotPosted:
             ),
             patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
         ):
-            from ai_reviewer.github import webhook
             from ai_reviewer.github.webhook import _setup_default_review_handler
 
-            _setup_default_review_handler()
+            handler = _setup_default_review_handler()
 
-            handler = webhook._review_handler
             assert handler is not None
             await handler(repo="test/repo", pr_number=42)
 
