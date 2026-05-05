@@ -14,7 +14,7 @@ AI Code Reviewer takes a different approach to automated code review: instead of
 
 - **Multi-Agent Architecture**: Run 2–5+ LLM agents in parallel, each with a specialized focus area
 - **Consensus-Based Scoring**: Findings are weighted by how many agents agree, reducing false positives
-- **Anthropic Messages API**: All models (Claude Opus 4.6, Sonnet 4.6) accessed directly via the official `anthropic` SDK, with prompt caching, extended thinking, and tool use
+- **Anthropic Messages API**: All models (Claude Sonnet 4.6, Haiku 4.5) accessed directly via the official `anthropic` SDK, with prompt caching, JSON-schema structured output, and tool use
 - **GitHub Integration**: Automatic PR reviews via webhooks, with inline comments and thread resolution
 - **Incremental Reviews**: Delta tracking detects new, fixed, and open findings across pushes — with convergence logic that stops reviewing when findings stabilize
 - **Documentation Review**: Rule-based check that flags missing doc updates on architecture-impacting PRs — works out-of-the-box on any repo by probing for `CLAUDE.md`, `AGENTS.md`, and architecture folders (zero LLM cost)
@@ -44,18 +44,18 @@ git diff main | ai-reviewer review --output markdown
 
 ## How It Works
 
-All LLM agents call Anthropic's Messages API directly via the official `anthropic` SDK. Reasoning-heavy agents run on `claude-opus-4-6` with extended thinking; broader agents run on `claude-sonnet-4-6`. Repo exploration happens through Claude tool use (`read_file` / `glob` / `grep`) backed by the GitHub Contents API — no cloning, no extra infrastructure.
+All LLM agents call Anthropic's Messages API directly via the official `anthropic` SDK. Security, performance, patterns, and logic agents run on `claude-sonnet-4-6`; the style agent uses `claude-haiku-4-5-20251001`. Repo exploration happens through Claude tool use (`read_file` / `glob` / `grep`) backed by the GitHub Contents API — no cloning, no extra infrastructure.
 
 ```mermaid
 flowchart LR
-    PR["PR Diff"] --> Anthropic["Anthropic Messages API\n(claude-opus-4-6 / sonnet-4-6)"]
+    PR["PR Diff"] --> Anthropic["Anthropic Messages API\n(claude-sonnet-4-6 / haiku-4-5)"]
 
     subgraph Agents["Parallel Agent Execution"]
-        A1["Opus + thinking\n(Security)"]
+        A1["Sonnet\n(Security)"]
         A2["Sonnet\n(Performance)"]
-        A3["Opus + thinking\n(Patterns)"]
-        A4["Opus + thinking\n(Logic)"]
-        A5["Sonnet\n(Style)"]
+        A3["Sonnet\n(Patterns)"]
+        A4["Sonnet\n(Logic)"]
+        A5["Haiku\n(Style)"]
     end
 
     Anthropic --> Agents
@@ -76,29 +76,26 @@ Create `config.yaml`:
 ```yaml
 anthropic:
   api_key: ${ANTHROPIC_API_KEY}
-  default_model: claude-opus-4-6
+  default_model: claude-sonnet-4-6
   enable_prompt_caching: true
+  max_combined_context_tokens: 80000
 
 github:
   token: ${GITHUB_TOKEN}  # or Classic PAT for thread resolution (see below)
 
 agents:
   - name: security-reviewer
-    model: claude-opus-4-6
+    model: claude-sonnet-4-6
     focus_areas: [security, architecture]
-    thinking_enabled: true
-    thinking_budget_tokens: 8192
 
   - name: performance-reviewer
     model: claude-sonnet-4-6
     focus_areas: [performance, logic]
 
-  - name: patterns-reviewer
-    model: claude-opus-4-6
-    focus_areas: [consistency, patterns]
-    thinking_enabled: true
-    allow_tool_use: true
-    max_tool_calls: 30
+  - name: style-reviewer
+    model: claude-haiku-4-5-20251001
+    focus_areas: [style, readability]
+    allow_tool_use: false
 
 orchestrator:
   timeout_seconds: 300

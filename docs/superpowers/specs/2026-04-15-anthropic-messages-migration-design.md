@@ -11,7 +11,7 @@
 Today the project uses Cursor's Background Agent API (`api.cursor.com/v0/agents`) for all LLM calls. Two problems:
 
 1. **Architectural mismatch.** Cursor's API is a repo-scoped, async, polling-based agent runner. Most of our flows want a chat-completion shape. `CursorClient.complete()` in `src/ai_reviewer/agents/cursor_client.py:303` actually raises `NotImplementedError`, so the `ReviewAgent.review()` path in `agents/base.py` has never worked; only the `run_review_agent()` path in `review.py` is live.
-2. **Vendor fit.** The user wants to consolidate on Anthropic's official API for control over models (Opus 4.6, Sonnet 4.6), prompt caching, extended thinking, and structured outputs — none of which are first-class through Cursor's wrapper.
+2. **Vendor fit.** The user wants to consolidate on Anthropic's official API for control over models (Sonnet 4.6, Haiku 4.5), prompt caching, structured outputs, and tool use — none of which are first-class through Cursor's wrapper.
 
 The migration target is the Messages API at `https://api.anthropic.com/v1/messages`, via the official `anthropic` Python SDK.
 
@@ -29,7 +29,7 @@ To match-and-beat Cursor's background agents, every review layers:
 1. **Rich baseline prompt context** (cached) — conventions, manifests, changed files, neighbors.
 2. **Tool use** — Claude can call `read_file`, `glob`, `grep` on demand.
 3. **Extended thinking** on reasoning-heavy agents.
-4. **Model mix** — Opus 4.6 on reasoning-heavy agents, Sonnet 4.6 on fast/broad agents.
+4. **Model mix** — Sonnet 4.6 on all main agents (security, logic, patterns, performance), Haiku 4.5 on style/doc-gen agents.
 5. **Structured output** via `output_config.format = json_schema`.
 6. **Prompt caching** on shared system prompts across the multi-agent run.
 
@@ -151,20 +151,20 @@ Enabled via the `thinking` parameter on the Messages API.
 
 | Agent | Model | Thinking | Budget |
 |---|---|---|---|
-| security-reviewer | `claude-opus-4-6` | enabled | 8192 |
-| patterns-reviewer | `claude-opus-4-6` | enabled | 8192 |
-| logic-reviewer | `claude-opus-4-6` | enabled | 8192 |
+| security-reviewer | `claude-sonnet-4-6` | disabled | — |
+| patterns-reviewer | `claude-sonnet-4-6` | disabled | — |
+| logic-reviewer | `claude-sonnet-4-6` | disabled | — |
 | performance-reviewer | `claude-sonnet-4-6` | disabled | — |
-| style-reviewer | `claude-sonnet-4-6` | disabled | — |
+| style-reviewer | `claude-haiku-4-5-20251001` | disabled | — |
 
-`max_tokens` is set to `thinking.budget_tokens + expected_output_tokens + margin`, e.g., 16384 for thinking-enabled agents, 8192 otherwise.
+> **2026-04-30 cost optimization:** Extended thinking was originally planned for security/patterns/logic agents on Opus 4.6. It was disabled and Opus was replaced with Sonnet 4.6 after a cost audit revealed that thinking blocks re-sent on every tool round caused triangular token accumulation — see `docs/optimization.md`. `max_tokens` is 8192 for all agents.
 
-`claude-mythos-preview` is **not** used. Confirmed unavailable outside Anthropic's Project Glasswing consortium (invitation-only, ~40 approved orgs), with no plan for general availability. The security agent stays on `claude-opus-4-6`.
+`claude-mythos-preview` is **not** used. Confirmed unavailable outside Anthropic's Project Glasswing consortium (invitation-only, ~40 approved orgs), with no plan for general availability.
 
 ### 5.5 Model mix
 
 Diversity (previously achieved via Cursor's Claude+GPT mix) is now achieved via:
-- **Model size:** Opus 4.6 vs. Sonnet 4.6.
+- **Model size:** Sonnet 4.6 (main agents) vs. Haiku 4.5 (style/doc-gen).
 - **System prompts:** distinct per agent (already in place).
 - **Temperature:** 0.2 on reasoning-heavy agents, 0.3 on broad agents (keeps current defaults).
 - **Focus areas:** distinct per agent (already in place).
@@ -227,10 +227,10 @@ class AnthropicApiConfig:
     api_key: str                                        # ${ANTHROPIC_API_KEY}
     base_url: str = "https://api.anthropic.com"
     timeout_seconds: int = 300
-    max_retries: int = 3
-    default_model: str = "claude-opus-4-6"
+    max_retries: int = 1
+    default_model: str = "claude-sonnet-4-6"
     enable_prompt_caching: bool = True
-    max_combined_context_tokens: int = 150_000          # soft cap for §5.1 truncation
+    max_combined_context_tokens: int = 80_000          # soft cap for §5.1 truncation
     per_file_max_bytes: int = 512 * 1024                # §4.3 tool-read cap
     per_review_github_request_budget: int = 200         # §4.3 quota counter
 
@@ -250,18 +250,19 @@ class AgentConfig:
 ```yaml
 anthropic:
   api_key: ${ANTHROPIC_API_KEY}
-  default_model: claude-opus-4-6
+  default_model: claude-sonnet-4-6
   timeout_seconds: 300
   enable_prompt_caching: true
+  max_retries: 1
+  max_combined_context_tokens: 80000
 
 agents:
   - name: security-reviewer
-    model: claude-opus-4-6
+    model: claude-sonnet-4-6
     focus_areas: [security, authentication, data_validation]
-    thinking_enabled: true
-    thinking_budget_tokens: 8192
+    thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 20
+    max_tool_calls: 8
     temperature: 0.2
 
   - name: performance-reviewer
@@ -269,16 +270,15 @@ agents:
     focus_areas: [performance, complexity, resource_management]
     thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 10
+    max_tool_calls: 8
     temperature: 0.3
 
   - name: patterns-reviewer
-    model: claude-opus-4-6
+    model: claude-sonnet-4-6
     focus_areas: [consistency, patterns, architecture, breaking_changes]
-    thinking_enabled: true
-    thinking_budget_tokens: 8192
+    thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 30                # explores more
+    max_tool_calls: 8
     temperature: 0.2
 ```
 
@@ -375,7 +375,7 @@ Phased so that each phase is independently mergeable and reversible.
 
 | Risk | Likelihood | Mitigation |
 |---|---|---|
-| Tool-use loop never terminates | low | Max tool-call budget; loop cap = 30 rounds; hard timeout per agent |
+| Tool-use loop never terminates | low | Max tool-call budget; loop cap = 8 rounds; hard timeout per agent; circuit breaker on input token spike |
 | GitHub rate-limit exhaustion | low | Per-review request budget (200); per-file size cap; tree cache |
 | Structured-output rejection on edge cases | low | Retry once with `stop_reason: "max_tokens"` escalation; fall back to legacy JSON-in-text parse |
 | Cost spike from thinking + tools | medium | Per-agent thinking toggle in YAML; per-agent tool-call cap; log cache-hit rate |

@@ -29,7 +29,7 @@
 
 ## 1. System Overview
 
-AI Code Reviewer orchestrates multiple LLM agents — each with a specialized focus area — to produce consensus-based code reviews. All LLM access goes through Anthropic's Messages API via the official `anthropic` SDK. Agents run on `claude-opus-4-6` (reasoning-heavy, with extended thinking) or `claude-sonnet-4-6` (broader, faster). Repo exploration happens through Claude tool use (`read_file` / `glob` / `grep`) backed by the GitHub Contents API.
+AI Code Reviewer orchestrates multiple LLM agents — each with a specialized focus area — to produce consensus-based code reviews. All LLM access goes through Anthropic's Messages API via the official `anthropic` SDK. Agents run on `claude-sonnet-4-6` (reasoning-heavy, with extended thinking) or `claude-sonnet-4-6` (broader, faster). Repo exploration happens through Claude tool use (`read_file` / `glob` / `grep`) backed by the GitHub Contents API.
 
 ```mermaid
 flowchart LR

@@ -4,12 +4,12 @@
 
 ### Migrated
 - **LLM backend**: Cursor Background Agent API → Anthropic Messages API (official SDK).
-- **Models**: `claude-4.5-opus-high-thinking` → `claude-opus-4-6` + extended thinking;
-  `gpt-5.2` → `claude-sonnet-4-6` (Anthropic-only, no GPT).
+- **Models**: `claude-4.5-opus-high-thinking` / `gpt-5.2` → `claude-sonnet-4-6` (security,
+  performance, patterns, logic, auth); `claude-haiku-4-5-20251001` (style, doc generation).
+  Extended thinking disabled on all agents — see `docs/optimization.md` for rationale.
 - **Repo context**: Cursor's background-agent exploration replaced by Claude tool use
   (`read_file` / `glob` / `grep`) backed by the GitHub Contents API. No local cloning.
-- **Quality stack**: Prompt caching on system blocks, JSON-schema structured output,
-  extended thinking on security/patterns/logic agents.
+- **Quality stack**: Prompt caching on system blocks, JSON-schema structured output.
 - **Config**: `cursor:` block replaced by `anthropic:`. New per-agent knobs:
   `thinking_enabled`, `thinking_budget_tokens`, `allow_tool_use`, `max_tool_calls`.
 
@@ -64,7 +64,7 @@
 | 7 | **Stable finding IDs** | Use hash(file_path, line, title) for finding IDs instead of order-dependent index. |
 | 8 | **Inline comment line** | Use `line_end` when available for GitHub inline comments so they attach to the right line. |
 | 9 | **Repository `.ai-reviewer.yaml`** | Load and merge repo-root config for ignore patterns, custom prompts, policy (or document "not implemented"). |
-| 10 | **Retries for Cursor API** | Use tenacity for create_agent / get_agent with backoff. |
+| 10 | **Retries for Anthropic API** | Use tenacity for Messages API calls with backoff (SDK handles 429/529 natively). |
 | 11 | **Broad view first (prompt)** | Add one line: "First consider: does this change make sense? If not, say why and suggest an alternative." |
 
 ### Lower priority
@@ -72,7 +72,7 @@
 | # | Improvement | Why |
 |---|-------------|-----|
 | 12 | **Consolidate aggregation** | Use a single aggregation implementation (e.g. only `review.aggregate_findings` or only `ReviewAggregator`) and reuse everywhere. |
-| 13 | **Validate required env vars** | When config expands `${CURSOR_API_KEY}` to empty, fail or warn instead of silent empty string. |
+| 13 | **Validate required env vars** | When config expands `${ANTHROPIC_API_KEY}` to empty, fail or warn instead of silent empty string. |
 | 14 | **Version single source** | One source of truth for version (e.g. from pyproject or `importlib.metadata`). |
 | 15 | **Magic numbers → config** | Diff/file size limits, line tolerance, max inline comments (10) as config or named constants. |
 | 16 | **Tests** | More tests for formatter compact/delta, config validation, webhook signature, and full review flow with mocked Cursor/GitHub. |

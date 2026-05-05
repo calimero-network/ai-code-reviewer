@@ -54,7 +54,7 @@ async def test_run_review_happy_path_parses_json():
     )
 
     result = await client.run_review(
-        model="claude-opus-4-6",
+        model="claude-sonnet-4-6",
         system_blocks=[{"type": "text", "text": "You are a reviewer."}],
         user_blocks=[{"type": "text", "text": "diff..."}],
         output_schema={"type": "object"},
@@ -80,7 +80,7 @@ async def test_run_review_passes_output_schema_as_json_schema():
 
     schema = {"type": "object", "properties": {"findings": {"type": "array"}}}
     await client.run_review(
-        model="claude-opus-4-6",
+        model="claude-sonnet-4-6",
         system_blocks=[{"type": "text", "text": "sys"}],
         user_blocks=[{"type": "text", "text": "u"}],
         output_schema=schema,
@@ -105,7 +105,7 @@ async def test_run_review_with_thinking_budget_sets_thinking_config():
     )
 
     await client.run_review(
-        model="claude-opus-4-6",
+        model="claude-sonnet-4-6",
         system_blocks=[{"type": "text", "text": "s"}],
         user_blocks=[{"type": "text", "text": "u"}],
         output_schema={"type": "object"},
@@ -158,7 +158,7 @@ async def test_tool_use_loop_dispatches_and_feeds_result_back():
     registry.execute = AsyncMock(return_value="file-contents")
 
     result = await client.run_review(
-        model="claude-opus-4-6",
+        model="claude-sonnet-4-6",
         system_blocks=[{"type": "text", "text": "s"}],
         user_blocks=[{"type": "text", "text": "u"}],
         output_schema={"type": "object"},
@@ -190,7 +190,7 @@ async def test_caching_marks_last_system_block_when_enabled():
     )
 
     await client.run_review(
-        model="claude-opus-4-6",
+        model="claude-sonnet-4-6",
         system_blocks=[
             {"type": "text", "text": "role"},
             {"type": "text", "text": "conventions"},
@@ -217,7 +217,7 @@ async def test_caching_disabled_leaves_system_unchanged():
     )
 
     await client.run_review(
-        model="claude-opus-4-6",
+        model="claude-sonnet-4-6",
         system_blocks=[{"type": "text", "text": "role"}],
         user_blocks=[{"type": "text", "text": "u"}],
         output_schema={"type": "object"},
@@ -253,6 +253,90 @@ async def test_run_completion_returns_plain_text():
     # run_completion must not pass output_config or tools
     assert "output_config" not in call_kwargs
     assert "tools" not in call_kwargs
+
+
+@pytest.mark.asyncio
+async def test_caching_marks_last_tool_result_when_enabled():
+    """cache_control is placed on the last tool_result block so the conversation
+    prefix is cached for the next round — reducing re-billed input tokens by ~90%."""
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=True)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    client._sdk.messages.create = AsyncMock(
+        side_effect=[
+            _tool_use_response("t1", "read_file", {"path": "a.py"}),
+            _tool_use_response("t2", "read_file", {"path": "b.py"}),
+            _fake_response('{"findings": [], "summary": "done"}'),
+        ]
+    )
+
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(return_value="contents")
+
+    await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        enable_thinking=False,
+        max_tokens=4096,
+        temperature=0.3,
+    )
+
+    # Round 2: the tool_result user turn appended after round 1 must carry cache_control
+    round2_kwargs = client._sdk.messages.create.await_args_list[1].kwargs
+    round2_last_user_msg = round2_kwargs["messages"][-1]
+    assert round2_last_user_msg["role"] == "user"
+    last_block = round2_last_user_msg["content"][-1]
+    assert last_block["type"] == "tool_result"
+    assert last_block.get("cache_control") == {"type": "ephemeral"}, (
+        "Last tool_result block must carry cache_control so the conversation "
+        "prefix is cached before the next messages.create call"
+    )
+
+    # Round 3: same invariant — the tool_result from round 2 is also marked
+    round3_kwargs = client._sdk.messages.create.await_args_list[2].kwargs
+    round3_last_user_msg = round3_kwargs["messages"][-1]
+    last_block_r3 = round3_last_user_msg["content"][-1]
+    assert last_block_r3.get("cache_control") == {"type": "ephemeral"}
+
+
+@pytest.mark.asyncio
+async def test_caching_disabled_leaves_tool_result_unmarked():
+    """When caching is off, no cache_control is added to tool_result blocks."""
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    client._sdk.messages.create = AsyncMock(
+        side_effect=[
+            _tool_use_response("t1", "read_file", {"path": "a.py"}),
+            _fake_response('{"findings": [], "summary": "done"}'),
+        ]
+    )
+
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(return_value="contents")
+
+    await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        enable_thinking=False,
+        max_tokens=4096,
+        temperature=0.3,
+    )
+
+    round2_kwargs = client._sdk.messages.create.await_args_list[1].kwargs
+    last_user_msg = round2_kwargs["messages"][-1]
+    for block in last_user_msg["content"]:
+        assert "cache_control" not in block, (
+            "cache_control must not appear on tool_result when caching is disabled"
+        )
 
 
 @pytest.mark.asyncio

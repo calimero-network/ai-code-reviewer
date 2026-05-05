@@ -9,22 +9,22 @@ inherit_from: default
 # Anthropic Messages API — unified LLM gateway
 anthropic:
   api_key: ${ANTHROPIC_API_KEY}
-  default_model: claude-opus-4-6
+  default_model: claude-sonnet-4-6
   timeout_seconds: 300
+  max_retries: 1
   enable_prompt_caching: true
-  max_combined_context_tokens: 150000
+  max_combined_context_tokens: 80000
   per_file_max_bytes: 524288
   per_review_github_request_budget: 200
 
 # Agent customization for self-review
 agents:
   - name: security-reviewer
-    model: claude-opus-4-6
+    model: claude-sonnet-4-6
     focus_areas: [security, authentication]
-    thinking_enabled: true
-    thinking_budget_tokens: 8192
+    thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 20
+    max_tool_calls: 8
     temperature: 0.2
     custom_prompt_append: |
       This is a Python codebase that handles API keys and GitHub tokens.
@@ -34,12 +34,11 @@ agents:
       - Rate limiting and abuse prevention
 
   - name: patterns-reviewer
-    model: claude-opus-4-6
+    model: claude-sonnet-4-6
     focus_areas: [architecture, patterns]
-    thinking_enabled: true
-    thinking_budget_tokens: 8192
+    thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 30
+    max_tool_calls: 8
     temperature: 0.2
     custom_prompt_append: |
       This codebase follows these key patterns:
@@ -52,12 +51,11 @@ agents:
       Reference .ai/rules/ for detailed module conventions.
 
   - name: logic-reviewer
-    model: claude-opus-4-6
+    model: claude-sonnet-4-6
     focus_areas: [logic, edge_cases, error_handling]
-    thinking_enabled: true
-    thinking_budget_tokens: 8192
+    thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 20
+    max_tool_calls: 8
     temperature: 0.2
 
   - name: performance-reviewer
@@ -65,11 +63,11 @@ agents:
     focus_areas: [performance, complexity, resource_management]
     thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 10
+    max_tool_calls: 8
     temperature: 0.3
 
   - name: style-reviewer
-    model: claude-sonnet-4-6
+    model: claude-haiku-4-5-20251001
     focus_areas: [style, documentation, readability]
     thinking_enabled: false
     allow_tool_use: false
@@ -126,7 +124,7 @@ documentation:
 # AI-powered doc draft generation — enabled for dogfooding
 doc_generation:
   enabled: true
-  model: claude-sonnet-4-6
+  model: claude-haiku-4-5-20251001
   max_files: 5
 
 # Custom rules for this repo

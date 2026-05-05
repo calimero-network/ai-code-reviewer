@@ -6,10 +6,10 @@ from ai_reviewer.agents.base import ReviewAgent
 class SecurityAgent(ReviewAgent):
     """Agent specialized in security vulnerability detection."""
 
-    MODEL = "claude-opus-4-6"
+    MODEL = "claude-sonnet-4-6"
     AGENT_TYPE = "security-reviewer"
     FOCUS_AREAS = ["security", "authentication", "data_validation", "cryptography"]
-    THINKING_ENABLED = True
+    THINKING_ENABLED = False
 
     SYSTEM_PROMPT = """You are an expert security code reviewer with deep knowledge of:
 - OWASP Top 10 vulnerabilities
@@ -57,10 +57,10 @@ Provide specific line numbers and concrete evidence for each finding.
 class AuthenticationAgent(ReviewAgent):
     """Agent specialized in authentication and authorization issues."""
 
-    MODEL = "claude-opus-4-6"
+    MODEL = "claude-sonnet-4-6"
     AGENT_TYPE = "authentication-reviewer"
     FOCUS_AREAS = ["authentication", "authorization", "session_management"]
-    THINKING_ENABLED = True
+    THINKING_ENABLED = False
 
     SYSTEM_PROMPT = """You are an expert in authentication and authorization security.
 

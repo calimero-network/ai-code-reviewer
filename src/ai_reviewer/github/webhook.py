@@ -6,12 +6,23 @@ import hmac
 import json
 import logging
 import os
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 
 from fastapi import FastAPI, HTTPException, Request
 
 logger = logging.getLogger(__name__)
+
+_handler_lock = threading.Lock()
+
+
+def _log_task_error(task: asyncio.Task) -> None:
+    """Done-callback that logs exceptions from fire-and-forget async tasks."""
+    if not task.cancelled():
+        exc = task.exception()
+        if exc is not None:
+            logger.error("Background task %r failed: %s", task.get_name(), exc)
 
 
 def _get_env_int(key: str, default: int) -> int:
@@ -52,13 +63,15 @@ _push_handler: Callable | None = None
 def set_review_handler(handler: Callable) -> None:
     """Set the review handler function."""
     global _review_handler
-    _review_handler = handler
+    with _handler_lock:
+        _review_handler = handler
 
 
 def set_push_handler(handler: Callable) -> None:
     """Set the push handler used to trigger doc updates on merge."""
     global _push_handler
-    _push_handler = handler
+    with _handler_lock:
+        _push_handler = handler
 
 
 def _get_github_app_token(app_id: str, private_key: str, repo: str) -> str | None:
@@ -109,7 +122,8 @@ def _get_github_app_token(app_id: str, private_key: str, repo: str) -> str | Non
             )
 
         if response.status_code != 200:
-            logger.error(f"Failed to get installation: {response.status_code} {response.text}")
+            # Truncate body to avoid logging sensitive auth details
+            logger.error("Failed to get installation: status=%d", response.status_code)
             return None
 
         installation_id = response.json()["id"]
@@ -121,7 +135,7 @@ def _get_github_app_token(app_id: str, private_key: str, repo: str) -> str | Non
             timeout=10,
         )
         if response.status_code != 201:
-            logger.error(f"Failed to get access token: {response.status_code} {response.text}")
+            logger.error("Failed to get access token: status=%d", response.status_code)
             return None
 
         return response.json()["token"]
@@ -131,8 +145,8 @@ def _get_github_app_token(app_id: str, private_key: str, repo: str) -> str | Non
         return None
 
 
-def _setup_default_review_handler() -> None:
-    """Set up the default review handler using environment config.
+def _setup_default_review_handler() -> Callable:
+    """Build and return the default review handler using environment config.
 
     This is used when running as a standalone server (e.g., Cloud Run)
     without the CLI's explicit handler setup.
@@ -395,11 +409,11 @@ def _setup_default_review_handler() -> None:
         except Exception as e:
             logger.exception(f"Error reviewing {repo} PR #{pr_number}: {e}")
 
-    set_review_handler(default_review_handler)
+    return default_review_handler
 
 
-def _setup_default_push_handler() -> None:
-    """Set up a default push handler that runs update-docs on merges to main/master."""
+def _setup_default_push_handler() -> Callable:
+    """Build and return the default push handler that runs update-docs on merges to main/master."""
     from ai_reviewer.cli import _update_docs_async
 
     async def default_push_handler(repo: str, ref: str, head_commit_message: str) -> None:
@@ -434,7 +448,7 @@ def _setup_default_push_handler() -> None:
         except Exception as e:
             logger.exception("update-docs failed for %s PR #%d: %s", repo, pr_number, e)
 
-    set_push_handler(default_push_handler)
+    return default_push_handler
 
 
 async def handle_push_event(payload: dict) -> None:
@@ -496,11 +510,6 @@ async def _handle_issue_comment_event(payload: dict) -> None:
         logger.warning("No review handler configured for /ai-review trigger")
 
 
-async def review_pr(repo: str, pr_number: int) -> None:
-    """Placeholder for review function - will be implemented with full app."""
-    logger.info(f"Would review {repo} PR #{pr_number}")
-
-
 def create_webhook_app(webhook_secret: str | None = None) -> FastAPI:
     """Create the FastAPI webhook application.
 
@@ -517,11 +526,14 @@ def create_webhook_app(webhook_secret: str | None = None) -> FastAPI:
     if webhook_secret is None:
         webhook_secret = os.environ.get("GITHUB_WEBHOOK_SECRET")
 
-    # Set up review and push handlers from environment if not already set
-    if _review_handler is None:
-        _setup_default_review_handler()
-    if _push_handler is None:
-        _setup_default_push_handler()
+    # Set up review and push handlers from environment if not already set.
+    # Lock prevents a race if create_webhook_app is called concurrently (e.g. in tests).
+    with _handler_lock:
+        global _review_handler, _push_handler
+        if _review_handler is None:
+            _review_handler = _setup_default_review_handler()
+        if _push_handler is None:
+            _push_handler = _setup_default_push_handler()
 
     app = FastAPI(
         title="AI Code Reviewer Webhook",
@@ -553,22 +565,29 @@ def create_webhook_app(webhook_secret: str | None = None) -> FastAPI:
         event_type = request.headers.get("X-GitHub-Event", "")
 
         if event_type == "pull_request":
-            pr_event = PREvent(
-                repo=payload["repository"]["full_name"],
-                pr_number=payload["pull_request"]["number"],
-                action=payload["action"],
-                sender=payload.get("sender", {}).get("login", ""),
-                installation_id=payload.get("installation", {}).get("id"),
-            )
+            try:
+                pr_event = PREvent(
+                    repo=payload["repository"]["full_name"],
+                    pr_number=payload["pull_request"]["number"],
+                    action=payload["action"],
+                    sender=payload.get("sender", {}).get("login", ""),
+                    installation_id=payload.get("installation", {}).get("id"),
+                )
+            except KeyError as e:
+                raise HTTPException(
+                    status_code=400, detail=f"Malformed pull_request payload: missing {e}"
+                ) from e
 
-            # Process async to respond quickly
-            asyncio.create_task(handle_pr_event(pr_event))
+            # Process async to respond quickly; log exceptions so they aren't silently lost
+            asyncio.create_task(handle_pr_event(pr_event)).add_done_callback(_log_task_error)
 
         elif event_type == "issue_comment":
-            asyncio.create_task(_handle_issue_comment_event(payload))
+            asyncio.create_task(_handle_issue_comment_event(payload)).add_done_callback(
+                _log_task_error
+            )
 
         elif event_type == "push":
-            asyncio.create_task(handle_push_event(payload))
+            asyncio.create_task(handle_push_event(payload)).add_done_callback(_log_task_error)
 
         elif event_type == "ping":
             logger.info("Received ping from GitHub")

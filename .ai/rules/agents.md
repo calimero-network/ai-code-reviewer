@@ -9,7 +9,7 @@ The `agents/` module contains all LLM agent implementations that perform code re
 ```python
 # Base class all agents inherit from
 class ReviewAgent:
-    MODEL: str              # Anthropic model ID (e.g. "claude-opus-4-6")
+    MODEL: str              # Anthropic model ID (e.g. "claude-sonnet-4-6")
     AGENT_TYPE: str          # Agent classification (e.g. "security-reviewer")
     FOCUS_AREAS: list        # What this agent specializes in
     SYSTEM_PROMPT: str       # Instructions for the LLM
@@ -31,11 +31,11 @@ class AgentReview:
 ```
 agents/
 ├── __init__.py              # Exports public API
-├── anthropic_client.py      # AnthropicClient: Messages API wrapper with tool-use loop, thinking, caching
+├── anthropic_client.py      # AnthropicClient: Messages API wrapper with tool-use loop, caching
 ├── base.py                  # ReviewAgent base class
-├── security.py              # SecurityAgent, AuthenticationAgent (Opus + thinking)
-├── performance.py           # PerformanceAgent (Sonnet), LogicAgent (Opus + thinking)
-└── patterns.py              # PatternsAgent (Opus + thinking), StyleAgent (Sonnet)
+├── security.py              # SecurityAgent, AuthenticationAgent (Sonnet)
+├── performance.py           # PerformanceAgent (Sonnet), LogicAgent (Sonnet)
+└── patterns.py              # PatternsAgent (Sonnet), StyleAgent (Haiku)
 ```
 
 ## Invariants
@@ -66,10 +66,10 @@ from ai_reviewer.agents.base import ReviewAgent
 class NewFocusAgent(ReviewAgent):
     """Agent focused on [specific area]."""
 
-    MODEL = "claude-opus-4-6"        # or "claude-sonnet-4-6" for faster/broader
+    MODEL = "claude-sonnet-4-6"      # use claude-haiku-4-5-20251001 for style-only agents
     AGENT_TYPE = "new-focus-reviewer"
     FOCUS_AREAS = ["focus1", "focus2"]
-    THINKING_ENABLED = True           # Enable for reasoning-heavy agents
+    THINKING_ENABLED = False          # keep False — thinking adds quadratic cost in tool loops
 
     SYSTEM_PROMPT = """You are an expert in [area].
     Focus on:
@@ -92,8 +92,8 @@ DEFAULT_AGENT_ORDER.append("new-focus-reviewer")
 # The review() method is inherited:
 
 class MyAgent(ReviewAgent):
-    MODEL = "claude-opus-4-6"
-    THINKING_ENABLED = True
+    MODEL = "claude-sonnet-4-6"
+    THINKING_ENABLED = False
 
     # Override SYSTEM_PROMPT — that's usually all you need.
     SYSTEM_PROMPT = """..."""

@@ -11,7 +11,7 @@ AI Code Reviewer is a multi-agent system that orchestrates multiple LLMs to prod
 - **All LLM access goes through `AnthropicClient`** in `agents/anthropic_client.py`
 - Single API key (`ANTHROPIC_API_KEY`) manages all models
 - Features: prompt caching, adaptive thinking, JSON-schema structured output, tool use
-- Model switching via configuration (`claude-opus-4-6` / `claude-sonnet-4-6`)
+- Model switching via configuration (`claude-sonnet-4-6` / `claude-haiku-4-5-20251001`)
 
 ### 2. Agent Independence
 - Each agent runs **independently** with no shared state during review
@@ -37,9 +37,9 @@ Input (PR/Diff)
          |
     +----+----+--------+--------+
     v         v        v        v
-+-------+ +-------+ +-------+ +-------+
-| Opus  | | Opus  | | Sonnet| | Opus  |  All via Anthropic API
-| (Sec) | | (Pat) | | (Perf)| | (Log) |
++--------+ +--------+ +--------+ +-------+
+| Sonnet | | Sonnet | | Sonnet | | Haiku |  All via Anthropic API
+| (Sec)  | | (Pat)  | | (Perf) | (Style)|
 +---+---+ +---+---+ +---+---+ +---+---+
     |         |        |        |
     +----+----+--------+--------+

@@ -107,6 +107,10 @@ class ToolRegistry:
         raise ValueError(f"Unknown tool: {name}")
 
     def _read_file(self, path: str) -> str:
+        # Block path traversal — the GitHub API would reject it too, but reject early
+        # with a clear message rather than letting it become an opaque API error.
+        if ".." in PurePosixPath(path).parts:
+            return "[error: path traversal not allowed]"
         cached = self.session.cached_file(path)
         if cached is not None:
             return cached
@@ -152,10 +156,13 @@ class ToolRegistry:
         return "\n".join(hits) if hits else "[no matches]"
 
     def _grep(self, pattern: str, path_glob: str, max_files: int = 50) -> str:
+        # Guard against ReDoS: cap pattern length before handing it to the regex engine.
+        if len(pattern) > 500:
+            return "[error: regex pattern too long (max 500 chars)]"
         try:
             regex = re.compile(pattern)
-        except re.error as e:
-            return f"[error: invalid regex: {e}]"
+        except re.error:
+            return "[error: invalid regex pattern]"
         matches: list[str] = []
         files_scanned = 0
         for path in self._tree():
