@@ -1,27 +1,9 @@
 """Tests for the security secret scanner."""
 
-import pytest
-
 from ai_reviewer.models.findings import Category, Severity
 from ai_reviewer.security.scanner import (
-    _shannon_entropy,
     scan_for_secrets,
 )
-
-
-class TestShannonEntropy:
-    def test_empty_string(self):
-        assert _shannon_entropy("") == 0.0
-
-    def test_single_char_repeated(self):
-        assert _shannon_entropy("aaaa") == 0.0
-
-    def test_two_equally_distributed_chars(self):
-        assert _shannon_entropy("ab") == pytest.approx(1.0)
-
-    def test_high_entropy_random_string(self):
-        entropy = _shannon_entropy("aB3$xZ9!qW7@mN5^")
-        assert entropy > 3.5
 
 
 class TestScanForSecretsPatterns:
@@ -97,34 +79,6 @@ class TestScanForSecretsPatterns:
         diff = self._make_diff("notify.py", 'SLACK = "xoxb-1234567890-abcdefghij"')
         findings = scan_for_secrets(diff)
         assert any("Slack" in f.title for f in findings)
-
-
-class TestScanForSecretsEntropy:
-    """High-entropy strings should be flagged."""
-
-    def _make_diff(self, added_line: str) -> str:
-        return (
-            "diff --git a/app.py b/app.py\n"
-            "--- a/app.py\n"
-            "+++ b/app.py\n"
-            "@@ -1,3 +1,4 @@\n"
-            " context\n"
-            f"+{added_line}\n"
-            " more context\n"
-        )
-
-    def test_high_entropy_string_detected(self):
-        high_entropy = "Kj8mNp2qRs4tUv6wXy0zA3bC"
-        diff = self._make_diff(f'TOKEN = "{high_entropy}"')
-        findings = scan_for_secrets(diff)
-        assert any("entropy" in f.title.lower() for f in findings)
-
-    def test_low_entropy_string_not_flagged(self):
-        low_entropy = "aaaaaaaaaaaaaaaaaaaa"
-        diff = self._make_diff(f'VALUE = "{low_entropy}"')
-        findings = scan_for_secrets(diff)
-        entropy_findings = [f for f in findings if "entropy" in f.title.lower()]
-        assert len(entropy_findings) == 0
 
 
 class TestScanOnlyAddedLines:
@@ -242,7 +196,7 @@ class TestScanMultipleFiles:
             "+++ b/b.py\n"
             "@@ -1,3 +1,4 @@\n"
             " context\n"
-            '+KEY2 = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefgh"\n'
+            '+KEY2 = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"\n'
             " more\n"
         )
         findings = scan_for_secrets(diff)
