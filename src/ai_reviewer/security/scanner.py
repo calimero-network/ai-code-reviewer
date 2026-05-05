@@ -1,4 +1,4 @@
-"""Regex + entropy-based secret scanner that runs before LLM agents.
+"""Regex-based secret scanner that runs before LLM agents.
 
 Scans unified diffs for potential secrets on added lines only. Produces
 ConsolidatedFinding objects with severity=CRITICAL and category=SECURITY
@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import fnmatch
 import logging
-import math
 import re
-from collections import Counter
 
 from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
 
@@ -65,29 +63,8 @@ SECRET_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
 ]
 
-_ENTROPY_MIN_LENGTH = 20
-_ENTROPY_THRESHOLD = 4.5
-
 _HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 _DIFF_FILE_RE = re.compile(r"^\+\+\+ b/(.+)$")
-
-
-def _shannon_entropy(s: str) -> float:
-    """Compute Shannon entropy (bits) of a string."""
-    if not s:
-        return 0.0
-    counts = Counter(s)
-    length = len(s)
-    return -sum((count / length) * math.log2(count / length) for count in counts.values())
-
-
-def _extract_high_entropy_tokens(line: str) -> list[str]:
-    """Extract tokens from a line that look like potential secrets (alphanumeric runs)."""
-    return [
-        tok
-        for tok in re.findall(rf"[A-Za-z0-9/+=_\-]{{{_ENTROPY_MIN_LENGTH},}}", line)
-        if _shannon_entropy(tok) > _ENTROPY_THRESHOLD
-    ]
 
 
 def _file_matches_exclude(file_path: str, exclude_patterns: list[str]) -> bool:
@@ -172,34 +149,6 @@ def scan_for_secrets(
                         confidence=0.95,
                     )
                 )
-
-        high_entropy_tokens = _extract_high_entropy_tokens(added_content)
-        for token in high_entropy_tokens:
-            dedup_key = f"{current_file}:{current_line}:entropy:{token[:12]}"
-            if dedup_key in seen_keys:
-                continue
-            seen_keys.add(dedup_key)
-
-            finding_counter += 1
-            findings.append(
-                ConsolidatedFinding(
-                    id=f"secret-{finding_counter}",
-                    file_path=current_file,
-                    line_start=current_line,
-                    line_end=None,
-                    severity=Severity.CRITICAL,
-                    category=Category.SECURITY,
-                    title="High-entropy string detected (possible secret)",
-                    description=(
-                        f"A high-entropy string (Shannon entropy > {_ENTROPY_THRESHOLD}) "
-                        "was found on an added line, which may be a hardcoded secret or key."
-                    ),
-                    suggested_fix="Remove the hardcoded secret; use environment variables or a secrets manager.",
-                    consensus_score=1.0,
-                    agreeing_agents=["secret-scanner"],
-                    confidence=0.95,
-                )
-            )
 
     if findings:
         logger.info("Secret scanner found %d potential secret(s) in diff", len(findings))
