@@ -355,10 +355,13 @@ _DOC_DRAFT_SYSTEM_HTML = """\
 You are a technical writer updating a static HTML documentation page after a code change.
 Given the current HTML file and a code diff, decide whether the page needs updating.
 
-If NO update is needed, return exactly this single token and nothing else:
+If NO update is needed, your ENTIRE response must be exactly the token below
+on a single line, with no preamble, no explanation, no markdown fences, and
+no trailing commentary:
 NO_UPDATE_NEEDED
 
-If an update IS needed, return the COMPLETE updated HTML file.
+If an update IS needed, return the COMPLETE updated HTML file. The response
+must begin with `<!DOCTYPE` or `<html` and contain the full document.
 
 Rules for HTML updates:
 - Preserve ALL HTML structure, tags, attributes, CSS classes, inline styles, and scripts exactly.
@@ -370,6 +373,53 @@ Rules for HTML updates:
 
 # Sentinel returned by Claude when an HTML page does not need updating.
 _NO_UPDATE_SENTINEL = "NO_UPDATE_NEEDED"
+
+
+def _is_no_update_response(content: str) -> bool:
+    """Return True if the model indicated the file does not need updating.
+
+    The system prompt asks for the bare sentinel ``NO_UPDATE_NEEDED`` on its
+    own and nothing else, but in practice the model sometimes adds a short
+    justification or wraps the response in a markdown fence. We accept any
+    response whose first non-empty, non-fence line is the sentinel by itself.
+
+    Why not exact equality: the original implementation used
+    ``content == _NO_UPDATE_SENTINEL`` which silently failed when the model
+    appended explanatory text — the entire response (sentinel + commentary)
+    then got written to disk as the new HTML, wiping the page. See
+    calimero-network/core#2296.
+
+    The check intentionally requires the sentinel as the first meaningful
+    line (not just anywhere in the response) so genuine HTML pages that
+    happen to mention ``NO_UPDATE_NEEDED`` inside a ``<pre>`` or comment
+    still round-trip as updates.
+    """
+    for line in content.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Skip an opening markdown fence, e.g. ``` or ```text
+        if stripped.startswith("```"):
+            continue
+        return stripped == _NO_UPDATE_SENTINEL
+    return False
+
+
+def _looks_like_html(content: str) -> bool:
+    """Cheap sanity check that ``content`` resembles an HTML document.
+
+    Used as a last line of defense before overwriting an HTML file: if the
+    model returned plain prose instead of markup, the response should be
+    treated as a failed draft rather than written to disk. Looks for either
+    a doctype/root tag at the start, or simply the presence of any tag-like
+    construct in the body — deliberately permissive so partial pages still
+    pass while obvious failures (no ``<`` anywhere) are caught.
+    """
+    head = content.lstrip().lower()[:64]
+    if head.startswith(("<!doctype", "<html", "<?xml")):
+        return True
+    return "<" in content and ">" in content
+
 
 # ~4K chars ≈ ~1K tokens — keeps prompt cost low while providing enough context.
 _MAX_DIFF_CHARS = 4000
@@ -469,8 +519,18 @@ async def generate_doc_drafts(
                         max_tokens=8192,
                     )
                     content = result.strip()
-                    if content == _NO_UPDATE_SENTINEL:
-                        return None  # Claude says no update needed
+                    if is_html and _is_no_update_response(content):
+                        return None  # model says no update needed
+                    if is_html and not _looks_like_html(content):
+                        # Defense in depth: model returned prose instead of
+                        # HTML (e.g. forgot the sentinel and explained why no
+                        # update was needed). Treat as a failed draft so the
+                        # file is not overwritten.
+                        return DocDraft(
+                            suggestion=suggestion,
+                            updated_content="",
+                            error="model returned non-HTML content for an HTML target",
+                        )
                     return DocDraft(suggestion=suggestion, updated_content=content)
                 except Exception as exc:
                     return DocDraft(suggestion=suggestion, updated_content="", error=str(exc))
