@@ -704,6 +704,255 @@ class TestGenerateDocDrafts:
         assert mock_instance.run_completion.call_count == 2
 
 
+class TestIsNoUpdateResponse:
+    """Tests for _is_no_update_response — the sentinel parser.
+
+    Regression for calimero-network/core#2296: bare-equality detection
+    failed when the model appended a justification, and the entire response
+    (sentinel + reasoning) was written to disk as the new HTML.
+    """
+
+    def test_bare_sentinel(self):
+        from ai_reviewer.docs.analyzer import _is_no_update_response
+
+        assert _is_no_update_response("NO_UPDATE_NEEDED")
+
+    def test_sentinel_with_trailing_explanation(self):
+        # Exact shape from core#2296.
+        from ai_reviewer.docs.analyzer import _is_no_update_response
+
+        response = (
+            "NO_UPDATE_NEEDED\n"
+            "\n"
+            "The code diff shows changes to .github/workflows/doc-update.yaml, "
+            "which is a GitHub Actions workflow configuration file."
+        )
+        assert _is_no_update_response(response)
+
+    def test_sentinel_with_leading_blank_lines(self):
+        from ai_reviewer.docs.analyzer import _is_no_update_response
+
+        assert _is_no_update_response("\n\n  NO_UPDATE_NEEDED  \n")
+
+    def test_sentinel_inside_markdown_fence(self):
+        from ai_reviewer.docs.analyzer import _is_no_update_response
+
+        assert _is_no_update_response("```\nNO_UPDATE_NEEDED\n```")
+
+    def test_html_response_is_not_a_no_update(self):
+        from ai_reviewer.docs.analyzer import _is_no_update_response
+
+        assert not _is_no_update_response("<!DOCTYPE html>\n<html>...")
+
+    def test_sentinel_buried_in_html_is_not_a_no_update(self):
+        # The model returned real HTML that happens to mention the token —
+        # e.g. inside a <pre> block. Should round-trip as an update, not be
+        # discarded.
+        from ai_reviewer.docs.analyzer import _is_no_update_response
+
+        html = "<!DOCTYPE html>\n<pre>NO_UPDATE_NEEDED is the sentinel</pre>"
+        assert not _is_no_update_response(html)
+
+    def test_empty_response(self):
+        from ai_reviewer.docs.analyzer import _is_no_update_response
+
+        assert not _is_no_update_response("")
+
+
+class TestLooksLikeHtml:
+    """Tests for _looks_like_html — last-line-of-defense sanity check."""
+
+    def test_doctype(self):
+        from ai_reviewer.docs.analyzer import _looks_like_html
+
+        assert _looks_like_html("<!DOCTYPE html>\n<html></html>")
+
+    def test_html_tag(self):
+        from ai_reviewer.docs.analyzer import _looks_like_html
+
+        assert _looks_like_html("<html><body>x</body></html>")
+
+    def test_partial_markup_accepted(self):
+        from ai_reviewer.docs.analyzer import _looks_like_html
+
+        assert _looks_like_html("<div>partial</div>")
+
+    def test_plain_prose_rejected(self):
+        from ai_reviewer.docs.analyzer import _looks_like_html
+
+        assert not _looks_like_html(
+            "The code diff modifies a workflow file; no doc updates are needed."
+        )
+
+    def test_empty_rejected(self):
+        from ai_reviewer.docs.analyzer import _looks_like_html
+
+        assert not _looks_like_html("")
+
+
+class TestGenerateDocDraftsHtmlSentinel:
+    """End-to-end tests that NO_UPDATE_NEEDED variants are filtered correctly."""
+
+    @pytest.mark.asyncio
+    async def test_html_no_update_sentinel_with_reasoning_filters_draft(self):
+        """The exact PR #2296 failure: sentinel + trailing reasoning must
+        produce no draft, not a draft whose updated_content is the model's
+        explanation."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ai_reviewer.config import AnthropicApiConfig
+        from ai_reviewer.docs.analyzer import DocSuggestion, generate_doc_drafts
+
+        suggestion = DocSuggestion(
+            file="architecture/app-lifecycle.html",
+            reason="ci workflow change — scanning for updates",
+        )
+        mock_file_content = MagicMock()
+        mock_file_content.decoded_content = b"<!DOCTYPE html>\n<html>...</html>"
+
+        mock_gh = MagicMock()
+        mock_gh.get_file_contents.return_value = mock_file_content
+
+        model_response = (
+            "NO_UPDATE_NEEDED\n\n"
+            "The code diff shows changes to .github/workflows/doc-update.yaml, "
+            "which is a GitHub Actions workflow configuration file."
+        )
+
+        with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.run_completion = AsyncMock(return_value=model_response)
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_instance)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            cfg = AnthropicApiConfig(api_key="sk-test")
+            drafts = await generate_doc_drafts(
+                suggestions=[suggestion],
+                diff="diff",
+                repo_name="org/repo",
+                ref="abc123",
+                anthropic_cfg=cfg,
+                gh=mock_gh,
+            )
+
+        assert drafts == []
+
+    @pytest.mark.asyncio
+    async def test_html_non_html_response_marked_failed(self):
+        """If the model forgets the sentinel and just explains in prose,
+        treat as a failed draft rather than overwriting the file."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ai_reviewer.config import AnthropicApiConfig
+        from ai_reviewer.docs.analyzer import DocSuggestion, generate_doc_drafts
+
+        suggestion = DocSuggestion(file="architecture/index.html", reason="ci change")
+        mock_file_content = MagicMock()
+        mock_file_content.decoded_content = b"<!DOCTYPE html>\n<html>...</html>"
+
+        mock_gh = MagicMock()
+        mock_gh.get_file_contents.return_value = mock_file_content
+
+        with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.run_completion = AsyncMock(
+                return_value="No update needed; the workflow file is unrelated to this page."
+            )
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_instance)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            cfg = AnthropicApiConfig(api_key="sk-test")
+            drafts = await generate_doc_drafts(
+                suggestions=[suggestion],
+                diff="diff",
+                repo_name="org/repo",
+                ref="abc123",
+                anthropic_cfg=cfg,
+                gh=mock_gh,
+            )
+
+        assert len(drafts) == 1
+        assert drafts[0].updated_content == ""
+        assert drafts[0].error is not None
+        assert "non-HTML" in drafts[0].error
+
+    @pytest.mark.asyncio
+    async def test_html_real_update_passes_through(self):
+        """A genuine updated HTML response is preserved unchanged."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ai_reviewer.config import AnthropicApiConfig
+        from ai_reviewer.docs.analyzer import DocSuggestion, generate_doc_drafts
+
+        suggestion = DocSuggestion(file="architecture/concepts.html", reason="api change")
+        mock_file_content = MagicMock()
+        mock_file_content.decoded_content = b"<!DOCTYPE html>\n<html>old</html>"
+
+        mock_gh = MagicMock()
+        mock_gh.get_file_contents.return_value = mock_file_content
+
+        new_html = "<!DOCTYPE html>\n<html>new</html>"
+
+        with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.run_completion = AsyncMock(return_value=new_html)
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_instance)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            cfg = AnthropicApiConfig(api_key="sk-test")
+            drafts = await generate_doc_drafts(
+                suggestions=[suggestion],
+                diff="diff",
+                repo_name="org/repo",
+                ref="abc123",
+                anthropic_cfg=cfg,
+                gh=mock_gh,
+            )
+
+        assert len(drafts) == 1
+        assert drafts[0].updated_content == new_html
+        assert drafts[0].error is None
+
+    @pytest.mark.asyncio
+    async def test_markdown_files_unaffected_by_sentinel_logic(self):
+        """Sentinel handling is HTML-only; for .md the response is taken as-is.
+
+        This guards against accidentally extending the sentinel filter to
+        Markdown, where the prompt does not opt-in to NO_UPDATE_NEEDED.
+        """
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from ai_reviewer.config import AnthropicApiConfig
+        from ai_reviewer.docs.analyzer import DocSuggestion, generate_doc_drafts
+
+        suggestion = DocSuggestion(file="docs/api.md", reason="api change")
+        mock_file_content = MagicMock()
+        mock_file_content.decoded_content = b"# Old"
+
+        mock_gh = MagicMock()
+        mock_gh.get_file_contents.return_value = mock_file_content
+
+        with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.run_completion = AsyncMock(return_value="NO_UPDATE_NEEDED")
+            MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_instance)
+            MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+            cfg = AnthropicApiConfig(api_key="sk-test")
+            drafts = await generate_doc_drafts(
+                suggestions=[suggestion],
+                diff="diff",
+                repo_name="org/repo",
+                ref="abc123",
+                anthropic_cfg=cfg,
+                gh=mock_gh,
+            )
+
+        # Markdown drafts pass through whatever the model returned.
+        assert len(drafts) == 1
+        assert drafts[0].updated_content == "NO_UPDATE_NEEDED"
+
+
 class TestDocSuggestionDataclass:
     """Basic tests for the DocSuggestion dataclass."""
 
