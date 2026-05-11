@@ -58,10 +58,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `cache: pip` deliberately not set here. setup-python's pip cache
+      # requires a requirements.txt / pyproject.toml in the *calling*
+      # repository to derive a cache key, and this workflow is meant to
+      # be called from non-Python repos (Rust, Go, JS, …) that have
+      # neither file. Setting it unconditionally caused calling repos
+      # to fail at this step with: "No file matched to
+      # [**/requirements.txt or **/pyproject.toml]". The single
+      # `pip install ai-code-reviewer` below is fast enough on a cold
+      # cache; reintroducing cache support would require a guard like
+      # `cache: ${{ hashFiles('**/requirements.txt', '**/pyproject.toml') != '' && 'pip' || '' }}`.
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: pip
 
       - name: Install ai-code-reviewer
         run: pip install ai-code-reviewer
