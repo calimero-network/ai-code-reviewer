@@ -352,23 +352,25 @@ Rules:
 """
 
 _DOC_DRAFT_SYSTEM_HTML = """\
-You are a technical writer updating a static HTML documentation page after a code change.
-Given the current HTML file and a code diff, decide whether the page needs updating.
+You are a technical writer making targeted updates to an HTML documentation page after a code change.
 
-If NO update is needed, your ENTIRE response must be exactly the token below
-on a single line, with no preamble, no explanation, no markdown fences, and
-no trailing commentary:
-NO_UPDATE_NEEDED
+Do NOT return the full file. Output ONLY the specific text that needs changing, using FIND/REPLACE blocks.
 
-If an update IS needed, return the COMPLETE updated HTML file. The response
-must begin with `<!DOCTYPE` or `<html` and contain the full document.
+Format for each change:
+<<<FIND
+exact text to replace (copy verbatim from the source, including tags and whitespace)
+FIND>>>
+<<<REPLACE
+replacement text
+REPLACE>>>
 
-Rules for HTML updates:
-- Preserve ALL HTML structure, tags, attributes, CSS classes, inline styles, and scripts exactly.
-- Only update human-readable text content that is made inaccurate by the code change.
-- Do not reformat, re-indent, or restructure the HTML.
-- Do not escape or unescape entities that were already correct.
-- Do not add commentary before or after the HTML — return only the file or NO_UPDATE_NEEDED.
+Rules:
+- FIND text must match the source HTML exactly, character for character.
+- Include enough surrounding lines in FIND to make it unique in the document.
+- To insert new content, include the anchor line in FIND and repeat it in REPLACE with the addition.
+- Multiple blocks are fine for multiple changes.
+- Only change text made inaccurate by the code diff — leave everything else untouched.
+- If no changes are needed, output exactly: NO_UPDATE_NEEDED
 """
 
 # Sentinel returned by Claude when an HTML page does not need updating.
@@ -405,20 +407,26 @@ def _is_no_update_response(content: str) -> bool:
     return False
 
 
-def _extract_html(content: str) -> str | None:
-    """Strip any preamble the model prepended before the HTML document.
+def _apply_html_patches(original: str, response: str) -> str | None:
+    """Apply FIND/REPLACE patch blocks from the model response to the original HTML.
 
-    The system prompt says to start with ``<!DOCTYPE`` or ``<html``, but models
-    occasionally output reasoning text first. Find the first occurrence of
-    either tag (case-insensitive) and return everything from there onward.
-    Returns ``None`` if no HTML root tag is found at all.
+    Returns the patched content, or None if no valid patches were found or a
+    FIND block does not match anywhere in the document.
     """
-    lower = content.lower()
-    for marker in ("<!doctype", "<html"):
-        idx = lower.find(marker)
-        if idx != -1:
-            return content[idx:]
-    return None
+    find_blocks = _re.findall(r"<<<FIND\n(.*?)\nFIND>>>", response, _re.DOTALL)
+    replace_blocks = _re.findall(r"<<<REPLACE\n(.*?)\nREPLACE>>>", response, _re.DOTALL)
+
+    if not find_blocks or len(find_blocks) != len(replace_blocks):
+        return None
+
+    result = original
+    for find, replace in zip(find_blocks, replace_blocks):
+        if find not in result:
+            logger.warning("HTML patch FIND text not found in document: %r", find[:80])
+            return None
+        result = result.replace(find, replace, 1)
+
+    return result
 
 
 # ~4K chars ≈ ~1K tokens — keeps prompt cost low while providing enough context.
@@ -494,14 +502,12 @@ async def generate_doc_drafts(
                 )
 
                 if is_html:
-                    plain_text = _strip_html_tags(current_content)[:2000]
                     user_prompt = (
                         f"## HTML File: {suggestion.file}\n\n"
-                        f"### Raw HTML\n\n{truncated_doc}\n\n"
-                        f"### Plain-text content (for relevance check)\n\n{plain_text}\n\n"
+                        f"{truncated_doc}\n\n"
                         f"## Code Diff\n\n{truncated_diff}\n\n"
                         f"## Why This File May Need Updating\n\n{suggestion.reason}\n\n"
-                        "Return NO_UPDATE_NEEDED if unchanged, or the complete updated HTML file."
+                        "Output FIND/REPLACE patches for needed changes, or NO_UPDATE_NEEDED."
                     )
                 else:
                     user_prompt = (
@@ -520,17 +526,17 @@ async def generate_doc_drafts(
                         max_tokens=8192,
                     )
                     content = result.strip()
-                    if is_html and _is_no_update_response(content):
+                    if _is_no_update_response(content):
                         return None  # model says no update needed
                     if is_html:
-                        extracted = _extract_html(content)
-                        if extracted is None:
+                        patched = _apply_html_patches(current_content, content)
+                        if patched is None:
                             return DocDraft(
                                 suggestion=suggestion,
                                 updated_content="",
-                                error="model returned non-HTML content for an HTML target",
+                                error="could not apply HTML patches (FIND text not found or malformed response)",
                             )
-                        content = extracted
+                        content = patched
                     return DocDraft(suggestion=suggestion, updated_content=content)
                 except Exception as exc:
                     return DocDraft(suggestion=suggestion, updated_content="", error=str(exc))
