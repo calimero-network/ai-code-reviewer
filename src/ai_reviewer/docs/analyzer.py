@@ -407,11 +407,17 @@ def _is_no_update_response(content: str) -> bool:
     return False
 
 
+def _normalize_lines(text: str) -> str:
+    """Normalize line endings and strip trailing whitespace per line."""
+    return "\n".join(l.rstrip() for l in text.replace("\r\n", "\n").split("\n"))
+
+
 def _apply_html_patches(original: str, response: str) -> str | None:
     """Apply FIND/REPLACE patch blocks from the model response to the original HTML.
 
-    Returns the patched content, or None if no valid patches were found or a
-    FIND block does not match anywhere in the document.
+    Tries exact match first, then falls back to line-normalized match to handle
+    minor whitespace differences in what the model copied from the source.
+    Returns None if no valid patch blocks were found or any FIND doesn't match.
     """
     find_blocks = _re.findall(r"<<<FIND\n(.*?)\nFIND>>>", response, _re.DOTALL)
     replace_blocks = _re.findall(r"<<<REPLACE\n(.*?)\nREPLACE>>>", response, _re.DOTALL)
@@ -421,9 +427,16 @@ def _apply_html_patches(original: str, response: str) -> str | None:
 
     result = original
     for find, replace in zip(find_blocks, replace_blocks):
-        if find not in result:
+        if find in result:
+            result = result.replace(find, replace, 1)
+            continue
+        # Fallback: normalize trailing whitespace on each line and retry
+        norm_original = _normalize_lines(result)
+        norm_find = _normalize_lines(find)
+        if norm_find not in norm_original:
             return None
-        result = result.replace(find, replace, 1)
+        idx = norm_original.find(norm_find)
+        result = result[:idx] + replace + result[idx + len(norm_find):]
 
     return result
 
