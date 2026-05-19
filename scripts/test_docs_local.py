@@ -11,11 +11,13 @@ Optional env vars:
     TARGET_FILE   — which doc file to test (default: README.md)
     SOURCE_GLOB   — which source glob triggered it (default: src/ai_reviewer/cli.py)
     DIFF_FILE     — path to a real .diff file to use instead of the fake one
+    REPO_NAME     — repo slug passed to generate_doc_drafts (default: calimero-network/ai-code-reviewer)
 
 Does NOT need GITHUB_TOKEN.
 """
 
 import asyncio
+import difflib
 import os
 import sys
 import textwrap
@@ -71,9 +73,14 @@ async def main() -> None:
 
     target_file = os.environ.get("TARGET_FILE", "README.md")
     source_glob = os.environ.get("SOURCE_GLOB", "src/ai_reviewer/cli.py")
+    repo_name = os.environ.get("REPO_NAME", "calimero-network/ai-code-reviewer")
 
-    # Read real current content from local filesystem
-    local_path = REPO_ROOT / target_file
+    # Resolve and validate TARGET_FILE stays within the repo root
+    repo_root_resolved = REPO_ROOT.resolve()
+    local_path = (REPO_ROOT / target_file).resolve()
+    if not local_path.is_relative_to(repo_root_resolved):
+        print(f"ERROR: TARGET_FILE {target_file!r} resolves outside repo root", file=sys.stderr)
+        sys.exit(1)
     if not local_path.exists():
         print(f"ERROR: {local_path} does not exist", file=sys.stderr)
         sys.exit(1)
@@ -81,7 +88,14 @@ async def main() -> None:
 
     # Use provided diff or fallback to fake one
     diff_file = os.environ.get("DIFF_FILE")
-    diff = Path(diff_file).read_text() if diff_file else FAKE_DIFF
+    if diff_file:
+        diff_path = Path(diff_file).resolve()
+        if not diff_path.is_relative_to(repo_root_resolved):
+            print(f"ERROR: DIFF_FILE {diff_file!r} resolves outside repo root", file=sys.stderr)
+            sys.exit(1)
+        diff = diff_path.read_text()
+    else:
+        diff = FAKE_DIFF
 
     print(f"Target file : {target_file} ({len(current_content)} chars)")
     print(f"Source glob : {source_glob}")
@@ -103,7 +117,7 @@ async def main() -> None:
     drafts = await generate_doc_drafts(
         suggestions=[suggestion],
         diff=diff,
-        repo_name="calimero-network/ai-code-reviewer",
+        repo_name=repo_name,
         ref="HEAD",
         anthropic_cfg=anthropic_cfg,
         gh=gh,
@@ -124,9 +138,6 @@ async def main() -> None:
         f"\nResult: Claude generated an update ({len(lines)} lines vs {len(original_lines)} original)"
     )
     print()
-
-    # Show a diff-like summary of changed lines
-    import difflib
 
     diff_output = list(
         difflib.unified_diff(
