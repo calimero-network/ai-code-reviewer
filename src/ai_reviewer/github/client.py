@@ -13,7 +13,7 @@ import time
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import requests
 import yaml
@@ -1200,7 +1200,7 @@ class GitHubClient:
             "Content-Type": "application/json",
         }
 
-        payload: dict[str, object] = {"query": query}
+        payload: dict[str, Any] = {"query": query}
         if variables:
             payload["variables"] = variables
 
