@@ -60,7 +60,12 @@ async def run_doc_update(
     ``result.successful`` contains the generated drafts for the caller to
     display.
     """
-    from ai_reviewer.docs.analyzer import DocAnalyzer, DocSuggestion, generate_doc_drafts
+    from ai_reviewer.docs.analyzer import (  # noqa: E501
+        DocAnalyzer,
+        DocSuggestion,
+        generate_doc_drafts,
+        is_architecture_impacting,
+    )
 
     pr = gh.get_pull_request(repo, pr_number)
     base_branch = base or pr.base.ref
@@ -121,7 +126,9 @@ async def run_doc_update(
         if _doc_static is not None
         else doc_generation.static_docs_dirs
     )
-    if effective_static_dirs:
+    if effective_static_dirs and is_architecture_impacting(
+        changed_paths, changed_paths_with_status
+    ):
         already_covered = {s.file for s in mapping_suggestions}
         html_paths = gh.get_html_files_in_dirs(repo, ref, effective_static_dirs)
         for html_path in html_paths:
@@ -131,7 +138,7 @@ async def run_doc_update(
                         file=html_path,
                         reason=(
                             f"Static HTML page in `{html_path}` — scanning for updates "
-                            "triggered by code changes in this PR."
+                            "triggered by architecture-impacting changes in this PR."
                         ),
                     )
                 )
@@ -154,6 +161,8 @@ async def run_doc_update(
 
     successful = [d for d in drafts if d.updated_content and not d.error]
     failed = [d for d in drafts if d.error]
+    for d in failed:
+        logger.warning("Doc draft failed for %s: %s", d.suggestion.file, d.error)
 
     if not successful:
         return DocUpdateResult(
@@ -175,5 +184,6 @@ async def run_doc_update(
         assignee=pr.user.login if pr.user else None,
         labels=effective_pr_labels,
         draft=effective_pr_draft,
+        pr_number=pr_number,
     )
     return DocUpdateResult(successful=successful, failed=failed, pr_url=pr_url)

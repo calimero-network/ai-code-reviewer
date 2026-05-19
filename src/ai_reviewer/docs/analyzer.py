@@ -352,23 +352,25 @@ Rules:
 """
 
 _DOC_DRAFT_SYSTEM_HTML = """\
-You are a technical writer updating a static HTML documentation page after a code change.
-Given the current HTML file and a code diff, decide whether the page needs updating.
+You are a technical writer making targeted updates to an HTML documentation page after a code change.
 
-If NO update is needed, your ENTIRE response must be exactly the token below
-on a single line, with no preamble, no explanation, no markdown fences, and
-no trailing commentary:
-NO_UPDATE_NEEDED
+Do NOT return the full file. Output ONLY the specific text that needs changing, using FIND/REPLACE blocks.
 
-If an update IS needed, return the COMPLETE updated HTML file. The response
-must begin with `<!DOCTYPE` or `<html` and contain the full document.
+Format for each change:
+<<<FIND
+exact text to replace (copy verbatim from the source, including tags and whitespace)
+FIND>>>
+<<<REPLACE
+replacement text
+REPLACE>>>
 
-Rules for HTML updates:
-- Preserve ALL HTML structure, tags, attributes, CSS classes, inline styles, and scripts exactly.
-- Only update human-readable text content that is made inaccurate by the code change.
-- Do not reformat, re-indent, or restructure the HTML.
-- Do not escape or unescape entities that were already correct.
-- Do not add commentary before or after the HTML — return only the file or NO_UPDATE_NEEDED.
+Rules:
+- FIND text must match the source HTML exactly, character for character.
+- Include enough surrounding lines in FIND to make it unique in the document.
+- To insert new content, include the anchor line in FIND and repeat it in REPLACE with the addition.
+- Multiple blocks are fine for multiple changes.
+- Only change text made inaccurate by the code diff — leave everything else untouched.
+- If no changes are needed, output exactly: NO_UPDATE_NEEDED
 """
 
 # Sentinel returned by Claude when an HTML page does not need updating.
@@ -405,28 +407,47 @@ def _is_no_update_response(content: str) -> bool:
     return False
 
 
-def _looks_like_html(content: str) -> bool:
-    """Cheap sanity check that ``content`` resembles an HTML document.
+def _normalize_lines(text: str) -> str:
+    """Normalize line endings and strip trailing whitespace per line."""
+    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").split("\n"))
 
-    Used as a last line of defense before overwriting an HTML file: if the
-    model returned plain prose instead of markup, the response should be
-    treated as a failed draft rather than written to disk. Looks for either
-    a doctype/root tag at the start, or simply the presence of any tag-like
-    construct in the body — deliberately permissive so partial pages still
-    pass while obvious failures (no ``<`` anywhere) are caught.
+
+def _apply_html_patches(original: str, response: str) -> str | None:
+    """Apply FIND/REPLACE patch blocks from the model response to the original HTML.
+
+    Tries exact match first, then falls back to line-normalized match to handle
+    minor whitespace differences in what the model copied from the source.
+    Returns None if no valid patch blocks were found or any FIND doesn't match.
     """
-    head = content.lstrip().lower()[:64]
-    if head.startswith(("<!doctype", "<html", "<?xml")):
-        return True
-    return "<" in content and ">" in content
+    find_blocks = _re.findall(r"<<<FIND\n(.*?)\nFIND>>>", response, _re.DOTALL)
+    replace_blocks = _re.findall(r"<<<REPLACE\n(.*?)\nREPLACE>>>", response, _re.DOTALL)
+
+    if not find_blocks or len(find_blocks) != len(replace_blocks):
+        return None
+
+    result = original
+    for find, replace in zip(find_blocks, replace_blocks, strict=False):
+        if find in result:
+            result = result.replace(find, replace, 1)
+            continue
+        # Fallback: normalize trailing whitespace on each line and retry
+        norm_original = _normalize_lines(result)
+        norm_find = _normalize_lines(find)
+        if norm_find not in norm_original:
+            return None
+        idx = norm_original.find(norm_find)
+        result = norm_original[:idx] + replace + norm_original[idx + len(norm_find) :]
+
+    return result
 
 
 # ~4K chars ≈ ~1K tokens — keeps prompt cost low while providing enough context.
 _MAX_DIFF_CHARS = 4000
 # ~8K chars ≈ ~2K tokens — sufficient for most Markdown docs.
 _MAX_DOC_CHARS = 8000
-# HTML docs are larger due to markup; allow more context for accurate updates.
-_MAX_DOC_CHARS_HTML = 20_000
+# HTML docs can be large — pass the full file so the model doesn't regenerate
+# a truncated version and drop sections it never saw.
+_MAX_DOC_CHARS_HTML = 100_000
 
 
 def _strip_html_tags(html: str) -> str:
@@ -493,14 +514,12 @@ async def generate_doc_drafts(
                 )
 
                 if is_html:
-                    plain_text = _strip_html_tags(current_content)[:2000]
                     user_prompt = (
                         f"## HTML File: {suggestion.file}\n\n"
-                        f"### Raw HTML\n\n{truncated_doc}\n\n"
-                        f"### Plain-text content (for relevance check)\n\n{plain_text}\n\n"
+                        f"{truncated_doc}\n\n"
                         f"## Code Diff\n\n{truncated_diff}\n\n"
                         f"## Why This File May Need Updating\n\n{suggestion.reason}\n\n"
-                        "Return NO_UPDATE_NEEDED if unchanged, or the complete updated HTML file."
+                        "Output FIND/REPLACE patches for needed changes, or NO_UPDATE_NEEDED."
                     )
                 else:
                     user_prompt = (
@@ -521,16 +540,15 @@ async def generate_doc_drafts(
                     content = result.strip()
                     if is_html and _is_no_update_response(content):
                         return None  # model says no update needed
-                    if is_html and not _looks_like_html(content):
-                        # Defense in depth: model returned prose instead of
-                        # HTML (e.g. forgot the sentinel and explained why no
-                        # update was needed). Treat as a failed draft so the
-                        # file is not overwritten.
-                        return DocDraft(
-                            suggestion=suggestion,
-                            updated_content="",
-                            error="model returned non-HTML content for an HTML target",
-                        )
+                    if is_html:
+                        patched = _apply_html_patches(current_content, content)
+                        if patched is None:
+                            return DocDraft(
+                                suggestion=suggestion,
+                                updated_content="",
+                                error="could not apply HTML patches (FIND text not found or malformed response)",
+                            )
+                        content = patched
                     return DocDraft(suggestion=suggestion, updated_content=content)
                 except Exception as exc:
                     return DocDraft(suggestion=suggestion, updated_content="", error=str(exc))
