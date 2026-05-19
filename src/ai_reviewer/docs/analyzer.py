@@ -538,7 +538,7 @@ async def generate_doc_drafts(
                         max_tokens=8192,
                     )
                     content = result.strip()
-                    if _is_no_update_response(content):
+                    if is_html and _is_no_update_response(content):
                         return None  # model says no update needed
                     if is_html:
                         patched = _apply_html_patches(current_content, content)

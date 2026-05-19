@@ -759,35 +759,49 @@ class TestIsNoUpdateResponse:
         assert not _is_no_update_response("")
 
 
-class TestLooksLikeHtml:
-    """Tests for _looks_like_html — last-line-of-defense sanity check."""
+class TestApplyHtmlPatches:
+    """Tests for _apply_html_patches — surgical FIND/REPLACE on HTML files."""
 
-    def test_doctype(self):
-        from ai_reviewer.docs.analyzer import _looks_like_html
+    def test_basic_replacement(self):
+        from ai_reviewer.docs.analyzer import _apply_html_patches
 
-        assert _looks_like_html("<!DOCTYPE html>\n<html></html>")
-
-    def test_html_tag(self):
-        from ai_reviewer.docs.analyzer import _looks_like_html
-
-        assert _looks_like_html("<html><body>x</body></html>")
-
-    def test_partial_markup_accepted(self):
-        from ai_reviewer.docs.analyzer import _looks_like_html
-
-        assert _looks_like_html("<div>partial</div>")
-
-    def test_plain_prose_rejected(self):
-        from ai_reviewer.docs.analyzer import _looks_like_html
-
-        assert not _looks_like_html(
-            "The code diff modifies a workflow file; no doc updates are needed."
+        original = "<div>old value</div>"
+        response = (
+            "<<<FIND\n<div>old value</div>\nFIND>>>\n<<<REPLACE\n<div>new value</div>\nREPLACE>>>"
         )
+        assert _apply_html_patches(original, response) == "<div>new value</div>"
 
-    def test_empty_rejected(self):
-        from ai_reviewer.docs.analyzer import _looks_like_html
+    def test_multiple_patches(self):
+        from ai_reviewer.docs.analyzer import _apply_html_patches
 
-        assert not _looks_like_html("")
+        original = "<a>foo</a><b>bar</b>"
+        response = (
+            "<<<FIND\n<a>foo</a>\nFIND>>>\n<<<REPLACE\n<a>FOO</a>\nREPLACE>>>\n"
+            "<<<FIND\n<b>bar</b>\nFIND>>>\n<<<REPLACE\n<b>BAR</b>\nREPLACE>>>"
+        )
+        assert _apply_html_patches(original, response) == "<a>FOO</a><b>BAR</b>"
+
+    def test_find_not_found_returns_none(self):
+        from ai_reviewer.docs.analyzer import _apply_html_patches
+
+        original = "<div>actual content</div>"
+        response = (
+            "<<<FIND\n<div>different content</div>\nFIND>>>\n<<<REPLACE\n<div>x</div>\nREPLACE>>>"
+        )
+        assert _apply_html_patches(original, response) is None
+
+    def test_malformed_no_blocks_returns_none(self):
+        from ai_reviewer.docs.analyzer import _apply_html_patches
+
+        assert _apply_html_patches("<html>x</html>", "plain prose response") is None
+
+    def test_whitespace_normalized_fallback(self):
+        from ai_reviewer.docs.analyzer import _apply_html_patches
+
+        original = "<div>  value  </div>"
+        # FIND has trailing spaces stripped — normalized match should still work
+        response = "<<<FIND\n<div>  value\nFIND>>>\n<<<REPLACE\n<div>new\nREPLACE>>>"
+        assert _apply_html_patches(original, response) is not None
 
 
 class TestGenerateDocDraftsHtmlSentinel:
@@ -874,11 +888,11 @@ class TestGenerateDocDraftsHtmlSentinel:
         assert len(drafts) == 1
         assert drafts[0].updated_content == ""
         assert drafts[0].error is not None
-        assert "non-HTML" in drafts[0].error
+        assert "could not apply HTML patches" in drafts[0].error
 
     @pytest.mark.asyncio
     async def test_html_real_update_passes_through(self):
-        """A genuine updated HTML response is preserved unchanged."""
+        """A genuine FIND/REPLACE patch response is applied correctly."""
         from unittest.mock import AsyncMock, MagicMock, patch
 
         from ai_reviewer.config import AnthropicApiConfig
@@ -891,11 +905,14 @@ class TestGenerateDocDraftsHtmlSentinel:
         mock_gh = MagicMock()
         mock_gh.get_file_contents.return_value = mock_file_content
 
-        new_html = "<!DOCTYPE html>\n<html>new</html>"
+        patch_response = (
+            "<<<FIND\n<html>old</html>\nFIND>>>\n<<<REPLACE\n<html>new</html>\nREPLACE>>>"
+        )
+        expected_html = "<!DOCTYPE html>\n<html>new</html>"
 
         with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
             mock_instance = AsyncMock()
-            mock_instance.run_completion = AsyncMock(return_value=new_html)
+            mock_instance.run_completion = AsyncMock(return_value=patch_response)
             MockClient.return_value.__aenter__ = AsyncMock(return_value=mock_instance)
             MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
 
@@ -910,7 +927,7 @@ class TestGenerateDocDraftsHtmlSentinel:
             )
 
         assert len(drafts) == 1
-        assert drafts[0].updated_content == new_html
+        assert drafts[0].updated_content == expected_html
         assert drafts[0].error is None
 
     @pytest.mark.asyncio
