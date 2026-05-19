@@ -422,7 +422,6 @@ def _apply_html_patches(original: str, response: str) -> str | None:
     result = original
     for find, replace in zip(find_blocks, replace_blocks):
         if find not in result:
-            logger.warning("HTML patch FIND text not found in document: %r", find[:80])
             return None
         result = result.replace(find, replace, 1)
 
