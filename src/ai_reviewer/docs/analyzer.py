@@ -409,7 +409,7 @@ def _is_no_update_response(content: str) -> bool:
 
 def _normalize_lines(text: str) -> str:
     """Normalize line endings and strip trailing whitespace per line."""
-    return "\n".join(l.rstrip() for l in text.replace("\r\n", "\n").split("\n"))
+    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").split("\n"))
 
 
 def _apply_html_patches(original: str, response: str) -> str | None:
@@ -426,7 +426,7 @@ def _apply_html_patches(original: str, response: str) -> str | None:
         return None
 
     result = original
-    for find, replace in zip(find_blocks, replace_blocks):
+    for find, replace in zip(find_blocks, replace_blocks, strict=False):
         if find in result:
             result = result.replace(find, replace, 1)
             continue

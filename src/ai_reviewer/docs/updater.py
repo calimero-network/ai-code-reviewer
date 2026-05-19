@@ -60,7 +60,12 @@ async def run_doc_update(
     ``result.successful`` contains the generated drafts for the caller to
     display.
     """
-    from ai_reviewer.docs.analyzer import DocAnalyzer, DocSuggestion, generate_doc_drafts, is_architecture_impacting
+    from ai_reviewer.docs.analyzer import (  # noqa: E501
+        DocAnalyzer,
+        DocSuggestion,
+        generate_doc_drafts,
+        is_architecture_impacting,
+    )
 
     pr = gh.get_pull_request(repo, pr_number)
     base_branch = base or pr.base.ref

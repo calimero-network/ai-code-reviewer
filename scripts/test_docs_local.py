@@ -26,8 +26,8 @@ from unittest.mock import MagicMock
 REPO_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from ai_reviewer.config import AnthropicApiConfig
-from ai_reviewer.docs.analyzer import DocSuggestion, generate_doc_drafts
+from ai_reviewer.config import AnthropicApiConfig  # noqa: E402
+from ai_reviewer.docs.analyzer import DocSuggestion, generate_doc_drafts  # noqa: E402
 
 FAKE_DIFF = textwrap.dedent("""\
     diff --git a/src/ai_reviewer/cli.py b/src/ai_reviewer/cli.py
@@ -54,7 +54,7 @@ def _make_gh_mock(target_file: str, current_content: str) -> MagicMock:
     file_mock = MagicMock()
     file_mock.decoded_content = current_content.encode()
 
-    def get_file_contents(repo_name, path, ref):
+    def get_file_contents(_repo_name, path, _ref):
         if path == target_file:
             return file_mock
         raise Exception(f"404: {path} not found")
