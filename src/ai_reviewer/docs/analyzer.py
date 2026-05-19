@@ -436,7 +436,7 @@ def _apply_html_patches(original: str, response: str) -> str | None:
         if norm_find not in norm_original:
             return None
         idx = norm_original.find(norm_find)
-        result = result[:idx] + replace + result[idx + len(norm_find):]
+        result = result[:idx] + replace + result[idx + len(norm_find) :]
 
     return result
 

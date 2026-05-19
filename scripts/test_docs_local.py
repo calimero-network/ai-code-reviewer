@@ -120,19 +120,24 @@ async def main() -> None:
 
     lines = draft.updated_content.splitlines()
     original_lines = current_content.splitlines()
-    print(f"\nResult: Claude generated an update ({len(lines)} lines vs {len(original_lines)} original)")
+    print(
+        f"\nResult: Claude generated an update ({len(lines)} lines vs {len(original_lines)} original)"
+    )
     print()
 
     # Show a diff-like summary of changed lines
     import difflib
-    diff_output = list(difflib.unified_diff(
-        original_lines,
-        lines,
-        fromfile=f"original/{target_file}",
-        tofile=f"updated/{target_file}",
-        lineterm="",
-        n=3,
-    ))
+
+    diff_output = list(
+        difflib.unified_diff(
+            original_lines,
+            lines,
+            fromfile=f"original/{target_file}",
+            tofile=f"updated/{target_file}",
+            lineterm="",
+            n=3,
+        )
+    )
     if diff_output:
         print("\n".join(diff_output[:80]))
         if len(diff_output) > 80:
