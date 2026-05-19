@@ -179,5 +179,6 @@ async def run_doc_update(
         assignee=pr.user.login if pr.user else None,
         labels=effective_pr_labels,
         draft=effective_pr_draft,
+        pr_number=pr_number,
     )
     return DocUpdateResult(successful=successful, failed=failed, pr_url=pr_url)

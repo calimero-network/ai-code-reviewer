@@ -1579,6 +1579,7 @@ class GitHubClient:
         assignee: str | None = None,
         labels: list[str] | None = None,
         draft: bool = True,
+        pr_number: int | None = None,
     ) -> str:
         """Create a branch, commit updated doc files, and open a PR.
 
@@ -1587,15 +1588,23 @@ class GitHubClient:
 
         Returns the HTML URL of the newly opened PR.
         """
-        branch_name = f"docs/auto-{base_sha[:7]}"
+        suffix = f"pr{pr_number}-{base_sha[:7]}" if pr_number else base_sha[:7]
+        branch_name = f"docs/auto-{suffix}"
         repo = self._gh.get_repo(repo_name)
 
-        # Create branch off the base SHA
+        # Create branch off the base SHA; if it already exists reset it so
+        # re-runs start from a clean slate with no leftover commits.
+        ref_path = f"refs/heads/{branch_name}"
         try:
-            repo.create_git_ref(ref=f"refs/heads/{branch_name}", sha=base_sha)
+            repo.create_git_ref(ref=ref_path, sha=base_sha)
         except Exception as e:
             _raise_if_forbidden(e)
-            raise RuntimeError(f"Could not create branch {branch_name}: {e}") from e
+            try:
+                existing_ref = repo.get_git_ref(f"heads/{branch_name}")
+                existing_ref.edit(sha=base_sha, force=True)
+                logger.info("Reset existing branch %s to %s", branch_name, base_sha[:7])
+            except Exception as e2:
+                raise RuntimeError(f"Could not create or reset branch {branch_name}: {e2}") from e2
 
         # Commit each updated file onto the new branch
         committed: list[str] = []
