@@ -405,28 +405,29 @@ def _is_no_update_response(content: str) -> bool:
     return False
 
 
-def _looks_like_html(content: str) -> bool:
-    """Cheap sanity check that ``content`` resembles an HTML document.
+def _extract_html(content: str) -> str | None:
+    """Strip any preamble the model prepended before the HTML document.
 
-    Used as a last line of defense before overwriting an HTML file: if the
-    model returned plain prose instead of markup, the response should be
-    treated as a failed draft rather than written to disk. Looks for either
-    a doctype/root tag at the start, or simply the presence of any tag-like
-    construct in the body — deliberately permissive so partial pages still
-    pass while obvious failures (no ``<`` anywhere) are caught.
+    The system prompt says to start with ``<!DOCTYPE`` or ``<html``, but models
+    occasionally output reasoning text first. Find the first occurrence of
+    either tag (case-insensitive) and return everything from there onward.
+    Returns ``None`` if no HTML root tag is found at all.
     """
-    head = content.lstrip().lower()[:64]
-    if head.startswith(("<!doctype", "<html", "<?xml")):
-        return True
-    return "<" in content and ">" in content
+    lower = content.lower()
+    for marker in ("<!doctype", "<html"):
+        idx = lower.find(marker)
+        if idx != -1:
+            return content[idx:]
+    return None
 
 
 # ~4K chars ≈ ~1K tokens — keeps prompt cost low while providing enough context.
 _MAX_DIFF_CHARS = 4000
 # ~8K chars ≈ ~2K tokens — sufficient for most Markdown docs.
 _MAX_DOC_CHARS = 8000
-# HTML docs are larger due to markup; allow more context for accurate updates.
-_MAX_DOC_CHARS_HTML = 20_000
+# HTML docs can be large — pass the full file so the model doesn't regenerate
+# a truncated version and drop sections it never saw.
+_MAX_DOC_CHARS_HTML = 100_000
 
 
 def _strip_html_tags(html: str) -> str:
@@ -521,16 +522,15 @@ async def generate_doc_drafts(
                     content = result.strip()
                     if is_html and _is_no_update_response(content):
                         return None  # model says no update needed
-                    if is_html and not _looks_like_html(content):
-                        # Defense in depth: model returned prose instead of
-                        # HTML (e.g. forgot the sentinel and explained why no
-                        # update was needed). Treat as a failed draft so the
-                        # file is not overwritten.
-                        return DocDraft(
-                            suggestion=suggestion,
-                            updated_content="",
-                            error="model returned non-HTML content for an HTML target",
-                        )
+                    if is_html:
+                        extracted = _extract_html(content)
+                        if extracted is None:
+                            return DocDraft(
+                                suggestion=suggestion,
+                                updated_content="",
+                                error="model returned non-HTML content for an HTML target",
+                            )
+                        content = extracted
                     return DocDraft(suggestion=suggestion, updated_content=content)
                 except Exception as exc:
                     return DocDraft(suggestion=suggestion, updated_content="", error=str(exc))
