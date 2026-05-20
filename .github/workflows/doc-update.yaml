@@ -73,7 +73,15 @@ jobs:
           python-version: "3.11"
 
       - name: Install ai-code-reviewer
-        run: pip install ai-code-reviewer
+        run: |
+          # Install from local checkout when running inside this repo or any fork of it.
+          # git SHAs are content-addressed, so @<full-SHA> is already tamper-evident
+          # without needing --require-hashes (which is not supported for git+ installs).
+          if grep -q 'name = "ai-code-reviewer"' pyproject.toml 2>/dev/null; then
+            pip install .
+          else
+            pip install git+https://github.com/calimero-network/ai-code-reviewer.git@78514fe2453d3a1e95ba9b9bd6e16dc53095046b
+          fi
 
       - name: Get merged PR number
         id: pr
