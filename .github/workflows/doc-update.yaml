@@ -73,7 +73,12 @@ jobs:
           python-version: "3.11"
 
       - name: Install ai-code-reviewer
-        run: pip install ai-code-reviewer
+        run: |
+          if [ "${{ github.repository }}" = "calimero-network/ai-code-reviewer" ]; then
+            pip install .
+          else
+            pip install git+https://github.com/calimero-network/ai-code-reviewer.git
+          fi
 
       - name: Get merged PR number
         id: pr
