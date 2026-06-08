@@ -1482,27 +1482,38 @@ class GitHubClient:
         return resolved_ids
 
     def get_html_files_in_dirs(self, repo_name: str, ref: str, dirs: list[str]) -> list[str]:
-        """Return paths of all .html files found directly inside the given directories.
+        """Return paths of all .html files found under the given directories.
 
-        Does not recurse into sub-directories — flat docs-site layouts are assumed.
-        404s are swallowed; 403s are re-raised.
+        Recurses into sub-directories so nested docs-site layouts (e.g.
+        ``architecture/crates/node.html``) are covered, not just the top level.
+        Each directory is walked with ``get_contents``, which costs one API call
+        per (sub)directory — bounded because the walk is scoped to the doc dirs
+        passed in, never the whole repo.  404s are swallowed; 403s are re-raised.
+
+        Returns a sorted, de-duplicated list so overlapping *dirs* don't yield
+        the same page twice and the order is stable.
         """
         repo = self._gh.get_repo(repo_name)
-        found: list[str] = []
+        found: set[str] = set()
         for dir_path in dirs:
-            lookup = dir_path.rstrip("/")
-            try:
-                contents = repo.get_contents(lookup, ref=ref)
+            # DFS over the directory subtree; only push dirs we discover.
+            stack: list[str] = [dir_path.rstrip("/")]
+            while stack:
+                lookup = stack.pop()
+                try:
+                    contents = repo.get_contents(lookup, ref=ref)
+                except Exception as e:
+                    _raise_if_forbidden(e)
+                    logger.debug("get_html_files_in_dirs: %s not found at %s: %s", lookup, ref, e)
+                    continue
                 items = contents if isinstance(contents, list) else [contents]
                 for item in items:
-                    if getattr(item, "type", None) == "file" and item.path.lower().endswith(
-                        ".html"
-                    ):
-                        found.append(item.path)
-            except Exception as e:
-                _raise_if_forbidden(e)
-                logger.debug("get_html_files_in_dirs: %s not found at %s: %s", dir_path, ref, e)
-        return found
+                    item_type = getattr(item, "type", None)
+                    if item_type == "dir":
+                        stack.append(item.path)
+                    elif item_type == "file" and item.path.lower().endswith(".html"):
+                        found.add(item.path)
+        return sorted(found)
 
     def has_open_doc_update_pr(self, repo_name: str, base_branch: str) -> bool:
         """Return True if an open doc-update PR already exists for *base_branch*.
