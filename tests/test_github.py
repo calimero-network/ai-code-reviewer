@@ -148,6 +148,68 @@ class TestGitHubClient:
             }
         ]
 
+    def test_get_html_files_in_dirs_recurses_into_subdirs(self):
+        """HTML files in nested sub-directories must be discovered, not just the top level."""
+        from ai_reviewer.github.client import GitHubClient
+
+        def _item(path, item_type):
+            it = MagicMock()
+            it.type = item_type
+            it.path = path
+            return it
+
+        tree = {
+            "architecture": [
+                _item("architecture/index.html", "file"),
+                _item("architecture/concepts.html", "file"),
+                _item("architecture/styles.css", "file"),
+                _item("architecture/crates", "dir"),
+            ],
+            "architecture/crates": [
+                _item("architecture/crates/node.html", "file"),
+                _item("architecture/crates/auth.html", "file"),
+            ],
+        }
+
+        def _get_contents(lookup, ref):
+            assert ref == "abc123"  # ref must propagate through the recursion
+            return tree[lookup]
+
+        mock_repo = MagicMock()
+        mock_repo.get_contents.side_effect = _get_contents
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._gh = MagicMock()
+            client._gh.get_repo.return_value = mock_repo
+            result = client.get_html_files_in_dirs("o/r", "abc123", ["architecture/"])
+
+        # Sorted, de-duplicated, and includes the nested crate pages.
+        assert result == [
+            "architecture/concepts.html",
+            "architecture/crates/auth.html",
+            "architecture/crates/node.html",
+            "architecture/index.html",
+        ]
+
+    def test_get_html_files_in_dirs_reraises_403(self):
+        """A 403 anywhere in the walk must surface as PermissionError, not be swallowed."""
+        from github.GithubException import GithubException
+
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_repo = MagicMock()
+        mock_repo.get_contents.side_effect = GithubException(
+            status=403, data={"message": "Forbidden"}, headers={}
+        )
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._gh = MagicMock()
+            client._gh.get_repo.return_value = mock_repo
+            with pytest.raises(PermissionError):
+                client.get_html_files_in_dirs("o/r", "abc123", ["architecture/"])
+
 
 class TestGitHubPRHandler:
     """Tests for PR event handling."""
