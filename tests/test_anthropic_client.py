@@ -364,6 +364,96 @@ async def test_cache_control_breakpoints_never_exceed_four_across_tool_rounds():
 
 
 @pytest.mark.asyncio
+async def test_breakpoint_cap_holds_when_loop_terminates_normally():
+    """Companion to the cap regression: the loop runs 5+ tool rounds and then
+    ends with a real end_turn response (not the max_tool_rounds sentinel). The
+    breakpoint cap must hold on that path too, and the final review must parse."""
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=True)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+
+    counts: list[int] = []
+    counter = {"n": 0}
+
+    def fake_create(**kwargs):
+        counts.append(_count_cache_control(kwargs))
+        counter["n"] += 1
+        # Five tool rounds, then a normal completion on the sixth request.
+        if counter["n"] <= 5:
+            return _tool_use_response(f"t{counter['n']}", "read_file", {"path": "a.py"})
+        return _fake_response('{"findings": [], "summary": "done"}')
+
+    client._sdk.messages.create = AsyncMock(side_effect=fake_create)
+
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(return_value="contents")
+
+    result = await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        enable_thinking=False,
+        max_tokens=4096,
+        temperature=0.3,
+        max_tool_rounds=8,
+    )
+
+    assert len(counts) == 6, f"expected 5 tool rounds + 1 final request, got {len(counts)}"
+    assert max(counts) <= 4, f"cache_control breakpoints exceeded the 4-per-request cap: {counts}"
+    # The loop ended normally, so the real model output is parsed — not the cap sentinel.
+    assert result.parsed == {"findings": [], "summary": "done"}
+
+
+@pytest.mark.asyncio
+async def test_caller_user_block_cache_control_survives_tool_rounds():
+    """The strip pass prunes only the breakpoints the client adds to appended
+    tool_result turns — it must never strip a cache_control the caller placed on
+    the initial user turn. Guards the messages[1:] boundary (PR #68 review)."""
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=True)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+
+    # Snapshot at call time whether the original user turn still carries its
+    # caller-supplied breakpoint on every request.
+    user_cc_present: list[bool] = []
+    counter = {"n": 0}
+
+    def fake_create(**kwargs):
+        first_user_content = kwargs["messages"][0]["content"]
+        user_cc_present.append(
+            any(isinstance(b, dict) and "cache_control" in b for b in first_user_content)
+        )
+        counter["n"] += 1
+        if counter["n"] < 3:
+            return _tool_use_response(f"t{counter['n']}", "read_file", {"path": "a.py"})
+        return _fake_response('{"findings": [], "summary": "done"}')
+
+    client._sdk.messages.create = AsyncMock(side_effect=fake_create)
+
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(return_value="contents")
+
+    await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u", "cache_control": {"type": "ephemeral"}}],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        enable_thinking=False,
+        max_tokens=4096,
+        temperature=0.3,
+    )
+
+    assert all(user_cc_present), (
+        f"caller's user-block cache_control was stripped: per-request presence={user_cc_present}"
+    )
+
+
+@pytest.mark.asyncio
 async def test_caching_disabled_leaves_tool_result_unmarked():
     """When caching is off, no cache_control is added to tool_result blocks."""
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
