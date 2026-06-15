@@ -303,6 +303,66 @@ async def test_caching_marks_last_tool_result_when_enabled():
     assert last_block_r3.get("cache_control") == {"type": "ephemeral"}
 
 
+def _count_cache_control(kwargs: dict) -> int:
+    """Count cache_control breakpoints across the system + messages of a single
+    messages.create payload — exactly what Anthropic caps at 4 per request."""
+    n = 0
+    system = kwargs.get("system")
+    if isinstance(system, list):
+        n += sum(1 for blk in system if isinstance(blk, dict) and "cache_control" in blk)
+    for msg in kwargs.get("messages", []):
+        content = msg.get("content")
+        if isinstance(content, list):
+            n += sum(1 for blk in content if isinstance(blk, dict) and "cache_control" in blk)
+    return n
+
+
+@pytest.mark.asyncio
+async def test_cache_control_breakpoints_never_exceed_four_across_tool_rounds():
+    """Regression for #67: cache_control breakpoints must not accumulate past the
+    Anthropic 4-per-request cap as the tool-use loop runs 5+ rounds.
+
+    Previously one breakpoint was appended per tool round and never pruned, so
+    system(1) + N accumulated tool-result breakpoints hit 5 on the 5th round and
+    the request was rejected with a 400 (silently dropping the whole review)."""
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=True)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+
+    # Snapshot the breakpoint count at call time — run_review reuses and mutates
+    # the same messages list across rounds, so inspecting await_args_list after
+    # the fact would only ever show the final state, not what each request sent.
+    counts: list[int] = []
+    counter = {"n": 0}
+
+    def fake_create(**kwargs):
+        counts.append(_count_cache_control(kwargs))
+        counter["n"] += 1
+        # Always request another tool round to drive the loop to its cap.
+        return _tool_use_response(f"t{counter['n']}", "read_file", {"path": "a.py"})
+
+    client._sdk.messages.create = AsyncMock(side_effect=fake_create)
+
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(return_value="contents")
+
+    await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        enable_thinking=False,
+        max_tokens=4096,
+        temperature=0.3,
+        max_tool_rounds=8,
+    )
+
+    assert len(counts) >= 6, f"expected the loop to run past 4 rounds, ran {len(counts)}"
+    assert max(counts) <= 4, f"cache_control breakpoints exceeded the 4-per-request cap: {counts}"
+
+
 @pytest.mark.asyncio
 async def test_caching_disabled_leaves_tool_result_unmarked():
     """When caching is off, no cache_control is added to tool_result blocks."""

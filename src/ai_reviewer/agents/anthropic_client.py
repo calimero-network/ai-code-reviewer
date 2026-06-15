@@ -174,11 +174,21 @@ class AnthropicClient:
                 )
 
             if self.config.enable_prompt_caching and tool_result_blocks:
-                # Cache the conversation prefix up to this point. Placing
-                # cache_control on the last tool_result block marks all prior
-                # messages as a cache breakpoint — the next round pays ~10%
-                # of normal input price for the accumulated history instead of
-                # re-billing it at full price every round.
+                # Use a single MOVING conversation breakpoint. Caching is a prefix
+                # match, so cache_control on the latest tool_result already caches
+                # the whole prefix up to this point — earlier breakpoints are
+                # redundant AND must be pruned: Anthropic caps a request at 4
+                # cache_control blocks, so leaving one per round would push
+                # system(1) + N tool rounds past the cap on the 5th round, a 400
+                # that silently drops the entire review. Strip prior breakpoints,
+                # then mark only the newest tool_result, keeping the per-request
+                # total at system(1) + conversation(1) = 2.
+                for msg in messages:
+                    content = msg.get("content")
+                    if isinstance(content, list):
+                        for blk in content:
+                            if isinstance(blk, dict):
+                                blk.pop("cache_control", None)
                 tool_result_blocks[-1] = dict(tool_result_blocks[-1])
                 tool_result_blocks[-1]["cache_control"] = {"type": "ephemeral"}
 
