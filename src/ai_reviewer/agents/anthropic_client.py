@@ -174,23 +174,15 @@ class AnthropicClient:
                 )
 
             if self.config.enable_prompt_caching and tool_result_blocks:
-                # Use a single MOVING conversation breakpoint. Caching is a prefix
-                # match, so cache_control on the latest tool_result already caches
-                # the whole prefix up to this point — earlier breakpoints are
-                # redundant AND must be pruned: Anthropic caps a request at 4
-                # cache_control blocks, so leaving one per round would push
-                # system(1) + N tool rounds past the cap on the 5th round, a 400
-                # that silently drops the entire review. Strip prior breakpoints,
-                # then mark only the newest tool_result, keeping the per-request
-                # total at system(1) + conversation(1) = 2.
-                #
-                # Skip messages[0] — the caller's original user turn. We never set
-                # a breakpoint there (the ones we add live only on appended
-                # tool_result turns, all at index >= 1), so stripping it would only
-                # ever clobber a cache_control the caller deliberately placed. The
-                # in-place pop is safe precisely because every turn we touch here
-                # was constructed internally (serialized assistant blocks and
-                # tool_result dicts); no external reference to them is retained.
+                # Single MOVING breakpoint: caching is a prefix match, so
+                # cache_control on the latest tool_result caches everything before
+                # it — earlier breakpoints are redundant and must be pruned, else
+                # system(1) + one-per-round exceeds Anthropic's 4-per-request cap
+                # by the 5th round (a 400 that silently drops the whole review).
+                # Skip messages[0], the caller's user turn: we only ever mark
+                # appended tool_result turns (index >= 1), so the in-place pop
+                # touches only internally-built dicts and never clobbers a
+                # caller-supplied breakpoint.
                 for msg in messages[1:]:
                     content = msg.get("content")
                     if isinstance(content, list):
