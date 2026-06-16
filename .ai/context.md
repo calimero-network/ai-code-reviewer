@@ -16,6 +16,7 @@ PR Diff → [Sonnet (Security), Sonnet (Logic), Sonnet (Patterns), Haiku (Style)
 2. **Agents are independent** - Run in parallel, no shared state
 3. **Consensus scoring** - Findings are weighted by how many agents agree
 4. **Graceful degradation** - Works even if some agents fail
+5. **Strict import control** - Only `agents/anthropic_client.py` may import the Anthropic SDK; all other code routes LLM access through `AnthropicClient`
 
 ## Directory Map
 
@@ -127,7 +128,7 @@ orchestrator:
 
 ## Key Invariants to Preserve
 
-1. **All LLM calls go through `AnthropicClient`** - never direct `anthropic` SDK imports outside `agents/anthropic_client.py`
+1. **Architecture Invariant I1: Single SDK importer** - Only `agents/anthropic_client.py` may import the Anthropic SDK (marked with `# noqa: TID251`). All other code must access LLMs through `AnthropicClient`. This is enforced by ruff's `flake8-tidy-imports` rule.
 2. **Agents are stateless** - each review is independent
 3. **Async throughout** - no blocking I/O
 4. **Graceful degradation** - some results better than none
