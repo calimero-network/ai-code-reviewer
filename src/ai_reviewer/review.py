@@ -238,6 +238,15 @@ _LANGUAGE_RULES: dict[str, str] = {
         "- Missing lifetime annotations where the compiler cannot elide them.\n"
         "- `panic!()` / `todo!()` / `unimplemented!()` in library code — should return `Result`.\n"
         "- Mutex poisoning: using `.lock().unwrap()` without handling `PoisonError`.\n"
+        "- Concurrency: shared state crossing threads/`async` tasks without correct "
+        "`Send`/`Sync`; lock-ordering that can deadlock; logic races / TOCTOU "
+        "(Rust prevents data races, not all races).\n"
+        "- Swallowed errors: `let _ = result;` or `.ok()` discarding a `Result` that "
+        "should be handled or propagated with `?`.\n"
+        "- Public API / SemVer: breaking changes to public items (signatures, trait "
+        "bounds, enum variants, removed re-exports) without a version bump.\n"
+        "- Dependencies / supply chain: new or version-bumped crates, plus added "
+        "`build.rs` or proc-macros — flag untrusted or unmaintained sources.\n"
         "- Large types on the stack — suggest `Box<T>` for types > ~1KB.\n"
         "- Missing `#[must_use]` on functions returning `Result` or important values.\n"
         "- `String` vs `&str` in function parameters — prefer `&str` / `impl AsRef<str>` for inputs."
@@ -1028,6 +1037,7 @@ async def _prepare_shared_context(
     anthropic_cfg: AnthropicApiConfig,
     pr_type: str | None = None,
     pr_size: str | None = None,
+    language_rules: str = "",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Fetch conventions + repo map + neighbors and build system/user blocks."""
     import base64 as _b64
@@ -1079,6 +1089,7 @@ async def _prepare_shared_context(
         repo_map=repo_map,
         pr_type=pr_type,
         pr_size=pr_size,
+        language_rules=language_rules,
     )
     user_blocks = build_user_blocks(
         pr_title=getattr(pr, "title", "") or "",
@@ -1291,6 +1302,8 @@ async def review_pr(
     pr_type, pr_size = classify_pr(changed_paths, context.additions, context.deletions)
     if pr_type != "code":
         logger.info(f"PR type: {pr_type} – using context-aware review rules")
+    # Language-specific high-severity priorities (empty when no language matches).
+    language_rules = get_language_rules(context.repo_languages)
 
     # Select agents to run (resolve from config.agents, fall back to defaults)
     configured_names = [a.name for a in (config.agents if config and config.agents else [])]
@@ -1317,6 +1330,7 @@ async def review_pr(
             anthropic_cfg=anthropic_cfg,
             pr_type=pr_type,
             pr_size=pr_size,
+            language_rules=language_rules,
         )
 
         if on_status:

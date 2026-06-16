@@ -63,15 +63,21 @@ REVIEW_STANDARD_BLOCK: dict[str, Any] = {
         "## Review standard\n\n"
         "Favor approving when the change improves overall code health, even if "
         "imperfect — there is no perfect code, only better code. Do not block on "
-        "minor polish. Comment on the code, not the author, and explain *why* "
-        "when you ask for a change.\n\n"
+        "minor polish. Technical facts and engineering principles outweigh personal "
+        "preference: if the author's approach is a valid alternative, defer to it. "
+        "Comment on the code, not the author, and explain *why* you ask for a change.\n\n"
+        "Precision over volume: if you are not confident a finding is real, omit it. "
+        "Every finding must point to a specific changed line AND give a concrete fix "
+        "or the precise reason the code is wrong. Never raise the same issue twice. "
+        "Do not flag mechanical formatting or import ordering that an "
+        "autoformatter/linter already handles.\n\n"
         "**Severity:**\n"
-        "- `critical` — must fix: security bugs or data-corruption risks only.\n"
-        "- `warning` — should fix: other serious correctness or maintainability issues.\n"
-        "- `suggestion` — consider; optional improvement.\n"
-        '- `nitpick` — optional polish; prefix the title with "Nit: ".\n\n'
+        "- `critical` — must fix: security vulnerabilities or data-corruption/loss risks only.\n"
+        "- `warning` — should fix: other correctness, concurrency, or serious maintainability issues.\n"
+        "- `suggestion` — consider; an optional improvement.\n"
+        '- `nitpick` — optional polish; prefix the title with "Nit: " (never blocking).\n\n'
         "**Grounding:** Only report issues on lines changed in this PR. Cite the "
-        "file and line. Do not speculate about code outside the diff."
+        "file and line. Do not speculate about — or report issues in — code outside the diff."
     ),
 }
 
@@ -132,11 +138,14 @@ def build_system_blocks(
     repo_map: str,
     pr_type: str | None = None,
     pr_size: str | None = None,
+    language_rules: str = "",
 ) -> list[dict[str, Any]]:
     """Return system prompt blocks in deterministic order.
 
     Order matters for caching: later blocks are the ones marked
-    cache_control by the client.
+    cache_control by the client. ``language_rules`` is the (already-rendered)
+    language-specific high-severity guidance for the repo's languages; the
+    caller computes it so this module stays language-agnostic.
     """
     role_block = {
         "type": "text",
@@ -167,6 +176,15 @@ def build_system_blocks(
     blocks = [role_block, dict(REVIEW_STANDARD_BLOCK), dict(FEW_SHOT_BLOCK)]
     if tuning_block is not None:
         blocks.append(tuning_block)
+    if language_rules.strip():
+        blocks.append(
+            {
+                "type": "text",
+                "text": "## Language-specific priorities\n\n"
+                + language_rules.strip()
+                + "\n\nWeight the issues above as high severity for this repo.",
+            }
+        )
     blocks.extend([schema_block, convention_block, map_block])
     return blocks
 

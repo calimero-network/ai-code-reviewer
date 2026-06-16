@@ -37,9 +37,29 @@ def test_build_system_blocks_includes_review_standard_and_few_shot():
     assert "Favor approving" in combined
     assert "Nit: " in combined
     assert "critical" in combined
+    # Calibration additions from the research pass
+    assert "Precision over volume" in combined
+    assert "defer to it" in combined
     # Few-shot quality anchors
     assert "SQL injection via string interpolation" in combined
     assert "DO NOT produce these" in combined
+
+
+def test_build_system_blocks_includes_language_block_only_when_provided():
+    with_rules = build_system_blocks(
+        agent_role="r",
+        convention_texts={},
+        repo_map="m",
+        language_rules="For Rust:\n- `.unwrap()` in non-test code.",
+    )
+    combined = "\n".join(b["text"] for b in with_rules)
+    assert "Language-specific priorities" in combined
+    assert ".unwrap()" in combined
+
+    plain = "\n".join(
+        b["text"] for b in build_system_blocks(agent_role="r", convention_texts={}, repo_map="m")
+    )
+    assert "Language-specific priorities" not in plain
 
 
 def test_pr_tuning_block_docs_and_ci():
