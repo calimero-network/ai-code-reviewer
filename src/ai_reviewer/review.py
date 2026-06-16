@@ -764,6 +764,18 @@ def _review_finding_to_dict(f: ReviewFinding) -> dict[str, Any]:
     }
 
 
+def _truncate_to_byte_limit(text: str, max_bytes: int, marker: str = "") -> str:
+    """Truncate text to at most max_bytes UTF-8 bytes, appending marker if cut.
+
+    Slices on the byte boundary (not the character index): for multi-byte content
+    text[:N] can exceed N bytes. errors="ignore" drops any partial multi-byte
+    char left dangling at the cut.
+    """
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore") + marker
+
+
 async def _prepare_shared_context(
     session: ReviewSession,
     gh: GitHubClient,
@@ -806,8 +818,9 @@ async def _prepare_shared_context(
             text = _b64.b64decode(getattr(contents, "content", "")).decode(
                 "utf-8", errors="replace"
             )
-            if len(text) > anthropic_cfg.per_file_max_bytes:
-                text = text[: anthropic_cfg.per_file_max_bytes] + "\n[truncated]"
+            text = _truncate_to_byte_limit(
+                text, anthropic_cfg.per_file_max_bytes, marker="\n[truncated]"
+            )
             session.store_file(path, text)
             neighbors[path] = text
         except Exception as e:  # noqa: BLE001

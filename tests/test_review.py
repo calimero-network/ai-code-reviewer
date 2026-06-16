@@ -13,6 +13,7 @@ from ai_reviewer.review import (
     _detect_pr_type,
     _effective_agent_count,
     _raw_findings_similar,
+    _truncate_to_byte_limit,
     aggregate_findings,
     apply_cross_review,
     compute_quality_score,
@@ -1078,3 +1079,21 @@ class TestDedupCrossFile:
         security_findings = [f for f in result if f.category == Category.SECURITY]
         assert len(logic_findings) == 2
         assert len(security_findings) == 1
+
+
+class TestTruncateToByteLimit:
+    """Regression for the second byte-vs-char truncation site (#56), the
+    neighbor-file fetch in _prepare_shared_context."""
+
+    def test_under_limit_unchanged(self):
+        assert _truncate_to_byte_limit("hello", 100) == "hello"
+
+    def test_ascii_capped_to_byte_count(self):
+        assert _truncate_to_byte_limit("a" * 50, 10) == "a" * 10
+
+    def test_multibyte_capped_on_byte_boundary(self):
+        out = _truncate_to_byte_limit("😀" * 10, 10, marker="\n[truncated]")  # 40 bytes
+        body = out[: -len("\n[truncated]")]
+        assert len(body.encode("utf-8")) <= 10
+        assert "�" not in body  # no dangling partial multi-byte char
+        assert out.endswith("\n[truncated]")
