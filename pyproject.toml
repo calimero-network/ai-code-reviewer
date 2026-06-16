@@ -78,6 +78,7 @@ select = [
     "UP",     # pyupgrade
     "ARG",    # flake8-unused-arguments
     "SIM",    # flake8-simplify
+    "TID",    # flake8-tidy-imports
 ]
 ignore = [
     "E501",   # line too long (handled by formatter)
@@ -87,6 +88,15 @@ ignore = [
 
 [tool.ruff.lint.isort]
 known-first-party = ["ai_reviewer"]
+
+# Architecture invariant I1: the LLM SDK may be imported only by
+# agents/anthropic_client.py; everything else must go through AnthropicClient.
+[tool.ruff.lint.flake8-tidy-imports.banned-api]
+"anthropic".msg = "Import the SDK only in agents/anthropic_client.py; use AnthropicClient elsewhere."
+"openai".msg = "No direct LLM SDKs; route LLM access through AnthropicClient."
+
+[tool.ruff.lint.per-file-ignores]
+"src/ai_reviewer/agents/anthropic_client.py" = ["TID251"]  # the one allowed SDK importer
 
 [tool.mypy]
 python_version = "3.11"
