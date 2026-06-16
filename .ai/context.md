@@ -18,6 +18,7 @@ PR Diff → [Sonnet (Security), Sonnet (Logic), Sonnet (Patterns), Haiku (Style)
 4. **Graceful degradation** - Works even if some agents fail
 5. **Protocol-based tool registry** - `ToolRegistryProtocol` defines the interface for tool access, enabling flexible tool implementations
 6. **Strict import control** - Only `agents/anthropic_client.py` may import the Anthropic SDK; all other code routes LLM access through `AnthropicClient` (architecture invariant I1, enforced by ruff `flake8-tidy-imports` / `TID251`)
+7. **Prompt caching** - Enabled by default when system prompts exceed minimum cacheable length (~1024 tokens); cache control breakpoints set on system blocks to optimize repeated requests
 
 ## Directory Map
 
@@ -106,6 +107,7 @@ class ConsolidatedReview:
 pytest                          # Run all tests
 pytest tests/test_agents.py     # Test specific module
 pytest -k "test_security"       # Run tests matching pattern
+pytest tests/integration -m integration  # Run live API integration tests
 ```
 
 ## Configuration
@@ -117,6 +119,7 @@ anthropic:
   default_model: claude-sonnet-4-6
   max_retries: 1
   max_combined_context_tokens: 80000
+  enable_prompt_caching: true
 
 agents:
   - name: security-reviewer
@@ -141,3 +144,11 @@ orchestrator:
 4. **Async throughout** - no blocking I/O
 5. **Graceful degradation** - some results better than none
 6. **Type safety** - use enums for Severity/Category, not strings
+
+## AnthropicClient Methods
+
+**Main entry points:**
+- `run_review(model, system, user_context, tools, ...)` → Full agent review with tool use, caching, and JSON schema
+- `complete_simple(model, system, user, max_tokens, temperature)` → Lightweight completion with caching but no tools or schema; used for cross-review and other internal calls
+
+Both methods log token usage and support prompt caching when `enable_prompt_caching` is true.

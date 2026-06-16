@@ -119,6 +119,27 @@ agent = MyAgent(
 review = await agent.review(diff="", file_contents={}, context=ctx)
 ```
 
+### Simple Completions
+
+For lightweight single-turn completions without tools or JSON schema (e.g., cross-review summarization), use `AnthropicClient.complete_simple()`:
+
+```python
+result = await client.complete_simple(
+    model="claude-sonnet-4-6",
+    system="You are a code reviewer.",
+    user="Summarize these findings: ...",
+    max_tokens=1024,
+    temperature=0.2,
+)
+```
+
+This method:
+- Requires no tool registry
+- Returns plain text (not structured JSON)
+- Logs token usage on every call
+- Respects prompt caching configuration (cache_control breakpoint on last system block)
+- Is useful for operations that must go through `AnthropicClient` for invariant I1 compliance but don't need full agent infrastructure
+
 ## Tool Registry Interface
 
 Tool registries implement `ToolRegistryProtocol`, providing:
