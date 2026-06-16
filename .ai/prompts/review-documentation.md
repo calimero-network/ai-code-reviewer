@@ -12,7 +12,7 @@ This repository uses a multi-layer documentation system:
 
 1. **User Documentation**
    - `README.md` - Quick start, features, CLI commands
-   - `DESIGN.md` - Architecture, design decisions, full API docs
+   - `docs/ARCHITECTURE.md` - Architecture, design decisions, full API docs
 
 2. **AI Documentation** (helps AI agents understand the code)
    - `.cursor/rules/` - Module-specific rules and patterns

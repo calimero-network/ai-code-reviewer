@@ -37,7 +37,7 @@ For deeper module-specific work, check `rules/<module>.md`.
 The documentation bot (`doc-bot.md`) runs on PRs and:
 1. Detects what files changed
 2. Checks if documentation needs updates
-3. Suggests changes to README, DESIGN.md, or AI rules
+3. Suggests changes to README, docs/ARCHITECTURE.md, or AI rules
 4. Posts a comment or creates a follow-up PR
 
 ## File Purposes

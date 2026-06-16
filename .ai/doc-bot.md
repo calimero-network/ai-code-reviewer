@@ -23,7 +23,7 @@ Run documentation analysis when:
 | File | Update When |
 |------|-------------|
 | `README.md` | User-facing features change |
-| `DESIGN.md` | Architecture or design decisions change |
+| `docs/ARCHITECTURE.md` | Architecture or design decisions change |
 | `.cursor/rules/*.md` | Module patterns or conventions change |
 | `.ai/context.md` | High-level structure or key types change |
 | `config.example.yaml` | New config options added |
@@ -132,7 +132,7 @@ Only output suggestions with Medium or High confidence.
 
 **Analysis:**
 - ✅ Check if config.example.yaml has this option
-- ✅ Check if DESIGN.md mentions the option
+- ✅ Check if docs/ARCHITECTURE.md mentions the option
 - ✅ Check if README configuration section is current
 
 **Potential suggestions:**
@@ -143,7 +143,7 @@ Only output suggestions with Medium or High confidence.
 
 **Analysis:**
 - ✅ Check if `.cursor/rules/agents.md` documents the method
-- ✅ Check if DESIGN.md code examples are current
+- ✅ Check if docs/ARCHITECTURE.md code examples are current
 
 **Potential suggestions:**
 1. Update `.cursor/rules/agents.md` example code
