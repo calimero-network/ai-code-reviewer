@@ -23,7 +23,6 @@ def test_load_anthropic_config(tmp_path: Path, monkeypatch):
             model: claude-sonnet-4-6
             focus_areas: [security]
             thinking_enabled: true
-            thinking_budget_tokens: 8192
             allow_tool_use: true
             max_tool_calls: 20
     """)
@@ -34,6 +33,5 @@ def test_load_anthropic_config(tmp_path: Path, monkeypatch):
     assert cfg.anthropic.default_model == "claude-sonnet-4-6"
     assert cfg.anthropic.enable_prompt_caching is True
     assert cfg.agents[0].thinking_enabled is True
-    assert cfg.agents[0].thinking_budget_tokens == 8192
     assert cfg.agents[0].allow_tool_use is True
     assert cfg.agents[0].max_tool_calls == 20
