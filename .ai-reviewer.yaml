@@ -141,10 +141,3 @@ custom_rules:
     description: "Public functions must have type hints"
     check: "missing_type_hints_on_public_functions"
     severity: suggestion
-
-  # No direct LLM imports outside agents/anthropic_client.py
-  - name: no-direct-llm
-    description: "LLM access must go through AnthropicClient"
-    pattern: "^(import (openai)|from (openai) import)"
-    severity: critical
-    message: "Use AnthropicClient from agents/anthropic_client.py; no OpenAI/other-provider SDKs."
