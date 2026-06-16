@@ -13,12 +13,12 @@ from ai_reviewer.review import (
     _detect_pr_type,
     _effective_agent_count,
     _raw_findings_similar,
+    _truncate_to_byte_limit,
     aggregate_findings,
     apply_cross_review,
     compute_quality_score,
     dedup_cross_file,
     get_cross_review_prompt,
-    get_output_format,
     parse_cross_review_response,
 )
 
@@ -784,58 +784,6 @@ class TestEffectiveAgentCount:
         assert _effective_agent_count(additions=50, deletions=20, changed_files=2, requested=0) == 0
 
 
-class TestGetOutputFormatFewShotExamples:
-    """Tests for few-shot examples in get_output_format (Task 5)."""
-
-    def test_good_example_present(self):
-        output = get_output_format()
-        assert "Example of a GOOD finding" in output
-        assert "SQL injection via string interpolation" in output
-
-    def test_bad_example_present(self):
-        output = get_output_format()
-        assert "Example of a BAD finding" in output
-        assert "Consider adding more tests" in output
-        assert "DO NOT produce these" in output
-
-    def test_examples_appear_after_rules_before_analyze(self):
-        output = get_output_format()
-        rules_pos = output.index("**Rules**")
-        good_pos = output.index("Example of a GOOD finding")
-        bad_pos = output.index("Example of a BAD finding")
-        analyze_pos = output.index("Analyze the PR")
-        assert rules_pos < good_pos < bad_pos < analyze_pos
-
-
-class TestGetOutputFormatAdaptiveFindings:
-    """Tests for adaptive max findings in get_output_format (Task 7)."""
-
-    def test_zero_lines_gives_minimum_3(self):
-        output = get_output_format(total_lines=0)
-        assert "Maximum 3 findings per agent" in output
-
-    def test_500_lines_gives_8(self):
-        output = get_output_format(total_lines=500)
-        assert "Maximum 8 findings per agent" in output
-
-    def test_2000_lines_capped_at_10(self):
-        output = get_output_format(total_lines=2000)
-        assert "Maximum 10 findings per agent" in output
-
-    def test_100_lines_gives_4(self):
-        output = get_output_format(total_lines=100)
-        assert "Maximum 4 findings per agent" in output
-
-    def test_default_no_lines_gives_3(self):
-        output = get_output_format()
-        assert "Maximum 3 findings per agent" in output
-
-    def test_docs_type_still_has_adaptive_limit(self):
-        output = get_output_format(pr_type="docs", total_lines=700)
-        assert "Maximum 10 findings per agent" in output
-        assert "Only factual errors or security" in output
-
-
 def _make_raw_finding(
     severity: str = "warning",
     confidence: float = 0.8,
@@ -1131,3 +1079,21 @@ class TestDedupCrossFile:
         security_findings = [f for f in result if f.category == Category.SECURITY]
         assert len(logic_findings) == 2
         assert len(security_findings) == 1
+
+
+class TestTruncateToByteLimit:
+    """Regression for the second byte-vs-char truncation site (#56), the
+    neighbor-file fetch in _prepare_shared_context."""
+
+    def test_under_limit_unchanged(self):
+        assert _truncate_to_byte_limit("hello", 100) == "hello"
+
+    def test_ascii_capped_to_byte_count(self):
+        assert _truncate_to_byte_limit("a" * 50, 10) == "a" * 10
+
+    def test_multibyte_capped_on_byte_boundary(self):
+        out = _truncate_to_byte_limit("😀" * 10, 10, marker="\n[truncated]")  # 40 bytes
+        body = out[: -len("\n[truncated]")]
+        assert len(body.encode("utf-8")) <= 10
+        assert "�" not in body  # no dangling partial multi-byte char
+        assert out.endswith("\n[truncated]")

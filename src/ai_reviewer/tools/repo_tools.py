@@ -128,7 +128,10 @@ class ToolRegistry:
         except Exception as e:  # noqa: BLE001
             return f"[error: decode {e}]"
         if len(text.encode("utf-8")) > self.per_file_max_bytes:
-            text = text[: self.per_file_max_bytes]
+            # Slice on the byte boundary, not the character index: for multi-byte
+            # content text[:N] can exceed N bytes. errors="ignore" drops any
+            # partial multi-byte char left dangling at the cut.
+            text = text.encode("utf-8")[: self.per_file_max_bytes].decode("utf-8", errors="ignore")
             text += "\n[... file truncated ...]"
         self.session.store_file(path, text)
         return text

@@ -6,7 +6,7 @@ import logging
 import time
 from typing import Any
 
-from ai_reviewer.agents.anthropic_client import AnthropicClient
+from ai_reviewer.agents.anthropic_client import AnthropicClient, ToolRegistryProtocol
 from ai_reviewer.context.builder import FINDINGS_SCHEMA
 from ai_reviewer.models.context import ReviewContext
 from ai_reviewer.models.findings import Category, ReviewFinding, Severity
@@ -30,7 +30,7 @@ class ReviewAgent:
         agent_id: str,
         system_blocks: list[dict[str, Any]],
         user_blocks: list[dict[str, Any]],
-        tool_registry: Any,
+        tool_registry: ToolRegistryProtocol | None,
         max_tokens: int = 4096,
         temperature: float = 0.3,
         thinking_enabled: bool | None = None,

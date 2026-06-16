@@ -6,13 +6,21 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
 
 import anthropic
 
 from ai_reviewer.config import AnthropicApiConfig
 
 logger = logging.getLogger(__name__)
+
+
+class ToolRegistryProtocol(Protocol):
+    """Structural interface the tool-use loop needs from a tool registry."""
+
+    def tool_specs(self) -> list[dict[str, Any]]: ...
+
+    async def execute(self, name: str, tool_input: dict[str, Any]) -> str: ...
 
 
 @dataclass
@@ -78,7 +86,7 @@ class AnthropicClient:
         system_blocks: list[dict[str, Any]],
         user_blocks: list[dict[str, Any]],
         output_schema: dict[str, Any],
-        tool_registry: Any,
+        tool_registry: ToolRegistryProtocol | None,
         enable_thinking: bool = False,
         max_tokens: int = 8192,
         temperature: float = 0.3,
