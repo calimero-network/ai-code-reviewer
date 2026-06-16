@@ -46,6 +46,31 @@ async def test_per_agent_max_calls_enforced(session, fake_gh):
         await reg.execute("read_file", {"path": "b.py"})
 
 
+@pytest.mark.asyncio
+async def test_read_file_truncates_on_byte_boundary_not_char_index(session):
+    """Regression for #56: the per-file byte cap must slice on UTF-8 bytes, not
+    character index. For multi-byte content a char-index slice at position N can
+    yield far more than N bytes (here ~4x), overshooting the cap."""
+    limit = 10
+    payload = "😀" * 10  # 10 characters, 40 UTF-8 bytes
+    gh = MagicMock()
+    contents = MagicMock()
+    contents.content = base64.b64encode(payload.encode("utf-8")).decode()
+    gh.get_file_contents.return_value = contents
+
+    reg = ToolRegistry(session, gh, agent_id="a1", max_calls=10, per_file_max_bytes=limit)
+    out = await reg.execute("read_file", {"path": "emoji.py"})
+
+    marker = "\n[... file truncated ...]"
+    assert out.endswith(marker)
+    body = out[: -len(marker)]
+    assert len(body.encode("utf-8")) <= limit, (
+        f"truncated body is {len(body.encode('utf-8'))} bytes, exceeds cap {limit}"
+    )
+    # No dangling partial multi-byte character should survive truncation.
+    assert "�" not in body
+
+
 @pytest.fixture
 def fake_gh_with_tree():
     gh = MagicMock()
