@@ -34,6 +34,7 @@ class ReviewAgent:
         max_tokens: int = 4096,
         temperature: float = 0.3,
         thinking_enabled: bool | None = None,
+        model: str | None = None,
     ) -> None:
         self.client = client
         self._agent_id = agent_id
@@ -42,10 +43,11 @@ class ReviewAgent:
         self._tool_registry = tool_registry
         self._max_tokens = max_tokens
         self._temperature = temperature
-        # Config override takes precedence over class-level default
+        # Config overrides take precedence over class-level defaults
         self._thinking_enabled = (
             thinking_enabled if thinking_enabled is not None else self.THINKING_ENABLED
         )
+        self._model = model or self.MODEL
 
     @property
     def agent_id(self) -> str:
@@ -67,7 +69,7 @@ class ReviewAgent:
 
         try:
             result = await self.client.run_review(
-                model=self.MODEL,
+                model=self._model,
                 system_blocks=system_blocks,
                 user_blocks=self._user_blocks,
                 output_schema=FINDINGS_SCHEMA,

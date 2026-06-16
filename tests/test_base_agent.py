@@ -69,3 +69,34 @@ async def test_review_agent_uses_anthropic_client():
     kwargs = client.run_review.call_args.kwargs
     assert kwargs["model"] == "claude-sonnet-4-6"
     assert kwargs["enable_thinking"] is False
+
+
+@pytest.mark.asyncio
+async def test_config_model_overrides_class_default():
+    """The model passed in (from AgentConfig) takes precedence over class MODEL."""
+    client = MagicMock()
+    client.run_review = AsyncMock(
+        return_value=AnthropicReviewResult(parsed={"findings": [], "summary": "s"}, raw_text="")
+    )
+    agent = DummyAgent(
+        client=client,
+        agent_id="dummy-1",
+        system_blocks=[{"type": "text", "text": "sys"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        tool_registry=None,
+        model="claude-opus-4-8",  # differs from DummyAgent.MODEL
+    )
+    ctx = ReviewContext(
+        repo_name="o/r",
+        pr_number=1,
+        pr_title="t",
+        pr_description="d",
+        base_branch="main",
+        head_branch="feat",
+        author="u",
+        changed_files_count=1,
+        additions=1,
+        deletions=0,
+    )
+    await agent.review(diff="d", file_contents={}, context=ctx)
+    assert client.run_review.call_args.kwargs["model"] == "claude-opus-4-8"

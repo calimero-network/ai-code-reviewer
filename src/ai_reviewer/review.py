@@ -1179,6 +1179,8 @@ async def review_pr(
                 max_tokens=agent_cfg.max_tokens if agent_cfg else 8192,
                 temperature=agent_cfg.temperature if agent_cfg else 0.3,
                 thinking_enabled=agent_cfg.thinking_enabled if agent_cfg else None,
+                # Configured model wins; falls back to the agent class's MODEL.
+                model=agent_cfg.model if agent_cfg else None,
             )
             instantiated.append((agent_name, agent))
             tasks.append(_run_agent_safe(agent, context, on_status))
