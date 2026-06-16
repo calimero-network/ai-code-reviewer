@@ -1159,4 +1159,8 @@ class TestCrossAgentRoutesThroughClient:
         kw = client.complete_simple.call_args.kwargs
         assert kw["model"] == "claude-sonnet-4-6"  # from config, not hardcoded
         assert "the cross prompt" in kw["user"]
-        assert not client._sdk.messages.create.called  # no raw-SDK bypass
+        # The positive assertion above already proves routing through the wrapper;
+        # a `not client._sdk...called` check on a bare MagicMock is vacuous (the
+        # attribute auto-creates), so it's intentionally omitted. A reintroduced
+        # _sdk bypass would call _sdk instead of complete_simple, failing
+        # assert_awaited_once() above.

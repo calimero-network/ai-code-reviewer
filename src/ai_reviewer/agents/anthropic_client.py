@@ -81,10 +81,17 @@ class AnthropicClient:
     ) -> str:
         """Single completion with no tools and no JSON schema.
 
-        Unlike run_completion, this applies prompt caching to the system prefix
-        (when a block list is given and caching is enabled) and logs token usage.
-        Used for lightweight calls such as cross-review that should still go
-        through the client (architecture invariant I1) rather than the raw SDK.
+        Used for lightweight calls such as cross-review that must still go through
+        the client (architecture invariant I1) rather than the raw SDK, and to get
+        usage logging. Logs token usage on every call.
+
+        Caching: when a block list is given and caching is enabled, a cache_control
+        breakpoint is placed on the last system block. This only yields a real cache
+        hit when that system prefix exceeds the model's minimum cacheable length
+        (~1024 tokens for Sonnet/Opus). For a small system prompt + large *user*
+        message (the cross-review shape) it is a no-op — the breakpoint is set but
+        nothing is cached. Put the large reusable content in a system block to
+        benefit.
         """
         system_to_send = system
         if self.config.enable_prompt_caching and isinstance(system, list) and system:
