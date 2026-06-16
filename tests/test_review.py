@@ -1134,3 +1134,33 @@ class TestTruncateToByteLimit:
         assert len(body.encode("utf-8")) <= 10
         assert "�" not in body  # no dangling partial multi-byte char
         assert out.endswith("\n[truncated]")
+
+
+class TestCrossAgentRoutesThroughClient:
+    """#54: cross-review must go through AnthropicClient, not client._sdk."""
+
+    @pytest.mark.asyncio
+    async def test_uses_complete_simple_with_config_model(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        from ai_reviewer.config import AnthropicApiConfig
+        from ai_reviewer.review import _run_single_cross_agent
+
+        client = MagicMock()
+        client.config = AnthropicApiConfig(api_key="sk", default_model="claude-sonnet-4-6")
+        client.complete_simple = AsyncMock(return_value="{}")
+
+        name, _assessments = await _run_single_cross_agent(
+            client, "the cross prompt", "security-reviewer", None
+        )
+
+        assert name == "security-reviewer"
+        client.complete_simple.assert_awaited_once()
+        kw = client.complete_simple.call_args.kwargs
+        assert kw["model"] == "claude-sonnet-4-6"  # from config, not hardcoded
+        assert "the cross prompt" in kw["user"]
+        # The positive assertion above already proves routing through the wrapper;
+        # a `not client._sdk...called` check on a bare MagicMock is vacuous (the
+        # attribute auto-creates), so it's intentionally omitted. A reintroduced
+        # _sdk bypass would call _sdk instead of complete_simple, failing
+        # assert_awaited_once() above.

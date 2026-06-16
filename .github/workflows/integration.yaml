@@ -1,0 +1,44 @@
+name: Integration Tests
+
+# Live-API integration tests (real Anthropic calls) — e.g. the prompt-caching
+# proof that asserts cache_read_input_tokens > 0 on a repeated request.
+#
+# These are excluded from the normal CI run (pyproject `addopts = -m 'not
+# integration'`); this workflow opts them in. Runs on PRs and on manual dispatch.
+# Fork PRs do not receive repository secrets, so the tests skip there (each test
+# skips when ANTHROPIC_API_KEY is unset) rather than failing.
+
+on:
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+# Cancel an in-flight run when new commits land on the same ref, so rapid pushes
+# don't stack real (paid) API calls.
+concurrency:
+  group: integration-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Run integration tests (live API)
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # -o addopts="" drops the repo default (`-m 'not integration'` + coverage);
+        # -m integration then selects only the opt-in live tests.
+        run: pytest tests/integration -m integration -o addopts="" -v

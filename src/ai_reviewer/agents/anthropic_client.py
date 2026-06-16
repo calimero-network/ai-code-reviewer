@@ -71,6 +71,53 @@ class AnthropicClient:
         )
         return _extract_text(response)
 
+    async def complete_simple(
+        self,
+        model: str,
+        system: str | list[dict[str, Any]],
+        user: str,
+        max_tokens: int = 8192,
+        temperature: float = 0.2,
+    ) -> str:
+        """Single completion with no tools and no JSON schema.
+
+        Used for lightweight calls such as cross-review that must still go through
+        the client (architecture invariant I1) rather than the raw SDK, and to get
+        usage logging. Logs token usage on every call.
+
+        Caching: when a block list is given and caching is enabled, a cache_control
+        breakpoint is placed on the last system block. This only yields a real cache
+        hit when that system prefix exceeds the model's minimum cacheable length
+        (~1024 tokens for Sonnet/Opus). For a small system prompt + large *user*
+        message (the cross-review shape) it is a no-op — the breakpoint is set but
+        nothing is cached. Put the large reusable content in a system block to
+        benefit.
+        """
+        system_to_send = system
+        if self.config.enable_prompt_caching and isinstance(system, list) and system:
+            system_to_send = [dict(b) for b in system]
+            system_to_send[-1]["cache_control"] = {"type": "ephemeral"}
+
+        # Pass via a dict[str, Any] kwargs bag (as run_review does) so mypy does
+        # not reject the structural TextBlockParam dicts.
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "system": system_to_send,
+            "messages": [{"role": "user", "content": user}],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        response = await self._sdk.messages.create(**kwargs)
+        usage = UsageStats()
+        _accumulate_usage(usage, response)
+        logger.info(
+            "complete_simple usage: input=%d output=%d cache_read=%d",
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_input_tokens,
+        )
+        return _extract_text(response)
+
     async def close(self) -> None:
         await self._sdk.close()
 
@@ -153,6 +200,16 @@ class AnthropicClient:
                         usage.output_tokens,
                         total_tokens,
                     )
+                # Surface usage — including the cache counters — so prompt caching
+                # can be validated from logs on a real review: cache_read > 0 on a
+                # later round/agent proves a cache hit.
+                logger.info(
+                    "Review usage: input=%d output=%d cache_read=%d cache_creation=%d",
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_read_input_tokens,
+                    usage.cache_creation_input_tokens,
+                )
                 raw_text = _extract_text(response)
                 return AnthropicReviewResult(
                     parsed=_parse_json(raw_text),
