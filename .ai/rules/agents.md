@@ -40,6 +40,10 @@ agents/
 
 ## Invariants
 
+### I1: LLM SDK Access is Centralized
+
+Only `agents/anthropic_client.py` may import the `anthropic` SDK directly. All other modules must access LLM functionality through `AnthropicClient`. This is enforced by `ruff` with the `flake8-tidy-imports` rule.
+
 ### A1: All Agents Extend ReviewAgent
 
 Never create standalone agent functions. Always inherit from `ReviewAgent`.
@@ -126,4 +130,4 @@ review = await agent.review(diff="", file_contents={}, context=ctx)
 3. **Don't access GitHub/external APIs directly** - Use `ToolRegistry` for repo exploration
 4. **Don't hardcode temperatures** - Use configuration
 5. **Don't share state between reviews** - Create fresh state each call
-6. **Don't import `anthropic` SDK directly** - Only `anthropic_client.py` should import it
+6. **Don't import `anthropic` SDK directly** - Only `anthropic_client.py` should import it (enforced by invariant I1)
