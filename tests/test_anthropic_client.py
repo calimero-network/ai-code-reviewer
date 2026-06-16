@@ -544,3 +544,28 @@ async def test_complete_simple_caches_last_system_block_when_enabled():
     sent = client._sdk.messages.create.call_args.kwargs["system"]
     assert sent[-1]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_run_review_logs_cache_usage(caplog):
+    """run_review surfaces cache counters so caching is observable on real runs."""
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=True)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    resp = _fake_response('{"findings": [], "summary": "ok"}')
+    resp.usage.cache_read_input_tokens = 70
+    resp.usage.cache_creation_input_tokens = 120
+    client._sdk.messages.create = AsyncMock(return_value=resp)
+
+    with caplog.at_level("INFO", logger="ai_reviewer.agents.anthropic_client"):
+        result = await client.run_review(
+            model="claude-sonnet-4-6",
+            system_blocks=[{"type": "text", "text": "s"}],
+            user_blocks=[{"type": "text", "text": "u"}],
+            output_schema={"type": "object"},
+            tool_registry=None,
+        )
+
+    assert result.usage.cache_read_input_tokens == 70
+    assert "cache_read=70" in caplog.text
+    assert "cache_creation=120" in caplog.text

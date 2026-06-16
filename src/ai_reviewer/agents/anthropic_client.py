@@ -200,6 +200,16 @@ class AnthropicClient:
                         usage.output_tokens,
                         total_tokens,
                     )
+                # Surface usage — including the cache counters — so prompt caching
+                # can be validated from logs on a real review: cache_read > 0 on a
+                # later round/agent proves a cache hit.
+                logger.info(
+                    "Review usage: input=%d output=%d cache_read=%d cache_creation=%d",
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_read_input_tokens,
+                    usage.cache_creation_input_tokens,
+                )
                 raw_text = _extract_text(response)
                 return AnthropicReviewResult(
                     parsed=_parse_json(raw_text),
