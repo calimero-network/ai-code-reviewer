@@ -17,6 +17,7 @@ PR Diff → [Sonnet (Security), Sonnet (Logic), Sonnet (Patterns), Haiku (Style)
 3. **Consensus scoring** - Findings are weighted by how many agents agree
 4. **Graceful degradation** - Works even if some agents fail
 5. **Protocol-based tool registry** - `ToolRegistryProtocol` defines the interface for tool access, enabling flexible tool implementations
+6. **Strict import control** - Only `agents/anthropic_client.py` may import the Anthropic SDK; all other code routes LLM access through `AnthropicClient` (architecture invariant I1, enforced by ruff `flake8-tidy-imports` / `TID251`)
 
 ## Directory Map
 
@@ -134,7 +135,7 @@ orchestrator:
 
 ## Key Invariants to Preserve
 
-1. **All LLM calls go through `AnthropicClient`** - never direct `anthropic` SDK imports outside `agents/anthropic_client.py`
+1. **Architecture Invariant I1: Single SDK importer** - Only `agents/anthropic_client.py` may import the Anthropic SDK (marked with `# noqa: TID251`). All other code must access LLMs through `AnthropicClient`. Enforced by ruff's `flake8-tidy-imports` (`TID251`) rule.
 2. **Tool registries implement `ToolRegistryProtocol`** - enables structural typing and flexible tool implementations
 3. **Agents are stateless** - each review is independent
 4. **Async throughout** - no blocking I/O
