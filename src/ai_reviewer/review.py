@@ -167,6 +167,15 @@ _LANGUAGE_RULES: dict[str, str] = {
         "- Missing lifetime annotations where the compiler cannot elide them.\n"
         "- `panic!()` / `todo!()` / `unimplemented!()` in library code — should return `Result`.\n"
         "- Mutex poisoning: using `.lock().unwrap()` without handling `PoisonError`.\n"
+        "- Concurrency: shared state crossing threads/`async` tasks without correct "
+        "`Send`/`Sync`; lock-ordering that can deadlock; logic races / TOCTOU "
+        "(Rust prevents data races, not all races).\n"
+        "- Swallowed errors: `let _ = result;` or `.ok()` discarding a `Result` that "
+        "should be handled or propagated with `?`.\n"
+        "- Public API / SemVer: breaking changes to public items (signatures, trait "
+        "bounds, enum variants, removed re-exports) without a version bump.\n"
+        "- Dependencies / supply chain: new or version-bumped crates, plus added "
+        "`build.rs` or proc-macros — flag untrusted or unmaintained sources.\n"
         "- Large types on the stack — suggest `Box<T>` for types > ~1KB.\n"
         "- Missing `#[must_use]` on functions returning `Result` or important values.\n"
         "- `String` vs `&str` in function parameters — prefer `&str` / `impl AsRef<str>` for inputs."
@@ -617,6 +626,41 @@ def compute_quality_score(
     return round(min(0.95, combined), 2), breakdown
 
 
+def _cap_findings(
+    consolidated: list[ConsolidatedFinding], total_lines: int
+) -> list[ConsolidatedFinding]:
+    """Trim total findings to an adaptive cap that scales with PR size.
+
+    Keeps the highest-priority findings (``priority_score`` already folds in
+    severity, consensus, and confidence). All ``critical`` findings are exempt
+    and never dropped — the cap trims only non-criticals, so the result can
+    exceed N when there are many criticals.
+    """
+    n = max(5, min(20, total_lines // 100 + 5))
+    # Always return in priority order so both paths are consistent.
+    ranked = sorted(consolidated, key=lambda f: f.priority_score, reverse=True)
+    if len(ranked) <= n:
+        return ranked
+    critical_count = sum(1 for f in ranked if f.severity == Severity.CRITICAL)
+    non_critical_budget = max(0, n - critical_count)
+    kept: list[ConsolidatedFinding] = []
+    non_critical_kept = 0
+    for f in ranked:
+        if f.severity == Severity.CRITICAL:
+            kept.append(f)
+        elif non_critical_kept < non_critical_budget:
+            kept.append(f)
+            non_critical_kept += 1
+    logger.info(
+        "Adaptive cap kept %d/%d finding(s) (N=%d, total_lines=%d)",
+        len(kept),
+        len(consolidated),
+        n,
+        total_lines,
+    )
+    return kept
+
+
 def aggregate_findings(
     all_findings: list[tuple[str, list[dict], str]],
     repo: str,
@@ -699,6 +743,9 @@ def aggregate_findings(
     dedup_count = pre_dedup_count - len(consolidated)
     if dedup_count > 0:
         logger.info("Cross-file dedup collapsed %d finding(s)", dedup_count)
+
+    # Adaptive cap: trim total volume to scale with PR size (criticals exempt)
+    consolidated = _cap_findings(consolidated, total_lines)
 
     # Build combined summary
     combined_summary = "\n".join(summaries) if summaries else "Review completed"
@@ -783,6 +830,9 @@ async def _prepare_shared_context(
     diff: str,
     changed_file_contents: dict[str, str],
     anthropic_cfg: AnthropicApiConfig,
+    pr_type: str | None = None,
+    pr_size: str | None = None,
+    language_rules: str = "",
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Fetch conventions + repo map + neighbors and build system/user blocks."""
     import base64 as _b64
@@ -833,6 +883,9 @@ async def _prepare_shared_context(
         ),
         convention_texts=conventions,
         repo_map=repo_map,
+        pr_type=pr_type,
+        pr_size=pr_size,
+        language_rules=language_rules,
     )
     user_blocks = build_user_blocks(
         pr_title=getattr(pr, "title", "") or "",
@@ -1042,9 +1095,11 @@ async def review_pr(
         enable_cross_review = False
 
     changed_paths = list(files.keys())
-    pr_type, _pr_size = classify_pr(changed_paths, context.additions, context.deletions)
+    pr_type, pr_size = classify_pr(changed_paths, context.additions, context.deletions)
     if pr_type != "code":
         logger.info(f"PR type: {pr_type} – using context-aware review rules")
+    # Language-specific high-severity priorities (empty when no language matches).
+    language_rules = get_language_rules(context.repo_languages)
 
     # Select agents to run (resolve from config.agents, fall back to defaults)
     configured_names = [a.name for a in (config.agents if config and config.agents else [])]
@@ -1069,6 +1124,9 @@ async def review_pr(
             diff=diff,
             changed_file_contents=files,
             anthropic_cfg=anthropic_cfg,
+            pr_type=pr_type,
+            pr_size=pr_size,
+            language_rules=language_rules,
         )
 
         if on_status:

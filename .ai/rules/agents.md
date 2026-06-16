@@ -24,6 +24,11 @@ class AgentReview:
     findings: list[ReviewFinding]
     summary: str
     review_time_ms: int
+
+# Structural interface for tool registries
+class ToolRegistryProtocol(Protocol):
+    def tool_specs(self) -> list[dict[str, Any]]: ...
+    async def execute(self, name: str, tool_input: dict[str, Any]) -> str: ...
 ```
 
 ## File Structure
@@ -108,11 +113,20 @@ agent = MyAgent(
     agent_id="my-agent-0",
     system_blocks=system_blocks,     # Shared conventions + schema
     user_blocks=user_blocks,         # PR diff + files + neighbors
-    tool_registry=registry,          # read_file/glob/grep tools
+    tool_registry=registry,          # read_file/glob/grep tools (optional)
     thinking_enabled=True,           # Config override (optional)
 )
 review = await agent.review(diff="", file_contents={}, context=ctx)
 ```
+
+## Tool Registry Interface
+
+Tool registries implement `ToolRegistryProtocol`, providing:
+
+- `tool_specs() -> list[dict[str, Any]]`: Returns JSON schema for available tools
+- `async execute(name: str, tool_input: dict[str, Any]) -> str`: Executes a named tool with input
+
+Pass `None` for `tool_registry` if the agent does not use tools.
 
 ## Severity Guidelines for Agents
 

@@ -9,6 +9,7 @@ from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
 from ai_reviewer.models.review import ConsolidatedReview
 from ai_reviewer.review import (
     CONFIDENCE_THRESHOLDS,
+    _cap_findings,
     _cluster_raw_findings,
     _detect_pr_type,
     _effective_agent_count,
@@ -1079,6 +1080,42 @@ class TestDedupCrossFile:
         security_findings = [f for f in result if f.category == Category.SECURITY]
         assert len(logic_findings) == 2
         assert len(security_findings) == 1
+
+
+class TestAdaptiveFindingCap:
+    """Tests for _cap_findings — the adaptive, PR-size-scaled finding cap."""
+
+    def test_noop_when_under_cap(self):
+        findings = [_make_consolidated(severity=Severity.WARNING) for _ in range(3)]
+        out = _cap_findings(findings, total_lines=0)  # N=5
+        assert out == findings
+
+    def test_caps_to_n_for_small_pr(self):
+        findings = [_make_consolidated(severity=Severity.SUGGESTION) for _ in range(8)]
+        out = _cap_findings(findings, total_lines=0)  # N=5
+        assert len(out) == 5
+
+    def test_n_scales_with_pr_size(self):
+        many = [_make_consolidated(severity=Severity.SUGGESTION) for _ in range(30)]
+        assert len(_cap_findings(many, total_lines=500)) == 10  # N = 500//100+5
+        assert len(_cap_findings(many, total_lines=2000)) == 20  # N capped at 20
+
+    def test_criticals_never_dropped_even_beyond_cap(self):
+        criticals = [_make_consolidated(severity=Severity.CRITICAL) for _ in range(7)]
+        warnings = [_make_consolidated(severity=Severity.WARNING) for _ in range(3)]
+        out = _cap_findings(criticals + warnings, total_lines=0)  # N=5
+        assert sum(1 for f in out if f.severity == Severity.CRITICAL) == 7
+        assert all(f.severity == Severity.CRITICAL for f in out)
+        assert len(out) == 7  # all criticals, zero non-criticals leaked through
+
+    def test_keeps_highest_priority_non_criticals(self):
+        critical = _make_consolidated(severity=Severity.CRITICAL, confidence=0.9)
+        hi = _make_consolidated(severity=Severity.WARNING, confidence=0.95, title="hi")
+        nits = [_make_consolidated(severity=Severity.NITPICK, confidence=0.5) for _ in range(6)]
+        out = _cap_findings([critical, hi, *nits], total_lines=0)  # N=5
+        assert len(out) == 5
+        assert critical in out
+        assert hi in out
 
 
 class TestTruncateToByteLimit:

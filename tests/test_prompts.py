@@ -298,6 +298,11 @@ class TestLanguageRules:
         assert "unwrap" in rules.lower()
         assert "unsafe" in rules.lower()
         assert "clone" in rules.lower() or "lifetime" in rules.lower()
+        # High-severity correctness/security priorities added from the research pass
+        assert "send" in rules.lower() and "sync" in rules.lower()
+        assert "deadlock" in rules.lower()
+        assert "semver" in rules.lower()
+        assert "supply chain" in rules.lower()
 
     def test_javascript_rules(self):
         """JavaScript language returns JS-specific rules."""

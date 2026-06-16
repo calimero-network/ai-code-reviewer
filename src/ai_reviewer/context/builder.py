@@ -55,15 +55,97 @@ FINDINGS_SCHEMA: dict[str, Any] = {
 }
 
 
+# Shared review standard + severity rubric — every agent sees this so severity
+# is calibrated consistently rather than decided per agent.
+REVIEW_STANDARD_BLOCK: dict[str, Any] = {
+    "type": "text",
+    "text": (
+        "## Review standard\n\n"
+        "Favor approving when the change improves overall code health, even if "
+        "imperfect — there is no perfect code, only better code. Do not block on "
+        "minor polish. Technical facts and engineering principles outweigh personal "
+        "preference: if the author's approach is a valid alternative, defer to it. "
+        "Comment on the code, not the author, and explain *why* you ask for a change.\n\n"
+        "Precision over volume: if you are not confident a finding is real, omit it. "
+        "Every finding must point to a specific changed line AND give a concrete fix "
+        "or the precise reason the code is wrong. Never raise the same issue twice. "
+        "Do not flag mechanical formatting or import ordering that an "
+        "autoformatter/linter already handles.\n\n"
+        "**Severity:**\n"
+        "- `critical` — must fix: security vulnerabilities or data-corruption/loss risks only.\n"
+        "- `warning` — should fix: other correctness, concurrency, or serious maintainability issues.\n"
+        "- `suggestion` — consider; an optional improvement.\n"
+        '- `nitpick` — optional polish; prefix the title with "Nit: " (never blocking).\n\n'
+        "**Grounding:** Only report issues on lines changed in this PR. Cite the "
+        "file and line. Do not speculate about — or report issues in — code outside the diff."
+    ),
+}
+
+# Few-shot anchors: one specific/actionable finding and one vague one to avoid.
+FEW_SHOT_BLOCK: dict[str, Any] = {
+    "type": "text",
+    "text": (
+        "## Finding quality\n\n"
+        "GOOD (specific, actionable):\n"
+        '{"file_path": "auth.py", "line_start": 45, "severity": "critical", '
+        '"category": "security", "title": "SQL injection via string interpolation", '
+        '"description": "User input is interpolated directly into the query without '
+        'parameterization.", "suggested_fix": "Use a parameterized query: '
+        'cursor.execute(\'… WHERE id = ?\', (user_id,))", "confidence": 0.95}\n\n'
+        "BAD (vague — DO NOT produce these):\n"
+        '{"file_path": "utils.py", "line_start": 1, "severity": "suggestion", '
+        '"category": "testing", "title": "Consider adding more tests", '
+        '"description": "The code could benefit from additional test coverage.", '
+        '"confidence": 0.5}'
+    ),
+}
+
+
+def _pr_tuning_block(pr_type: str | None, pr_size: str | None) -> dict[str, Any] | None:
+    """Context-tuning guidance derived from PR type/size, or None if none applies.
+
+    Type and size guidance may both apply and are concatenated.
+    """
+    parts: list[str] = []
+    if pr_type == "docs":
+        parts.append(
+            "This PR is docs-only: report only factual errors, broken links, or "
+            "security-sensitive content. Do not raise code style, tests, or nitpicks."
+        )
+    elif pr_type == "ci":
+        parts.append(
+            "This PR is CI/workflow-only: focus on workflow correctness (paths, "
+            "steps, secrets). Do not raise code style or nitpicks."
+        )
+    if pr_size in ("trivial", "small"):
+        parts.append(
+            "Small change — prioritize precision: report only findings you are "
+            "confident about, and do not pad the review with low-value suggestions."
+        )
+    elif pr_size == "large":
+        parts.append(
+            "Large change — prioritize high-severity issues (architecture, "
+            "correctness, security) over minor style or nitpicks."
+        )
+    if not parts:
+        return None
+    return {"type": "text", "text": "## Review focus for this PR\n\n" + "\n\n".join(parts)}
+
+
 def build_system_blocks(
     agent_role: str,
     convention_texts: dict[str, str],
     repo_map: str,
+    pr_type: str | None = None,
+    pr_size: str | None = None,
+    language_rules: str = "",
 ) -> list[dict[str, Any]]:
     """Return system prompt blocks in deterministic order.
 
     Order matters for caching: later blocks are the ones marked
-    cache_control by the client.
+    cache_control by the client. ``language_rules`` is the (already-rendered)
+    language-specific high-severity guidance for the repo's languages; the
+    caller computes it so this module stays language-agnostic.
     """
     role_block = {
         "type": "text",
@@ -87,7 +169,24 @@ def build_system_blocks(
         "type": "text",
         "text": f"## Repository map\n\n{repo_map.strip()}",
     }
-    return [role_block, schema_block, convention_block, map_block]
+    tuning_block = _pr_tuning_block(pr_type, pr_size)
+    # Copy the shared constant blocks so a downstream in-place mutation (e.g. the
+    # client adding cache_control to a block) can never clobber the module-level
+    # originals across reviews.
+    blocks = [role_block, dict(REVIEW_STANDARD_BLOCK), dict(FEW_SHOT_BLOCK)]
+    if tuning_block is not None:
+        blocks.append(tuning_block)
+    if language_rules.strip():
+        blocks.append(
+            {
+                "type": "text",
+                "text": "## Language-specific priorities\n\n"
+                + language_rules.strip()
+                + "\n\nWeight the issues above as high severity for this repo.",
+            }
+        )
+    blocks.extend([schema_block, convention_block, map_block])
+    return blocks
 
 
 def _files_block(heading: str, files: dict[str, str]) -> str:
