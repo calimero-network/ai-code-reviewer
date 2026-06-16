@@ -16,6 +16,7 @@ PR Diff → [Sonnet (Security), Sonnet (Logic), Sonnet (Patterns), Haiku (Style)
 2. **Agents are independent** - Run in parallel, no shared state
 3. **Consensus scoring** - Findings are weighted by how many agents agree
 4. **Graceful degradation** - Works even if some agents fail
+5. **Protocol-based tool registry** - `ToolRegistryProtocol` defines the interface for tool access, enabling flexible tool implementations
 
 ## Directory Map
 
@@ -45,6 +46,12 @@ src/ai_reviewer/
 ## Important Types
 
 ```python
+# Tool registry interface
+class ToolRegistryProtocol(Protocol):
+    """Structural interface the tool-use loop needs from a tool registry."""
+    def tool_specs(self) -> list[dict[str, Any]]: ...
+    async def execute(self, name: str, tool_input: dict[str, Any]) -> str: ...
+
 # What agents produce
 class AgentReview:
     agent_id: str
@@ -128,7 +135,8 @@ orchestrator:
 ## Key Invariants to Preserve
 
 1. **All LLM calls go through `AnthropicClient`** - never direct `anthropic` SDK imports outside `agents/anthropic_client.py`
-2. **Agents are stateless** - each review is independent
-3. **Async throughout** - no blocking I/O
-4. **Graceful degradation** - some results better than none
-5. **Type safety** - use enums for Severity/Category, not strings
+2. **Tool registries implement `ToolRegistryProtocol`** - enables structural typing and flexible tool implementations
+3. **Agents are stateless** - each review is independent
+4. **Async throughout** - no blocking I/O
+5. **Graceful degradation** - some results better than none
+6. **Type safety** - use enums for Severity/Category, not strings
