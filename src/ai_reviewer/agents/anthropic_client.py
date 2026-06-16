@@ -71,6 +71,46 @@ class AnthropicClient:
         )
         return _extract_text(response)
 
+    async def complete_simple(
+        self,
+        model: str,
+        system: str | list[dict[str, Any]],
+        user: str,
+        max_tokens: int = 8192,
+        temperature: float = 0.2,
+    ) -> str:
+        """Single completion with no tools and no JSON schema.
+
+        Unlike run_completion, this applies prompt caching to the system prefix
+        (when a block list is given and caching is enabled) and logs token usage.
+        Used for lightweight calls such as cross-review that should still go
+        through the client (architecture invariant I1) rather than the raw SDK.
+        """
+        system_to_send = system
+        if self.config.enable_prompt_caching and isinstance(system, list) and system:
+            system_to_send = [dict(b) for b in system]
+            system_to_send[-1]["cache_control"] = {"type": "ephemeral"}
+
+        # Pass via a dict[str, Any] kwargs bag (as run_review does) so mypy does
+        # not reject the structural TextBlockParam dicts.
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "system": system_to_send,
+            "messages": [{"role": "user", "content": user}],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+        }
+        response = await self._sdk.messages.create(**kwargs)
+        usage = UsageStats()
+        _accumulate_usage(usage, response)
+        logger.info(
+            "complete_simple usage: input=%d output=%d cache_read=%d",
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_input_tokens,
+        )
+        return _extract_text(response)
+
     async def close(self) -> None:
         await self._sdk.close()
 

@@ -929,22 +929,20 @@ async def _run_single_cross_agent(
     try:
         if on_status:
             on_status(f"Cross-review: {agent_name}")
-        response = await client._sdk.messages.create(
-            model="claude-sonnet-4-6",
+        # Route through the client wrapper (invariant I1): gets prompt caching +
+        # usage logging, and uses the configured model instead of a hardcoded one.
+        raw_text = await client.complete_simple(
+            model=client.config.default_model,
             system=[
                 {
                     "type": "text",
                     "text": "You are a code review validator. Respond with valid JSON.",
                 }
             ],
-            messages=[{"role": "user", "content": cross_prompt}],
+            user=cross_prompt,
             max_tokens=8192,
             temperature=0.2,
         )
-        raw_text = ""
-        for block in getattr(response, "content", []) or []:
-            if getattr(block, "type", None) == "text":
-                raw_text += getattr(block, "text", "")
         assessments, _ = parse_cross_review_response(raw_text)
         return (agent_name, assessments)
     except Exception as e:  # noqa: BLE001

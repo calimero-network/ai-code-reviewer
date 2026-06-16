@@ -505,3 +505,42 @@ async def test_run_completion_uses_system_and_user():
     call_kwargs = client._sdk.messages.create.call_args.kwargs
     assert call_kwargs["system"] == "sys prompt"
     assert call_kwargs["messages"] == [{"role": "user", "content": "user prompt"}]
+
+
+@pytest.mark.asyncio
+async def test_complete_simple_returns_text_without_tools_or_schema():
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    client._sdk.messages.create = AsyncMock(return_value=_fake_response("assessment json"))
+
+    out = await client.complete_simple(
+        model="claude-sonnet-4-6",
+        system=[{"type": "text", "text": "You are a validator."}],
+        user="findings...",
+        max_tokens=4096,
+        temperature=0.2,
+    )
+
+    assert out == "assessment json"
+    kw = client._sdk.messages.create.call_args.kwargs
+    assert "tools" not in kw and "output_config" not in kw
+    assert kw["messages"] == [{"role": "user", "content": "findings..."}]
+    assert kw["temperature"] == 0.2
+
+
+@pytest.mark.asyncio
+async def test_complete_simple_caches_last_system_block_when_enabled():
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=True)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    client._sdk.messages.create = AsyncMock(return_value=_fake_response("ok"))
+
+    await client.complete_simple(
+        model="m",
+        system=[{"type": "text", "text": "a"}, {"type": "text", "text": "b"}],
+        user="u",
+    )
+    sent = client._sdk.messages.create.call_args.kwargs["system"]
+    assert sent[-1]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in sent[0]
