@@ -161,7 +161,10 @@ def build_system_blocks(
         "text": f"## Repository map\n\n{repo_map.strip()}",
     }
     tuning_block = _pr_tuning_block(pr_type, pr_size)
-    blocks = [role_block, REVIEW_STANDARD_BLOCK, FEW_SHOT_BLOCK]
+    # Copy the shared constant blocks so a downstream in-place mutation (e.g. the
+    # client adding cache_control to a block) can never clobber the module-level
+    # originals across reviews.
+    blocks = [role_block, dict(REVIEW_STANDARD_BLOCK), dict(FEW_SHOT_BLOCK)]
     if tuning_block is not None:
         blocks.append(tuning_block)
     blocks.extend([schema_block, convention_block, map_block])

@@ -1158,6 +1158,7 @@ class TestAdaptiveFindingCap:
         out = _cap_findings(criticals + warnings, total_lines=0)  # N=5
         assert sum(1 for f in out if f.severity == Severity.CRITICAL) == 7
         assert all(f.severity == Severity.CRITICAL for f in out)
+        assert len(out) == 7  # all criticals, zero non-criticals leaked through
 
     def test_keeps_highest_priority_non_criticals(self):
         critical = _make_consolidated(severity=Severity.CRITICAL, confidence=0.9)

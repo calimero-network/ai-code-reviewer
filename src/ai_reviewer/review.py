@@ -845,9 +845,10 @@ def _cap_findings(
     exceed N when there are many criticals.
     """
     n = max(5, min(20, total_lines // 100 + 5))
-    if len(consolidated) <= n:
-        return consolidated
+    # Always return in priority order so both paths are consistent.
     ranked = sorted(consolidated, key=lambda f: f.priority_score, reverse=True)
+    if len(ranked) <= n:
+        return ranked
     critical_count = sum(1 for f in ranked if f.severity == Severity.CRITICAL)
     non_critical_budget = max(0, n - critical_count)
     kept: list[ConsolidatedFinding] = []
