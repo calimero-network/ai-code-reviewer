@@ -96,7 +96,7 @@ async def test_run_review_passes_output_schema_as_json_schema():
 
 
 @pytest.mark.asyncio
-async def test_run_review_with_thinking_budget_sets_thinking_config():
+async def test_run_review_with_thinking_enabled_sets_adaptive_config():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()

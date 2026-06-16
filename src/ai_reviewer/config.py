@@ -20,7 +20,6 @@ class AgentConfig:
     custom_prompt_append: str | None = None
     include_codebase_context: bool = False
     thinking_enabled: bool = False
-    thinking_budget_tokens: int = 8192
     allow_tool_use: bool = True
     max_tool_calls: int = 20
 
@@ -252,7 +251,6 @@ def _parse_config(raw: dict[str, Any]) -> Config:
                 custom_prompt_append=agent_raw.get("custom_prompt_append"),
                 include_codebase_context=agent_raw.get("include_codebase_context", False),
                 thinking_enabled=agent_raw.get("thinking_enabled", False),
-                thinking_budget_tokens=agent_raw.get("thinking_budget_tokens", 8192),
                 allow_tool_use=agent_raw.get("allow_tool_use", True),
                 max_tool_calls=agent_raw.get("max_tool_calls", 20),
             )
