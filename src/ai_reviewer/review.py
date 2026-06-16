@@ -834,6 +834,40 @@ def compute_quality_score(
     return round(min(0.95, combined), 2), breakdown
 
 
+def _cap_findings(
+    consolidated: list[ConsolidatedFinding], total_lines: int
+) -> list[ConsolidatedFinding]:
+    """Trim total findings to an adaptive cap that scales with PR size.
+
+    Keeps the highest-priority findings (``priority_score`` already folds in
+    severity, consensus, and confidence). All ``critical`` findings are exempt
+    and never dropped — the cap trims only non-criticals, so the result can
+    exceed N when there are many criticals.
+    """
+    n = max(5, min(20, total_lines // 100 + 5))
+    if len(consolidated) <= n:
+        return consolidated
+    ranked = sorted(consolidated, key=lambda f: f.priority_score, reverse=True)
+    critical_count = sum(1 for f in ranked if f.severity == Severity.CRITICAL)
+    non_critical_budget = max(0, n - critical_count)
+    kept: list[ConsolidatedFinding] = []
+    non_critical_kept = 0
+    for f in ranked:
+        if f.severity == Severity.CRITICAL:
+            kept.append(f)
+        elif non_critical_kept < non_critical_budget:
+            kept.append(f)
+            non_critical_kept += 1
+    logger.info(
+        "Adaptive cap kept %d/%d finding(s) (N=%d, total_lines=%d)",
+        len(kept),
+        len(consolidated),
+        n,
+        total_lines,
+    )
+    return kept
+
+
 def aggregate_findings(
     all_findings: list[tuple[str, list[dict], str]],
     repo: str,
@@ -917,6 +951,9 @@ def aggregate_findings(
     if dedup_count > 0:
         logger.info("Cross-file dedup collapsed %d finding(s)", dedup_count)
 
+    # Adaptive cap: trim total volume to scale with PR size (criticals exempt)
+    consolidated = _cap_findings(consolidated, total_lines)
+
     # Build combined summary
     combined_summary = "\n".join(summaries) if summaries else "Review completed"
 
@@ -988,6 +1025,8 @@ async def _prepare_shared_context(
     diff: str,
     changed_file_contents: dict[str, str],
     anthropic_cfg: AnthropicApiConfig,
+    pr_type: str | None = None,
+    pr_size: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Fetch conventions + repo map + neighbors and build system/user blocks."""
     import base64 as _b64
@@ -1037,6 +1076,8 @@ async def _prepare_shared_context(
         ),
         convention_texts=conventions,
         repo_map=repo_map,
+        pr_type=pr_type,
+        pr_size=pr_size,
     )
     user_blocks = build_user_blocks(
         pr_title=getattr(pr, "title", "") or "",
@@ -1246,7 +1287,7 @@ async def review_pr(
         enable_cross_review = False
 
     changed_paths = list(files.keys())
-    pr_type, _pr_size = classify_pr(changed_paths, context.additions, context.deletions)
+    pr_type, pr_size = classify_pr(changed_paths, context.additions, context.deletions)
     if pr_type != "code":
         logger.info(f"PR type: {pr_type} – using context-aware review rules")
 
@@ -1273,6 +1314,8 @@ async def review_pr(
             diff=diff,
             changed_file_contents=files,
             anthropic_cfg=anthropic_cfg,
+            pr_type=pr_type,
+            pr_size=pr_size,
         )
 
         if on_status:

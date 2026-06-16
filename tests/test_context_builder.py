@@ -1,5 +1,6 @@
 from ai_reviewer.context.builder import (
     FINDINGS_SCHEMA,
+    _pr_tuning_block,
     build_system_blocks,
     build_user_blocks,
 )
@@ -23,6 +24,56 @@ def test_build_system_blocks_includes_role_schema_and_conventions():
     assert "Follow PEP8." in combined
     assert "src/" in combined
     assert blocks[-1]["type"] == "text"
+
+
+def test_build_system_blocks_includes_review_standard_and_few_shot():
+    blocks = build_system_blocks(
+        agent_role="You review security.",
+        convention_texts={},
+        repo_map="map",
+    )
+    combined = "\n".join(b["text"] for b in blocks)
+    # Shared review standard + severity rubric
+    assert "Favor approving" in combined
+    assert "Nit: " in combined
+    assert "critical" in combined
+    # Few-shot quality anchors
+    assert "SQL injection via string interpolation" in combined
+    assert "DO NOT produce these" in combined
+
+
+def test_pr_tuning_block_docs_and_ci():
+    docs = _pr_tuning_block("docs", "small")
+    assert docs is not None and "factual" in docs["text"].lower()
+    ci = _pr_tuning_block("ci", "trivial")
+    assert ci is not None and "workflow correctness" in ci["text"].lower()
+
+
+def test_pr_tuning_block_size_guidance():
+    small = _pr_tuning_block("code", "small")
+    assert small is not None and "precision" in small["text"].lower()
+    large = _pr_tuning_block("code", "large")
+    assert large is not None and "high-severity" in large["text"].lower()
+
+
+def test_pr_tuning_block_none_when_nothing_applies():
+    assert _pr_tuning_block("code", "medium") is None
+    assert _pr_tuning_block(None, None) is None
+
+
+def test_build_system_blocks_includes_tuning_only_when_classified():
+    tuned = build_system_blocks(
+        agent_role="r", convention_texts={}, repo_map="m", pr_type="docs", pr_size="large"
+    )
+    tuned_combined = "\n".join(b["text"] for b in tuned).lower()
+    assert "factual" in tuned_combined
+    assert "high-severity" in tuned_combined
+
+    plain = "\n".join(
+        b["text"] for b in build_system_blocks(agent_role="r", convention_texts={}, repo_map="m")
+    ).lower()
+    assert "high-severity" not in plain
+    assert "docs-only" not in plain
 
 
 def test_findings_schema_is_complete():
