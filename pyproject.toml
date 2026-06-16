@@ -90,13 +90,13 @@ ignore = [
 known-first-party = ["ai_reviewer"]
 
 # Architecture invariant I1: the LLM SDK may be imported only by
-# agents/anthropic_client.py; everything else must go through AnthropicClient.
+# agents/anthropic_client.py (which carries an inline `# noqa: TID251` on its
+# import line); everything else must go through AnthropicClient.
 [tool.ruff.lint.flake8-tidy-imports.banned-api]
 "anthropic".msg = "Import the SDK only in agents/anthropic_client.py; use AnthropicClient elsewhere."
+# Preventive: no openai usage today; keep it banned so I1 holds if a second
+# provider is ever introduced.
 "openai".msg = "No direct LLM SDKs; route LLM access through AnthropicClient."
-
-[tool.ruff.lint.per-file-ignores]
-"src/ai_reviewer/agents/anthropic_client.py" = ["TID251"]  # the one allowed SDK importer
 
 [tool.mypy]
 python_version = "3.11"

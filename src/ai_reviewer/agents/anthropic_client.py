@@ -8,7 +8,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-import anthropic
+import anthropic  # noqa: TID251 — the single allowed SDK importer (architecture invariant I1)
 
 from ai_reviewer.config import AnthropicApiConfig
 
