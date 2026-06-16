@@ -48,77 +48,6 @@ from ai_reviewer.tools.repo_tools import ToolRegistry
 logger = logging.getLogger(__name__)
 
 
-# Different agent configurations for multi-perspective review
-AGENT_CONFIGS = [
-    {
-        "name": "security-agent",
-        "focus": "security",
-        "prompt_addition": """
-**YOUR FOCUS: SECURITY**
-You are a security expert with deep knowledge of OWASP Top 10 vulnerabilities.
-Focus ONLY on security issues. Ignore performance, style, and other non-security concerns.
-
-Review for these categories:
-
-1. **Injection Vulnerabilities**
-   - SQL injection (string interpolation in queries)
-   - Command injection (os.system, subprocess with user input)
-   - XSS (unescaped user input in HTML/JS)
-   - LDAP/XPath injection
-
-2. **Authentication & Authorization**
-   - Hardcoded credentials or secrets
-   - Weak password handling (MD5/SHA1 instead of bcrypt/argon2)
-   - Missing authentication or authorization checks
-   - Broken access control and privilege escalation
-
-3. **Cryptographic Issues**
-   - Weak algorithms (MD5, SHA1 for security purposes)
-   - Hardcoded keys or IVs
-   - Insecure random number generation
-   - Missing encryption for sensitive data
-
-4. **Data Exposure**
-   - Sensitive data in logs or error messages
-   - Insecure data transmission
-   - Missing input validation
-
-5. **Security Misconfigurations**
-   - Debug mode in production
-   - Permissive CORS policies
-   - Missing security headers
-   - Insecure defaults
-
-Provide specific line numbers and concrete evidence for each finding.
-Do not speculate about issues that might exist elsewhere in the codebase.
-""",
-    },
-    {
-        "name": "performance-agent",
-        "focus": "performance",
-        "prompt_addition": """
-**YOUR FOCUS: PERFORMANCE & CORRECTNESS**
-You are a performance engineer. Focus ONLY on:
-- Algorithm complexity (O(n²) where O(n) possible)
-- Memory leaks and resource management
-- N+1 queries, unnecessary allocations
-- Race conditions and concurrency bugs
-- Logic errors and edge cases
-
-Ignore security and style issues unless they cause bugs.
-""",
-    },
-    {
-        "name": "quality-agent",
-        "focus": "quality",
-        "prompt_addition": """
-**YOUR FOCUS: CODE QUALITY & DESIGN PRINCIPLES**
-You are a code quality reviewer. Focus on the design principles listed above (SOLID, DRY, KISS, YAGNI, Composition over Inheritance, Law of Demeter) and on: API design, error handling patterns, maintainability, tests for critical paths, documentation. Ignore security and performance unless they affect maintainability or correctness.
-""",
-    },
-]
-
-
 def _detect_pr_type(changed_paths: list[str]) -> str:
     """Detect PR type from changed file paths for context-aware review instructions."""
     if not changed_paths:
@@ -301,152 +230,6 @@ def get_language_rules(languages: list[str]) -> str:
         if rule:
             rules.append(rule)
     return "\n\n".join(rules)
-
-
-def get_base_prompt(
-    context: ReviewContext,
-    diff: str,
-    file_contents: dict[str, str],
-    changed_paths: list[str] | None = None,
-) -> str:
-    """Build the base review prompt."""
-    paths = changed_paths or list(file_contents.keys())
-    pr_type, pr_size = classify_pr(paths, context.additions, context.deletions)
-
-    pr_type_instruction = ""
-    if pr_type == "docs":
-        pr_type_instruction = "\n**This PR is docs-only (markdown).** Only report factual errors, broken links, or security-sensitive content. Do not suggest code style, tests, or nitpicks.\n"
-    elif pr_type == "ci":
-        pr_type_instruction = "\n**This PR is CI/workflow-only.** Focus on workflow correctness (paths, steps, secrets). Do not report code style or nitpicks.\n"
-
-    pr_size_instruction = ""
-    if pr_size in ("trivial", "small"):
-        pr_size_instruction = "\n**Small change — prioritize precision.** Only report findings you are confident about. Do not pad the review with low-value suggestions.\n"
-    elif pr_size == "large":
-        pr_size_instruction = "\n**Large change — prioritize high-severity issues.** Focus on architectural concerns, correctness, and security over minor style or nitpicks.\n"
-
-    files_context = ""
-    if file_contents:
-        files_context = "\n\n## Full File Contents (for context)\n"
-        for path, content in list(file_contents.items())[:5]:
-            files_context += f"\n### {path}\n```\n{content[:5000]}\n```\n"
-
-    review_standard = """
-**Review standard:** Favor approving when the CL improves overall code health, even if it isn't perfect. There is no "perfect" code—only better code. Do not block on minor polish. For optional or style-only points, use severity "nitpick" and prefix the title with "Nit: " so the author knows it's optional. Comment on the code, not the author; be courteous and explain *why* when asking for a change.
-"""
-    what_to_look_for = """
-**What to look for (in order of impact):** Design (does the change make sense and integrate well?) → Functionality (edge cases, concurrency, correct behavior) → Complexity (no over-engineering) → Tests (present and meaningful) → Naming, comments (explain why, not what), style, consistency with existing code, documentation if behavior/build/test changes.
-"""
-    design_principles = """
-**Design principles to consider (when relevant):** SOLID (single responsibility, open/closed, Liskov substitution, interface segregation, dependency inversion); DRY (no duplicate logic—extract and reuse); KISS (keep it simple; avoid over-engineering); YAGNI (don't add code for hypothetical future needs); Composition over Inheritance (prefer composing over deep hierarchies); Law of Demeter (talk to immediate collaborators only, avoid long chains); Convention over Configuration where it fits. Only flag violations that meaningfully hurt maintainability or clarity—use "Nit:" for minor style preferences.
-"""
-    conventions_section = ""
-    if context.conventions:
-        conventions_section = f"\n## Repository Conventions\n{context.conventions}\n"
-
-    _MAX_CUSTOM_RULES = 20
-    _MAX_RULE_LENGTH = 500
-
-    custom_rules_section = ""
-    if context.repo_config and context.repo_config.get("custom_rules"):
-        raw_rules = context.repo_config["custom_rules"]
-        validated = [
-            str(r)[:_MAX_RULE_LENGTH]
-            for r in raw_rules[:_MAX_CUSTOM_RULES]
-            if isinstance(r, (str, int, float))
-        ]
-        if validated:
-            rules_list = "\n".join(f"- {r}" for r in validated)
-            custom_rules_section = f"\n## Repository-Specific Rules\n{rules_list}\n"
-
-    lang_rules_section = ""
-    lang_rules = get_language_rules(context.repo_languages)
-    if lang_rules:
-        lang_rules_section = f"\n## Language-specific guidance\n{lang_rules}\n"
-
-    return f"""You are performing a **code review** of a pull request.
-{review_standard}
-{what_to_look_for}
-{design_principles}
-{pr_type_instruction}{pr_size_instruction}
-## Pull Request Information
-- **Repository**: {context.repo_name}
-- **PR #{context.pr_number}**: {context.pr_title}
-- **Author**: {context.author}
-- **Branch**: {context.head_branch} → {context.base_branch}
-- **Changes**: +{context.additions} / -{context.deletions} in {context.changed_files_count} files
-- **Languages**: {", ".join(context.repo_languages) if context.repo_languages else "Unknown"}
-
-## PR Description
-{context.pr_description or "No description provided."}
-{conventions_section}{custom_rules_section}{lang_rules_section}
-## Code Changes (Diff)
-```diff
-{diff[:50000]}
-```
-{files_context}
-"""
-
-
-def get_output_format(pr_type: str = "code", total_lines: int = 0) -> str:
-    """Get the JSON output format instructions."""
-    max_findings = max(3, min(10, total_lines // 100 + 3))
-    concise_rules = [
-        "- Be concise: one short sentence per finding description. Do not repeat the same point.",
-        "- Only report issues on changed lines; do not suggest pre-existing improvements.",
-        '- **Severity semantics:** critical = must fix (security bugs or data corruption risks only); warning = should fix (other serious correctness or maintainability issues); suggestion = consider; nitpick = optional polish—always prefix title with "Nit: " for nitpicks.',
-        "- If the code looks good for your focus area, return empty findings array.",
-        f"- Maximum {max_findings} findings per agent.",
-        "- If something is done well (e.g. clear naming, good tests), mention it briefly in the summary.",
-    ]
-    if pr_type == "docs":
-        concise_rules.append(
-            '- Do not report style, nitpicks, or "add tests". Only factual errors or security.'
-        )
-    elif pr_type == "ci":
-        concise_rules.append(
-            "- Do not report code style or nitpicks. Focus on workflow correctness only."
-        )
-
-    return f"""
-## Output Format
-
-You MUST respond with a single valid JSON object (no markdown fences around it):
-
-{{"findings": [
-  {{
-    "file_path": "path/to/file.rs",
-    "line_start": 42,
-    "line_end": 45,
-    "severity": "critical|warning|suggestion|nitpick",
-    "category": "security|performance|logic|style|architecture|testing|documentation",
-    "title": "Short descriptive title (use \\"Nit: \\" prefix for nitpick severity)",
-    "description": "One concise sentence; explain why it matters when helpful",
-    "suggested_fix": "How to fix it (optional)",
-    "confidence": 0.95
-  }}
-],
-"summary": "One brief sentence. Include one positive if something is done well."
-}}
-
-**Rules**:
-{chr(10).join(concise_rules)}
-
-## Example of a GOOD finding (specific, actionable):
-{{"file_path": "auth.py", "line_start": 45, "severity": "critical",
- "category": "security", "title": "SQL injection via string interpolation",
- "description": "User input interpolated directly into SQL query without parameterization.",
- "suggested_fix": "Use parameterized query: cursor.execute('SELECT * FROM users WHERE id = ?', (user_id,))",
- "confidence": 0.95}}
-
-## Example of a BAD finding (vague -- DO NOT produce these):
-{{"file_path": "utils.py", "line_start": 1, "severity": "suggestion",
- "category": "testing", "title": "Consider adding more tests",
- "description": "The code could benefit from additional test coverage.",
- "confidence": 0.5}}
-
-Analyze the PR and output your JSON review.
-"""
 
 
 # --- Cross-review round (agents validate and rank each other's findings) ---
@@ -1028,6 +811,18 @@ def _review_finding_to_dict(f: ReviewFinding) -> dict[str, Any]:
     }
 
 
+def _truncate_to_byte_limit(text: str, max_bytes: int, marker: str = "") -> str:
+    """Truncate text to at most max_bytes UTF-8 bytes, appending marker if cut.
+
+    Slices on the byte boundary (not the character index): for multi-byte content
+    text[:N] can exceed N bytes. errors="ignore" drops any partial multi-byte
+    char left dangling at the cut.
+    """
+    if len(text.encode("utf-8")) <= max_bytes:
+        return text
+    return text.encode("utf-8")[:max_bytes].decode("utf-8", errors="ignore") + marker
+
+
 async def _prepare_shared_context(
     session: ReviewSession,
     gh: GitHubClient,
@@ -1073,8 +868,9 @@ async def _prepare_shared_context(
             text = _b64.b64decode(getattr(contents, "content", "")).decode(
                 "utf-8", errors="replace"
             )
-            if len(text) > anthropic_cfg.per_file_max_bytes:
-                text = text[: anthropic_cfg.per_file_max_bytes] + "\n[truncated]"
+            text = _truncate_to_byte_limit(
+                text, anthropic_cfg.per_file_max_bytes, marker="\n[truncated]"
+            )
             session.store_file(path, text)
             neighbors[path] = text
         except Exception as e:  # noqa: BLE001
