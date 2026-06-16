@@ -97,7 +97,7 @@ documentation:
   enabled: true
   check_files:
     - README.md
-    - DESIGN.md
+    - docs/ARCHITECTURE.md
     - .ai/rules/*.md
     - .ai/context.md
     - config.example.yaml
@@ -108,7 +108,7 @@ documentation:
       - .ai/context.md
     "src/ai_reviewer/orchestrator/**":
       - .ai/rules/orchestrator.md
-      - DESIGN.md
+      - docs/ARCHITECTURE.md
     "src/ai_reviewer/github/**":
       - .ai/rules/github.md
       - README.md

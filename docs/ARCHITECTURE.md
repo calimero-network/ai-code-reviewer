@@ -5,13 +5,12 @@
 >
 > **2026-04 migration notice:** the LLM backend moved from the Cursor
 > Background Agent API to Anthropic's Messages API (official `anthropic`
-> SDK). The function name `review_pr_with_cursor_agent` is retained for
-> call-site / test-patch parity but its implementation now uses the
-> Anthropic backend. See
+> SDK). The orchestration entry point is `review_pr()` (the old
+> `review_pr_with_cursor_agent` name has been removed), and per-agent
+> execution flows through `ReviewAgent` subclasses and
+> `AnthropicClient.run_review`. See
 > [`docs/superpowers/specs/2026-04-15-anthropic-messages-migration-design.md`](superpowers/specs/2026-04-15-anthropic-messages-migration-design.md)
-> for the full design. Some sequence diagrams below reference the old
-> `run_single_agent` helper that has been removed; the agent execution
-> now flows through `ReviewAgent` subclasses and `AnthropicClient.run_review`.
+> for the full migration design.
 
 ## Table of Contents
 
@@ -34,7 +33,7 @@ AI Code Reviewer orchestrates multiple LLM agents — each with a specialized fo
 ```mermaid
 flowchart LR
     PR["PR Event / CLI"]
-    PR --> Pipeline["review_pr_with_cursor_agent()"]
+    PR --> Pipeline["review_pr()"]
     Pipeline --> A1["Security Agent"]
     Pipeline --> A2["Performance Agent"]
     Pipeline --> A3["Quality Agent"]
@@ -55,16 +54,16 @@ flowchart LR
 |--------|----------------|
 | `cli.py` | Click CLI: `review-pr`, `config validate/show`, `serve` (uvicorn webhook) |
 | `config.py` | YAML/env `Config` dataclasses, `load_config`, `validate_config` |
-| `review.py` | Main pipeline: agent configs, prompts, aggregation, cross-review, `review_pr_with_cursor_agent` |
+| `review.py` | Main pipeline: `review_pr`, PR classification, aggregation + adaptive finding cap, cross-review, language rules |
 | `models/context.py` | `ReviewContext` dataclass for PR/repo metadata and repo config hooks |
 | `models/findings.py` | `Severity`, `Category`, `ReviewFinding`, `ConsolidatedFinding`, `compute_fuzzy_hash` |
 | `models/review.py` | `ReviewHistory`, `ScoreBreakdown`, `AgentReview`, `ConsolidatedReview` |
-| `agents/anthropic_client.py` | `AnthropicClient`: Messages API wrapper with tool-use loop, extended thinking, JSON-schema structured output, prompt caching |
-| `agents/base.py` | `ReviewAgent` base class; drives `AnthropicClient.run_review` per agent |
-| `agents/security.py` | `SecurityAgent`, `AuthenticationAgent` (Opus + thinking) |
-| `agents/performance.py` | `PerformanceAgent` (Sonnet), `LogicAgent` (Opus + thinking) |
-| `agents/patterns.py` | `PatternsAgent` (Opus + thinking), `StyleAgent` (Sonnet) |
-| `context/builder.py` | `build_system_blocks`, `build_user_blocks`, `FINDINGS_SCHEMA` |
+| `agents/anthropic_client.py` | `AnthropicClient`: Messages API wrapper with tool-use loop, adaptive thinking, JSON-schema structured output, prompt caching; `run_review` / `complete_simple` / `run_completion`. Sole importer of the `anthropic` SDK (invariant I1) |
+| `agents/base.py` | `ReviewAgent` base class; drives `AnthropicClient.run_review` per agent (model from config, falling back to class `MODEL`) |
+| `agents/security.py` | `SecurityAgent`, `AuthenticationAgent` (Sonnet) |
+| `agents/performance.py` | `PerformanceAgent`, `LogicAgent` (Sonnet) |
+| `agents/patterns.py` | `PatternsAgent` (Sonnet), `StyleAgent` (Haiku) |
+| `context/builder.py` | `build_system_blocks` (review standard + few-shot + PR-tuning + language-priority blocks), `build_user_blocks`, `FINDINGS_SCHEMA` |
 | `context/fetch.py` | `fetch_conventions`, `build_repo_map` (GitHub Contents API, budget-aware) |
 | `context/neighbors.py` | Import-graph / sibling heuristics; `parse_imports_by_path` for Python/TS/JS/Go/Rust/Java |
 | `tools/repo_tools.py` | `ToolRegistry` exposing `read_file`/`glob`/`grep` for Claude tool use |
@@ -95,9 +94,9 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     participant Trigger as Webhook / CLI
-    participant Review as review_pr_with_cursor_agent()
+    participant Review as review_pr()
     participant Secret as scan_for_secrets()
-    participant Agent as run_single_agent() × N
+    participant Agent as ReviewAgent.review() × N
     participant Agg as aggregate_findings()
     participant XR as run_cross_review_round()
     participant Delta as compute_review_delta()
@@ -109,9 +108,9 @@ sequenceDiagram
     Review->>GH: get_pull_request, get_pr_diff, get_changed_files
     Review->>GH: load_repo_config, load_repo_conventions
     Review->>Secret: scan diff for secrets (pre-agent)
-    Review->>Agent: asyncio.gather(run_single_agent × N)
+    Review->>Agent: asyncio.gather(ReviewAgent.review × N)
     Agent-->>Review: raw findings per agent
-    Review->>Agg: cluster, dedup, score, confidence filter
+    Review->>Agg: cluster, dedup, score, confidence filter, adaptive cap
     Agg-->>Review: ConsolidatedFinding[]
     Review->>XR: cross-review validation (if agents > 2)
     XR-->>Review: filtered + ranked findings
@@ -134,9 +133,9 @@ sequenceDiagram
 
 ### Key Functions
 
-- **`review_pr_with_cursor_agent()`** (`review.py`): Core orchestration. Fetches PR data, builds context, spawns agents in parallel, aggregates, cross-reviews, prepends secret findings, returns `ConsolidatedReview`.
-- **`run_single_agent()`** (`review.py`): Sends a prompt to one Cursor Background Agent, parses JSON response into findings.
-- **`aggregate_findings()`** (`review.py`): Clusters raw findings by similarity, computes consensus scores, applies confidence filtering and cross-file dedup.
+- **`review_pr()`** (`review.py`): Core orchestration. Fetches PR data, builds context, spawns agents in parallel, aggregates, cross-reviews, prepends secret findings, returns `ConsolidatedReview`.
+- **`ReviewAgent.review()`** (`agents/base.py`): Runs one agent via `AnthropicClient.run_review` (tool-use loop + structured output), returns an `AgentReview`. The model is the configured `AgentConfig.model`, falling back to the agent class's `MODEL`.
+- **`aggregate_findings()`** (`review.py`): Clusters raw findings by similarity, computes consensus scores, applies confidence filtering, cross-file dedup, and an adaptive per-review finding cap (`_cap_findings`).
 - **`default_review_handler()`** (`webhook.py`): Webhook's async handler — includes pre-agent skip checks, LGTM fast path, metadata embedding, and the full post flow.
 
 ---
@@ -145,15 +144,18 @@ sequenceDiagram
 
 ### Agent Spawning
 
-Production uses **parallel `asyncio.gather`** of `run_single_agent()`, each configured from `AGENT_CONFIGS`:
+Production uses **parallel `asyncio.gather`** of `ReviewAgent.review()`, one per agent. Agents are resolved from the `_AGENT_CLASSES` registry (configurable via `.ai-reviewer.yaml`; default order in `DEFAULT_AGENT_ORDER`):
 
-| Agent | Focus | Prompt Specialization |
-|-------|-------|-----------------------|
-| `security-agent` | Security | OWASP Top 10, injection, auth, crypto, secrets |
-| `performance-agent` | Performance + Correctness | Algorithmic complexity, resource leaks, concurrency |
-| `quality-agent` | Maintainability | SOLID, DRY, KISS, YAGNI, API design, error handling |
+| Agent class | `AGENT_TYPE` | Model | Focus |
+|-------------|--------------|-------|-------|
+| `SecurityAgent` | `security-reviewer` | Sonnet | OWASP Top 10, injection, auth, crypto, secrets |
+| `AuthenticationAgent` | `authentication-reviewer` | Sonnet | AuthN/AuthZ, session/token handling |
+| `PerformanceAgent` | `performance-reviewer` | Sonnet | Algorithmic complexity, resource leaks, concurrency |
+| `LogicAgent` | `logic-reviewer` | Sonnet | Correctness, edge cases, error handling |
+| `PatternsAgent` | `patterns-reviewer` | Sonnet | Consistency, SOLID, anti-patterns, architecture |
+| `StyleAgent` | `style-reviewer` | Haiku | Readability, naming, docs (nitpick-tier) |
 
-Agent count is adaptive: `_effective_agent_count()` scales 1–3 agents based on PR size. Cross-review is auto-skipped when ≤ 2 agents run.
+Agent count is adaptive: `_effective_agent_count()` scales the number of agents to PR size. Cross-review is auto-skipped when ≤ 2 agents run. When a single agent runs (small PR) it is instructed to cover all perspectives.
 
 ### Aggregation Pipeline
 
@@ -167,15 +169,18 @@ flowchart TD
     Filtered --> |"per-severity thresholds:\ncritical ≥ 0.5, warning ≥ 0.6,\nsuggestion ≥ 0.7, nitpick ≥ 0.8"| XR{"Cross-review?"}
     XR -- "agents > 2" --> CrossReview["run_cross_review_round()"]
     CrossReview --> Apply["apply_cross_review()"]
-    Apply --> |"drop if valid fraction\n< 2/3 agreement\n(CRITICAL+SECURITY always kept)"| Final["Final findings"]
-    XR -- "agents ≤ 2" --> Final
+    Apply --> |"drop if valid fraction\n< 2/3 agreement\n(CRITICAL+SECURITY always kept)"| Cap["_cap_findings()"]
+    XR -- "agents ≤ 2" --> Cap
+    Cap --> |"keep top N by priority_score,\nN = max(5, min(20, lines//100+5)),\ncriticals always kept"| Final["Final findings"]
 ```
 
 **Clustering** (`_cluster_raw_findings`): Groups findings that share the same file, category, overlapping line ranges (±5 lines), and combined title+description similarity ≥ 0.85 (character-level `SequenceMatcher`). Each cluster becomes one `ConsolidatedFinding` with `consensus_score = unique_agents_in_cluster / total_agents`.
 
 **Cross-file dedup** (`dedup_cross_file`): When 3+ findings share the same `(category, title)` across different files, they collapse into a single finding with an "Also found in: ..." annotation.
 
-**Cross-review validation** (`run_cross_review_round` → `apply_cross_review`): A second-pass LLM call where agents validate each other's findings. Findings with < 2/3 validation agreement are dropped — except `CRITICAL` severity + `SECURITY` category findings, which always bypass this filter.
+**Cross-review validation** (`run_cross_review_round` → `apply_cross_review`): A second-pass LLM call where agents validate each other's findings. Each validation call goes through `AnthropicClient.complete_simple()` (not the raw SDK — invariant I1) using the configured `default_model`. Findings with < 2/3 validation agreement are dropped — except `CRITICAL` severity + `SECURITY` category findings, which always bypass this filter.
+
+**Adaptive finding cap** (`_cap_findings`): After dedup and cross-review, findings are ranked by `priority_score` (severity × consensus × confidence) and trimmed to the top `N = max(5, min(20, total_lines // 100 + 5))`, where `total_lines` is the PR's additions + deletions. `CRITICAL` findings are exempt and never dropped — the cap only trims non-criticals, so the final count can exceed `N` when there are many criticals. This bounds review noise on small PRs while preserving high-value findings.
 
 ---
 
@@ -509,34 +514,42 @@ Setting `documentation.enabled: false` in the repo config skips both tiers entir
 | `medium` | 200–999 lines |
 | `large` | ≥ 1000 lines |
 
-Size-adaptive instructions are injected into the prompt:
-- **trivial/small**: "Be extra precise — only flag genuine issues. Do not pad with low-value suggestions."
-- **large**: "Focus on architectural concerns and high-severity issues first. Ignore minor style."
+`pr_type` and `pr_size` are threaded into `build_system_blocks`, which emits a `_pr_tuning_block` (only when one applies):
+- **docs**: only factual errors, broken links, or security-sensitive content; no style/tests/nits.
+- **ci**: focus on workflow correctness (paths, steps, secrets); no style/nits.
+- **trivial/small**: prioritize precision — only high-confidence findings, no padding.
+- **large**: prioritize high-severity issues (architecture, correctness, security) over minor style.
+
+### Shared Review Standard
+
+`build_system_blocks` injects a constant `REVIEW_STANDARD_BLOCK` into **every** agent so severity is calibrated consistently rather than decided per agent: the review philosophy (favor approving when the change improves code health; facts over preference; comment on the code, not the author), the severity rubric (`critical` = security/data-loss only, `warning`, `suggestion`, `nitpick` = `"Nit: "`-prefixed, never blocking), and grounding rules (changed lines only, cite file:line, no speculation outside the diff).
 
 ### Language-Specific Rules
 
-`_LANGUAGE_RULES` dict provides per-language guidance injected via `get_language_rules()`:
+`get_language_rules(context.repo_languages)` renders per-language high-severity guidance, threaded through `build_system_blocks` as a `## Language-specific priorities` block (emitted only when the repo's languages match; non-language repos are unaffected):
 
 | Language | Key Rules |
 |----------|-----------|
 | **Python** | Mutable default args, bare `except`, missing type hints, f-string injection in logging, `subprocess shell=True` |
-| **Rust** | `.unwrap()` in non-test code, `unsafe` without `// SAFETY:`, unnecessary `.clone()`, unbounded allocations |
+| **Rust** | `.unwrap()`/`.expect()` in non-test code, `unsafe` without `// SAFETY:`, unnecessary `.clone()`, unbounded allocations, concurrency (`Send`/`Sync`, deadlocks, logic races/TOCTOU), swallowed errors, public-API/SemVer breaks, dependency/supply-chain |
 | **JavaScript** | Prototype pollution, `==` vs `===`, unhandled Promise rejections, `eval()`/`innerHTML` |
 | **TypeScript** | `any` type escapes, missing error boundaries, `@ts-ignore` without justification |
 | **Go** | Unchecked errors, SQL string concatenation, goroutine leaks, missing `defer` |
 
 ### Repo-Aware Prompts
 
-- **`.ai-reviewer.yaml`**: `load_repo_config()` fetches the config from the target repo. `custom_rules` are injected as a "Repository-Specific Rules" section. `ignore` patterns filter files from the diff before agents see them.
-- **Convention files**: `load_repo_conventions()` best-effort loads `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `.cursor/rules/README.md` (capped at 3k chars total) and injects them as a "Repository Conventions" section.
+- **`.ai-reviewer.yaml`**: `load_repo_config()` fetches the config from the target repo. `ignore` patterns filter files from the diff before agents see them, and per-agent `model` selects the model. (Note: there is no runtime `custom_rules` engine — that field was prompt-text-only and is no longer injected; enforce hard invariants via linters/CI instead, e.g. the `TID251` SDK-import ban.)
+- **Convention files**: `fetch_conventions()` best-effort loads `AGENTS.md`, `CLAUDE.md`, `CONTRIBUTING.md`, `.ai/rules/*.md`, etc. (per-file capped) and injects them as a "Project conventions" block.
 - **PR metadata**: Title, description, base/head branches, changed file list, and detected languages are included in every prompt.
 
 ### Few-Shot Examples
 
-`get_output_format()` includes good and bad finding examples to calibrate agent output quality:
+`build_system_blocks` injects a constant `FEW_SHOT_BLOCK` (`## Finding quality`) with good and bad finding examples to calibrate agent output quality:
 
-- **Good**: Specific file, line, severity, actionable title and description.
+- **Good**: Specific file, line, severity, actionable title and description with a concrete fix.
 - **Bad**: Vague "consider adding more tests" style findings explicitly marked as what NOT to produce.
+
+Output structure itself is enforced by the `FINDINGS_SCHEMA` JSON schema (`output_config.format`), not by prose — the few-shot block only shapes finding *quality*.
 
 ---
 
@@ -561,7 +574,7 @@ In `apply_cross_review()`, findings with `severity == CRITICAL` and `category ==
 ### Config Validation
 
 `validate_config()` checks:
-- Cursor API key is present and non-empty.
+- Anthropic API key is present and non-empty.
 - GitHub token is present.
 - At least one agent is configured.
 - `min_agents_required` ≤ number of configured agents.
