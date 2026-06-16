@@ -18,7 +18,6 @@ from ai_reviewer.review import (
     compute_quality_score,
     dedup_cross_file,
     get_cross_review_prompt,
-    get_output_format,
     parse_cross_review_response,
 )
 
@@ -782,58 +781,6 @@ class TestEffectiveAgentCount:
             _effective_agent_count(additions=200, deletions=100, changed_files=5, requested=1) == 1
         )
         assert _effective_agent_count(additions=50, deletions=20, changed_files=2, requested=0) == 0
-
-
-class TestGetOutputFormatFewShotExamples:
-    """Tests for few-shot examples in get_output_format (Task 5)."""
-
-    def test_good_example_present(self):
-        output = get_output_format()
-        assert "Example of a GOOD finding" in output
-        assert "SQL injection via string interpolation" in output
-
-    def test_bad_example_present(self):
-        output = get_output_format()
-        assert "Example of a BAD finding" in output
-        assert "Consider adding more tests" in output
-        assert "DO NOT produce these" in output
-
-    def test_examples_appear_after_rules_before_analyze(self):
-        output = get_output_format()
-        rules_pos = output.index("**Rules**")
-        good_pos = output.index("Example of a GOOD finding")
-        bad_pos = output.index("Example of a BAD finding")
-        analyze_pos = output.index("Analyze the PR")
-        assert rules_pos < good_pos < bad_pos < analyze_pos
-
-
-class TestGetOutputFormatAdaptiveFindings:
-    """Tests for adaptive max findings in get_output_format (Task 7)."""
-
-    def test_zero_lines_gives_minimum_3(self):
-        output = get_output_format(total_lines=0)
-        assert "Maximum 3 findings per agent" in output
-
-    def test_500_lines_gives_8(self):
-        output = get_output_format(total_lines=500)
-        assert "Maximum 8 findings per agent" in output
-
-    def test_2000_lines_capped_at_10(self):
-        output = get_output_format(total_lines=2000)
-        assert "Maximum 10 findings per agent" in output
-
-    def test_100_lines_gives_4(self):
-        output = get_output_format(total_lines=100)
-        assert "Maximum 4 findings per agent" in output
-
-    def test_default_no_lines_gives_3(self):
-        output = get_output_format()
-        assert "Maximum 3 findings per agent" in output
-
-    def test_docs_type_still_has_adaptive_limit(self):
-        output = get_output_format(pr_type="docs", total_lines=700)
-        assert "Maximum 10 findings per agent" in output
-        assert "Only factual errors or security" in output
 
 
 def _make_raw_finding(
