@@ -407,20 +407,34 @@ def _is_no_update_response(content: str) -> bool:
     return False
 
 
-def _normalize_lines(text: str) -> str:
-    """Normalize line endings and strip trailing whitespace per line."""
-    return "\n".join(line.rstrip() for line in text.replace("\r\n", "\n").split("\n"))
+def _whitespace_insensitive_span(haystack: str, needle: str) -> tuple[int, int] | None:
+    """Locate ``needle`` in ``haystack`` ignoring differences in *runs* of
+    whitespace (indentation, trailing spaces, line wraps) — the common reason a
+    model-copied FIND block doesn't match the source HTML byte-for-byte. Returns
+    the ``(start, end)`` char offsets of the first match, or ``None``.
+    """
+    tokens = needle.split()
+    if not tokens:
+        return None
+    pattern = r"\s+".join(_re.escape(tok) for tok in tokens)
+    match = _re.search(pattern, haystack)
+    return (match.start(), match.end()) if match else None
 
 
 def _apply_html_patches(original: str, response: str) -> str | None:
     """Apply FIND/REPLACE patch blocks from the model response to the original HTML.
 
-    Tries exact match first, then falls back to line-normalized match to handle
-    minor whitespace differences in what the model copied from the source.
-    Returns None if no valid patch blocks were found or any FIND doesn't match.
+    Exact match first, then a whitespace-insensitive fallback so indentation /
+    line-wrap differences in what the model copied still apply. The REPLACE is
+    spliced into the matched span, leaving the rest of the document byte-for-byte
+    intact. Returns None if no valid patch blocks were found or a FIND can't be
+    located.
     """
-    find_blocks = _re.findall(r"<<<FIND\n(.*?)\nFIND>>>", response, _re.DOTALL)
-    replace_blocks = _re.findall(r"<<<REPLACE\n(.*?)\nREPLACE>>>", response, _re.DOTALL)
+    # Tolerate CRLF and trailing spaces around the FIND/REPLACE markers.
+    find_blocks = _re.findall(r"<<<FIND[ \t]*\r?\n(.*?)\r?\n[ \t]*FIND>>>", response, _re.DOTALL)
+    replace_blocks = _re.findall(
+        r"<<<REPLACE[ \t]*\r?\n(.*?)\r?\n[ \t]*REPLACE>>>", response, _re.DOTALL
+    )
 
     if not find_blocks or len(find_blocks) != len(replace_blocks):
         return None
@@ -430,13 +444,13 @@ def _apply_html_patches(original: str, response: str) -> str | None:
         if find in result:
             result = result.replace(find, replace, 1)
             continue
-        # Fallback: normalize trailing whitespace on each line and retry
-        norm_original = _normalize_lines(result)
-        norm_find = _normalize_lines(find)
-        if norm_find not in norm_original:
+        # Fallback: whitespace-insensitive match, spliced into the original so
+        # the surrounding document keeps its exact formatting.
+        span = _whitespace_insensitive_span(result, find)
+        if span is None:
             return None
-        idx = norm_original.find(norm_find)
-        result = norm_original[:idx] + replace + norm_original[idx + len(norm_find) :]
+        start, end = span
+        result = result[:start] + replace + result[end:]
 
     return result
 

@@ -803,6 +803,46 @@ class TestApplyHtmlPatches:
         response = "<<<FIND\n<div>  value\nFIND>>>\n<<<REPLACE\n<div>new\nREPLACE>>>"
         assert _apply_html_patches(original, response) is not None
 
+    def test_leading_indentation_mismatch_applies(self):
+        """The model often copies FIND with different leading indentation than
+        the source — the whitespace-insensitive fallback should still apply it,
+        and leave the rest of the document untouched."""
+        from ai_reviewer.docs.analyzer import _apply_html_patches
+
+        original = "<ul>\n    <li>store: the storage crate</li>\n    <li>keep me</li>\n</ul>"
+        # FIND lost the leading 4-space indent + reflowed the line.
+        response = (
+            "<<<FIND\n<li>store: the storage crate</li>\nFIND>>>\n"
+            "<<<REPLACE\n<li>store: the CRDT storage crate</li>\nREPLACE>>>"
+        )
+        out = _apply_html_patches(original, response)
+        assert out is not None
+        assert "the CRDT storage crate" in out
+        # Untouched lines + surrounding indentation preserved exactly.
+        assert "    <li>keep me</li>" in out
+        assert out.startswith("<ul>\n    <li>")
+
+    def test_internal_whitespace_run_difference_applies(self):
+        from ai_reviewer.docs.analyzer import _apply_html_patches
+
+        original = "<p>tools   crate   docs</p>"  # multiple spaces in source
+        response = "<<<FIND\n<p>tools crate docs</p>\nFIND>>>\n<<<REPLACE\n<p>updated</p>\nREPLACE>>>"
+        assert _apply_html_patches(original, response) == "<p>updated</p>"
+
+    def test_crlf_markers_tolerated(self):
+        from ai_reviewer.docs.analyzer import _apply_html_patches
+
+        original = "<div>old</div>"
+        response = "<<<FIND\r\n<div>old</div>\r\nFIND>>>\r\n<<<REPLACE\r\n<div>new</div>\r\nREPLACE>>>"
+        assert _apply_html_patches(original, response) == "<div>new</div>"
+
+    def test_truly_absent_find_still_returns_none(self):
+        from ai_reviewer.docs.analyzer import _apply_html_patches
+
+        original = "<div>actual content</div>"
+        response = "<<<FIND\n<div>totally unrelated text</div>\nFIND>>>\n<<<REPLACE\n<div>x</div>\nREPLACE>>>"
+        assert _apply_html_patches(original, response) is None
+
 
 class TestGenerateDocDraftsHtmlSentinel:
     """End-to-end tests that NO_UPDATE_NEEDED variants are filtered correctly."""
