@@ -7,6 +7,7 @@ import pytest
 from ai_reviewer.docs.analyzer import (
     DocAnalyzer,
     DocSuggestion,
+    _apply_html_patches,
     format_doc_comment,
     is_architecture_impacting,
 )
@@ -763,8 +764,6 @@ class TestApplyHtmlPatches:
     """Tests for _apply_html_patches — surgical FIND/REPLACE on HTML files."""
 
     def test_basic_replacement(self):
-        from ai_reviewer.docs.analyzer import _apply_html_patches
-
         original = "<div>old value</div>"
         response = (
             "<<<FIND\n<div>old value</div>\nFIND>>>\n<<<REPLACE\n<div>new value</div>\nREPLACE>>>"
@@ -772,8 +771,6 @@ class TestApplyHtmlPatches:
         assert _apply_html_patches(original, response) == "<div>new value</div>"
 
     def test_multiple_patches(self):
-        from ai_reviewer.docs.analyzer import _apply_html_patches
-
         original = "<a>foo</a><b>bar</b>"
         response = (
             "<<<FIND\n<a>foo</a>\nFIND>>>\n<<<REPLACE\n<a>FOO</a>\nREPLACE>>>\n"
@@ -782,8 +779,6 @@ class TestApplyHtmlPatches:
         assert _apply_html_patches(original, response) == "<a>FOO</a><b>BAR</b>"
 
     def test_find_not_found_returns_none(self):
-        from ai_reviewer.docs.analyzer import _apply_html_patches
-
         original = "<div>actual content</div>"
         response = (
             "<<<FIND\n<div>different content</div>\nFIND>>>\n<<<REPLACE\n<div>x</div>\nREPLACE>>>"
@@ -791,17 +786,58 @@ class TestApplyHtmlPatches:
         assert _apply_html_patches(original, response) is None
 
     def test_malformed_no_blocks_returns_none(self):
-        from ai_reviewer.docs.analyzer import _apply_html_patches
-
         assert _apply_html_patches("<html>x</html>", "plain prose response") is None
 
     def test_whitespace_normalized_fallback(self):
-        from ai_reviewer.docs.analyzer import _apply_html_patches
-
         original = "<div>  value  </div>"
         # FIND has trailing spaces stripped — normalized match should still work
         response = "<<<FIND\n<div>  value\nFIND>>>\n<<<REPLACE\n<div>new\nREPLACE>>>"
         assert _apply_html_patches(original, response) is not None
+
+    def test_leading_indentation_mismatch_applies(self):
+        """The model often copies FIND with different leading indentation than
+        the source — the whitespace-insensitive fallback should still apply it,
+        and leave the rest of the document untouched."""
+        original = "<ul>\n    <li>store: the storage crate</li>\n    <li>keep me</li>\n</ul>"
+        # FIND lost the leading 4-space indent + reflowed the line.
+        response = (
+            "<<<FIND\n<li>store: the storage crate</li>\nFIND>>>\n"
+            "<<<REPLACE\n<li>store: the CRDT storage crate</li>\nREPLACE>>>"
+        )
+        out = _apply_html_patches(original, response)
+        assert out is not None
+        assert "the CRDT storage crate" in out
+        # Untouched lines + surrounding indentation preserved exactly.
+        assert "    <li>keep me</li>" in out
+        assert out.startswith("<ul>\n    <li>")
+
+    def test_internal_whitespace_run_difference_applies(self):
+        original = "<p>tools   crate   docs</p>"  # multiple spaces in source
+        response = (
+            "<<<FIND\n<p>tools crate docs</p>\nFIND>>>\n<<<REPLACE\n<p>updated</p>\nREPLACE>>>"
+        )
+        assert _apply_html_patches(original, response) == "<p>updated</p>"
+
+    def test_crlf_markers_tolerated(self):
+        original = "<div>old</div>"
+        response = (
+            "<<<FIND\r\n<div>old</div>\r\nFIND>>>\r\n<<<REPLACE\r\n<div>new</div>\r\nREPLACE>>>"
+        )
+        assert _apply_html_patches(original, response) == "<div>new</div>"
+
+    def test_truly_absent_find_still_returns_none(self):
+        original = "<div>actual content</div>"
+        response = "<<<FIND\n<div>totally unrelated text</div>\nFIND>>>\n<<<REPLACE\n<div>x</div>\nREPLACE>>>"
+        assert _apply_html_patches(original, response) is None
+
+    def test_ambiguous_fuzzy_match_returns_none(self):
+        """When the exact FIND misses but the whitespace-relaxed pattern matches
+        more than once, refuse rather than patch the wrong occurrence."""
+        # Same fragment twice; FIND's internal spacing differs from the source so
+        # the exact path misses and the fuzzy path sees two candidates.
+        original = "<td>store   crate</td>\n<td>store   crate</td>"
+        response = "<<<FIND\n<td>store crate</td>\nFIND>>>\n<<<REPLACE\n<td>x</td>\nREPLACE>>>"
+        assert _apply_html_patches(original, response) is None
 
 
 class TestGenerateDocDraftsHtmlSentinel:
