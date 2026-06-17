@@ -826,14 +826,18 @@ class TestApplyHtmlPatches:
         from ai_reviewer.docs.analyzer import _apply_html_patches
 
         original = "<p>tools   crate   docs</p>"  # multiple spaces in source
-        response = "<<<FIND\n<p>tools crate docs</p>\nFIND>>>\n<<<REPLACE\n<p>updated</p>\nREPLACE>>>"
+        response = (
+            "<<<FIND\n<p>tools crate docs</p>\nFIND>>>\n<<<REPLACE\n<p>updated</p>\nREPLACE>>>"
+        )
         assert _apply_html_patches(original, response) == "<p>updated</p>"
 
     def test_crlf_markers_tolerated(self):
         from ai_reviewer.docs.analyzer import _apply_html_patches
 
         original = "<div>old</div>"
-        response = "<<<FIND\r\n<div>old</div>\r\nFIND>>>\r\n<<<REPLACE\r\n<div>new</div>\r\nREPLACE>>>"
+        response = (
+            "<<<FIND\r\n<div>old</div>\r\nFIND>>>\r\n<<<REPLACE\r\n<div>new</div>\r\nREPLACE>>>"
+        )
         assert _apply_html_patches(original, response) == "<div>new</div>"
 
     def test_truly_absent_find_still_returns_none(self):
