@@ -410,15 +410,26 @@ def _is_no_update_response(content: str) -> bool:
 def _whitespace_insensitive_span(haystack: str, needle: str) -> tuple[int, int] | None:
     """Locate ``needle`` in ``haystack`` ignoring differences in *runs* of
     whitespace (indentation, trailing spaces, line wraps) — the common reason a
-    model-copied FIND block doesn't match the source HTML byte-for-byte. Returns
-    the ``(start, end)`` char offsets of the first match, or ``None``.
+    model-copied FIND block doesn't match the source HTML byte-for-byte.
+
+    Returns the ``(start, end)`` char offsets of the match, or ``None`` when:
+      * the needle is empty or whitespace-only,
+      * the needle isn't found, or
+      * the match is **ambiguous** (the whitespace-relaxed pattern appears more
+        than once) — we refuse rather than risk patching the wrong occurrence,
+        preserving the no-false-positive guarantee.
     """
     tokens = needle.split()
     if not tokens:
         return None
     pattern = r"\s+".join(_re.escape(tok) for tok in tokens)
     match = _re.search(pattern, haystack)
-    return (match.start(), match.end()) if match else None
+    if match is None:
+        return None
+    # Ambiguous: a second match exists → refuse (don't patch the wrong spot).
+    if _re.search(pattern, haystack[match.end() :]) is not None:
+        return None
+    return (match.start(), match.end())
 
 
 def _apply_html_patches(original: str, response: str) -> str | None:
