@@ -25,6 +25,16 @@ trailing <script src="nav.js"></script>). Produce a COMPLETE page that:
 Output ONLY the page HTML, nothing else."""
 
 
+def _js_str(value: str) -> str:
+    """A single-quoted JS string literal with quotes/backslashes/newlines escaped.
+
+    Guards against a model-generated label (e.g. ``Owner's Role``) breaking the
+    NAV array's JavaScript.
+    """
+    escaped = value.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ").replace("\r", " ")
+    return f"'{escaped}'"
+
+
 def insert_nav_entry(nav_js: str, label: str, href: str, dot: str, section: str) -> str | None:
     """Insert a NAV entry right after the `{ section: '<section>' }` marker. None if absent."""
     pattern = re.compile(r"(\{\s*section:\s*['\"]" + re.escape(section) + r"['\"]\s*\},?[ \t]*\n)")
@@ -33,7 +43,7 @@ def insert_nav_entry(nav_js: str, label: str, href: str, dot: str, section: str)
         return None
     indent_m = re.match(r"([ \t]*)", m.group(1))
     indent = indent_m.group(1) if indent_m else "    "
-    entry = f"{indent}{{ label: '{label}', href: '{href}', dot: '{dot}' }},\n"
+    entry = f"{indent}{{ label: {_js_str(label)}, href: {_js_str(href)}, dot: {_js_str(dot)} }},\n"
     return nav_js[: m.end(1)] + entry + nav_js[m.end(1) :]
 
 

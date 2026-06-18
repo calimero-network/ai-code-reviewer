@@ -208,3 +208,12 @@ def test_wire_new_pages_returns_none_when_no_section_anchor():
     nav_out, index_out = wire_new_pages(_NAV, "<html></html>", metas)
     assert nav_out is None
     assert index_out is None
+
+
+def test_insert_nav_entry_escapes_quotes_in_label():
+    """A label with an apostrophe must not break the NAV array's JavaScript."""
+    out = insert_nav_entry(_NAV, "Owner's Role", "owner.html", "#10b981", "Architecture Deep-Dive")
+    assert out is not None
+    assert "\\'" in out  # apostrophe escaped for the single-quoted JS string
+    assert "owner.html" in out
+    assert out.count("];") == 1
