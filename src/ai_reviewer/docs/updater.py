@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 
 from ai_reviewer.docs.apply import apply_add_section, apply_update_section
 from ai_reviewer.docs.models import DocDraft, FileWrite
-from ai_reviewer.docs.page_builder import apply_create_page
+from ai_reviewer.docs.page_builder import apply_create_page, wire_new_pages
 from ai_reviewer.docs.router import build_doc_index, route_changes
 from ai_reviewer.docs.understanding import summarize_pr_changes
 from ai_reviewer.docs.verify import verify_draft
@@ -82,23 +82,22 @@ def _flagged_comment(pr_number: int, flagged: list[DocDraft]) -> str:
     )
 
 
-async def _apply_one(action, gh, repo, ref, doc_dir, anthropic_cfg, dg) -> DocDraft:
+async def _apply_one(
+    action, gh, repo, ref, doc_dir, anthropic_cfg, apply_model, allow_new_sections
+) -> DocDraft:
     current = _read_file(gh, repo, action.target_path, ref) or ""
     if action.action == "update_section":
         return await apply_update_section(
-            action, current, action.change, anthropic_cfg, dg.apply_model
+            action, current, action.change, anthropic_cfg, apply_model
         )
     if action.action == "add_section":
-        return await apply_add_section(
-            action, current, action.change, anthropic_cfg, dg.apply_model
-        )
+        return await apply_add_section(action, current, action.change, anthropic_cfg, apply_model)
     # create_page: read sibling/nav/index from the TARGET's own directory so the
     # read side matches where apply_create_page writes the aux edits.
     target_dir = os.path.dirname(action.target_path)
     prefix = f"{target_dir}/" if target_dir else ""
     scan_dir = prefix or doc_dir
     nav_js = _read_file(gh, repo, f"{prefix}nav.js", ref) or ""
-    index_html = _read_file(gh, repo, f"{prefix}index.html", ref) or ""
     siblings = [
         p for p in gh.get_html_files_in_dirs(repo, ref, [scan_dir]) if not p.endswith("index.html")
     ]
@@ -109,13 +108,12 @@ async def _apply_one(action, gh, repo, ref, doc_dir, anthropic_cfg, dg) -> DocDr
         action=action,
         sibling_html=sibling_html or "",
         nav_js=nav_js,
-        index_html=index_html,
         change=action.change,
         section_group=_DEFAULT_SECTION_GROUP,
         dot=_DEFAULT_DOT,
         anthropic_cfg=anthropic_cfg,
-        model=dg.apply_model,
-        allow_new_sections=dg.allow_new_sections,
+        model=apply_model,
+        allow_new_sections=allow_new_sections,
         best_fit_for_downgrade=best_fit,
         best_fit_html=best_fit_html,
     )
@@ -164,6 +162,25 @@ async def run_doc_update(
     doc_dir = static_dirs[0] if static_dirs else "architecture/"
     mapping = doc_config.get("source_to_docs_mapping", {})
 
+    # Per-repo overrides: prefer repo value then fall back to server default.
+    eff_apply_model = (
+        repo_docgen.get("model") or repo_docgen.get("apply_model") or doc_generation.apply_model
+    )
+    eff_understanding_model = (
+        repo_docgen.get("understanding_model") or doc_generation.understanding_model
+    )
+    eff_verify_model = repo_docgen.get("verify_model") or doc_generation.verify_model
+    eff_pr_labels = repo_docgen.get("pr_labels", doc_generation.pr_labels)
+    eff_pr_draft = repo_docgen.get("pr_draft", doc_generation.pr_draft)
+    eff_max_diff = int(
+        repo_docgen.get("max_understanding_diff_chars", doc_generation.max_understanding_diff_chars)
+    )
+    eff_allow_pages = repo_docgen.get("allow_new_pages", doc_generation.allow_new_pages)
+    eff_allow_sections = repo_docgen.get("allow_new_sections", doc_generation.allow_new_sections)
+    eff_threshold = repo_docgen.get(
+        "verify_confidence_threshold", doc_generation.verify_confidence_threshold
+    )
+
     pr_files = list(pr.get_files())
     changed_paths = [f.filename for f in pr_files]
     commit_messages = [c.commit.message for c in pr.get_commits()]
@@ -175,8 +192,8 @@ async def run_doc_update(
         commit_messages=commit_messages,
         diff=diff,
         anthropic_cfg=anthropic_cfg,
-        model=doc_generation.understanding_model,
-        max_diff_chars=doc_generation.max_understanding_diff_chars,
+        model=eff_understanding_model,
+        max_diff_chars=eff_max_diff,
     )
     if not summary.changes:
         return DocUpdateResult(skipped=True, skip_reason="no doc-relevant changes detected")
@@ -189,28 +206,34 @@ async def run_doc_update(
         source_to_docs_mapping=mapping,
         changed_paths=changed_paths,
         doc_index=doc_index,
-        allow_new_pages=doc_generation.allow_new_pages,
-        allow_new_sections=doc_generation.allow_new_sections,
+        allow_new_pages=eff_allow_pages,
+        allow_new_sections=eff_allow_sections,
         anthropic_cfg=anthropic_cfg,
-        model=doc_generation.understanding_model,
+        model=eff_understanding_model,
     )
     if not actions:
         return DocUpdateResult(skipped=True, skip_reason="no documentation targets routed")
 
     async def _pipeline(action) -> DocDraft:
-        draft = await _apply_one(action, gh, repo, ref, doc_dir, anthropic_cfg, doc_generation)
-        return await verify_draft(
+        draft = await _apply_one(
+            action, gh, repo, ref, doc_dir, anthropic_cfg, eff_apply_model, eff_allow_sections
+        )
+        draft = await verify_draft(
             draft=draft,
             anthropic_cfg=anthropic_cfg,
-            model=doc_generation.verify_model,
-            threshold=doc_generation.verify_confidence_threshold,
+            model=eff_verify_model,
+            threshold=eff_threshold,
         )
+        return draft
 
     drafts = await asyncio.gather(*[_pipeline(a) for a in actions])
 
     successful = [d for d in drafts if d.updated_content and not d.error and not d.flagged_reason]
     flagged = [d for d in drafts if d.flagged_reason]
     failed = [d for d in drafts if d.error and not d.flagged_reason]
+    noop = [d for d in drafts if not d.updated_content and not d.error and not d.flagged_reason]
+    if noop:
+        logger.info("Doc update: %d routed page(s) needed no change", len(noop))
 
     if dry_run:
         return DocUpdateResult(successful=successful, failed=failed, flagged=flagged)
@@ -221,17 +244,39 @@ async def run_doc_update(
                 gh.post_or_update_doc_comment(
                     pr, _flagged_comment(pr_number, flagged), _DOC_COMMENT_MARKER
                 )
+            reason = "no confident doc updates; flagged for humans"
+        else:
+            reason = "no doc updates produced (nothing stale or all no-op)"
         return DocUpdateResult(
             failed=failed,
             flagged=flagged,
             skipped=True,
-            skip_reason="no confident doc updates; flagged for humans",
+            skip_reason=reason,
         )
 
     file_writes: list[FileWrite] = []
     for d in successful:
         file_writes.append(FileWrite(path=d.target_path, content=d.updated_content))
         file_writes.extend(d.aux_edits)
+
+    # Wire new pages per-directory: each directory's nav.js/index.html accumulates ALL
+    # of that directory's new-page entries into one file (so multiple new pages never
+    # clobber each other), and pages in different dirs wire into their own nav.
+    create_by_dir: dict[str, list[DocDraft]] = {}
+    for d in successful:
+        if d.action == "create_page" and d.aux_meta:
+            create_by_dir.setdefault(os.path.dirname(d.target_path), []).append(d)
+    for target_dir, group in create_by_dir.items():
+        prefix = f"{target_dir}/" if target_dir else ""
+        baseline_nav = _read_file(gh, repo, f"{prefix}nav.js", ref) or ""
+        baseline_index = _read_file(gh, repo, f"{prefix}index.html", ref) or ""
+        nav_content, index_content = wire_new_pages(
+            baseline_nav, baseline_index, [d.aux_meta for d in group if d.aux_meta]
+        )
+        if nav_content is not None:
+            file_writes.append(FileWrite(path=f"{prefix}nav.js", content=nav_content))
+        if index_content is not None:
+            file_writes.append(FileWrite(path=f"{prefix}index.html", content=index_content))
 
     pr_url = gh.create_doc_update_pr(
         repo_name=repo,
@@ -241,8 +286,8 @@ async def run_doc_update(
         pr_title=f"docs: auto-update for PR #{pr_number} — {pr.title}",
         pr_body=_build_pr_body(pr_number, pr.html_url, successful, flagged),
         assignee=pr.user.login if pr.user else None,
-        labels=doc_generation.pr_labels,
-        draft=doc_generation.pr_draft,
+        labels=eff_pr_labels,
+        draft=eff_pr_draft,
         pr_number=pr_number,
     )
     return DocUpdateResult(successful=successful, failed=failed, flagged=flagged, pr_url=pr_url)

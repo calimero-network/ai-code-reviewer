@@ -11,6 +11,7 @@ from ai_reviewer.docs.page_builder import (
     apply_create_page,
     insert_index_link,
     insert_nav_entry,
+    wire_new_pages,
 )
 
 _NAV = (
@@ -74,7 +75,6 @@ async def test_create_page_wires_nav_and_emits_page_filewrite():
             action=action,
             sibling_html=_SIBLING,
             nav_js=_NAV,
-            index_html="<html></html>",
             change=change,
             section_group="Architecture Deep-Dive",
             dot="#10b981",
@@ -87,11 +87,12 @@ async def test_create_page_wires_nav_and_emits_page_filewrite():
     assert draft.error is None
     assert draft.action == "create_page"
     assert draft.target_path == "architecture/widgets.html"
-    # Page content + a nav.js aux edit are present; nav.js edit registered the page.
-    aux_paths = {fw.path for fw in draft.aux_edits}
-    assert any(p.endswith("nav.js") for p in aux_paths)
-    nav_edit = next(fw for fw in draft.aux_edits if fw.path.endswith("nav.js"))
-    assert "widgets.html" in nav_edit.content
+    # aux_edits is now empty for create_page; wiring info lives in aux_meta.
+    assert draft.aux_edits == []
+    # aux_meta carries the nav/index wiring data for orchestrator-level accumulation.
+    assert draft.aux_meta is not None
+    assert draft.aux_meta["nav"]["href"] == "widgets.html"
+    assert draft.aux_meta["index"]["href"] == "widgets.html"
 
 
 @pytest.mark.asyncio
@@ -112,7 +113,6 @@ async def test_create_page_orphan_guard_downgrades_when_nav_anchor_missing():
             action=action,
             sibling_html=_SIBLING,
             nav_js="const NAV = [];",  # no section anchors
-            index_html="<html></html>",
             change=change,
             section_group="Nonexistent Section",
             dot="#10b981",
@@ -141,7 +141,6 @@ async def test_create_page_orphan_guard_errors_when_no_best_fit():
             action=action,
             sibling_html=_SIBLING,
             nav_js="const NAV = [];",
-            index_html="<html></html>",
             change=change,
             section_group="Nonexistent Section",
             dot="#10b981",
@@ -155,3 +154,57 @@ async def test_create_page_orphan_guard_errors_when_no_best_fit():
     assert "orphan guard" in draft.error
     assert draft.updated_content == ""
     inst.run_completion.assert_not_called()
+
+
+def test_wire_new_pages_folds_multiple_pages_into_one_nav():
+    """wire_new_pages accumulates two pages' nav entries into a single nav.js."""
+    metas = [
+        {
+            "nav": {
+                "label": "Widgets",
+                "href": "widgets.html",
+                "dot": "#10b981",
+                "section": "Architecture Deep-Dive",
+            },
+            "index": {"href": "widgets.html", "title": "Widgets", "blurb": "widget stuff"},
+        },
+        {
+            "nav": {
+                "label": "Governance",
+                "href": "governance.html",
+                "dot": "#10b981",
+                "section": "Architecture Deep-Dive",
+            },
+            "index": {
+                "href": "governance.html",
+                "title": "Governance",
+                "blurb": "governance stuff",
+            },
+        },
+    ]
+    nav_out, index_out = wire_new_pages(
+        _NAV, '<html>Crate Index<div class="g3"></div></html>', metas
+    )
+    assert nav_out is not None
+    assert "widgets.html" in nav_out
+    assert "governance.html" in nav_out
+    # Both entries land after the section marker (only one exists in _NAV).
+    assert nav_out.index("Architecture Deep-Dive") < nav_out.index("widgets.html")
+    assert nav_out.index("Architecture Deep-Dive") < nav_out.index("governance.html")
+
+
+def test_wire_new_pages_returns_none_when_no_section_anchor():
+    """If the section anchor is missing, nav returns None (nothing wired)."""
+    metas = [
+        {
+            "nav": {
+                "label": "X",
+                "href": "x.html",
+                "dot": "#fff",
+                "section": "Nonexistent",
+            }
+        }
+    ]
+    nav_out, index_out = wire_new_pages(_NAV, "<html></html>", metas)
+    assert nav_out is None
+    assert index_out is None

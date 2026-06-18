@@ -4,12 +4,11 @@
 from __future__ import annotations
 
 import html
-import os
 import re
 from typing import TYPE_CHECKING
 
 from ai_reviewer.docs.apply import apply_add_section
-from ai_reviewer.docs.models import Change, DocAction, DocDraft, FileWrite
+from ai_reviewer.docs.models import Change, DocAction, DocDraft
 
 if TYPE_CHECKING:
     from ai_reviewer.config import AnthropicApiConfig
@@ -85,7 +84,6 @@ async def apply_create_page(
     action: DocAction,
     sibling_html: str,
     nav_js: str,
-    index_html: str,
     change: Change,
     section_group: str,
     dot: str,
@@ -122,17 +120,42 @@ async def apply_create_page(
         anthropic_cfg=anthropic_cfg,
         model=model,
     )
-    doc_dir = os.path.dirname(action.target_path)
-    nav_path = f"{doc_dir}/nav.js" if doc_dir else "nav.js"
-    index_path = f"{doc_dir}/index.html" if doc_dir else "index.html"
-    aux = [FileWrite(path=nav_path, content=new_nav)]
-    new_index = insert_index_link(index_html, href, change.title, change.what_changed[:120])
-    if new_index is not None:
-        aux.append(FileWrite(path=index_path, content=new_index))
     return DocDraft(
         action="create_page",
         target_path=action.target_path,
         updated_content=page_html,
         change=change,
-        aux_edits=aux,
+        aux_edits=[],
+        aux_meta={
+            "nav": {"label": label, "href": href, "dot": dot, "section": section_group},
+            "index": {"href": href, "title": change.title, "blurb": change.what_changed[:120]},
+        },
     )
+
+
+def wire_new_pages(
+    baseline_nav: str, baseline_index: str, metas: list[dict]
+) -> tuple[str | None, str | None]:
+    """Fold every new page's nav entry into ONE nav.js and every index link into ONE index.html.
+
+    Returns (nav_content_or_None, index_content_or_None) — None when nothing was wired/changed.
+    """
+    nav = baseline_nav
+    nav_changed = False
+    for m in metas:
+        n = m.get("nav")
+        if not n:
+            continue
+        updated = insert_nav_entry(nav, n["label"], n["href"], n["dot"], n["section"])
+        if updated is not None:
+            nav, nav_changed = updated, True
+    index = baseline_index
+    index_changed = False
+    for m in metas:
+        ix = m.get("index")
+        if not ix:
+            continue
+        updated = insert_index_link(index, ix["href"], ix["title"], ix["blurb"])
+        if updated is not None:
+            index, index_changed = updated, True
+    return (nav if nav_changed else None, index if index_changed else None)

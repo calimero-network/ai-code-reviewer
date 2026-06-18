@@ -62,6 +62,7 @@ class DocDraft:
     change: Change | None = None
     error: str | None = None
     flagged_reason: str | None = None
+    aux_meta: dict | None = None
 
 
 @dataclass

@@ -131,3 +131,169 @@ async def test_open_doc_pr_dedupe_guard_skips():
     assert "open doc-update PR" in (result.skip_reason or "")
     mock_sum.assert_not_called()  # guard fires before the Understand stage
     assert not gh.create_doc_update_pr.called
+
+
+@pytest.mark.asyncio
+async def test_two_create_page_drafts_produce_one_nav_js():
+    """Two create_page drafts must result in exactly ONE nav.js FileWrite containing both hrefs."""
+    _NAV = "  const NAV = [\n    { section: 'Architecture Deep-Dive' },\n  ];\n"
+    gh, _ = _gh_for("diff", ["architecture/auto-follow.html"])
+
+    # Override get_file_contents so _read_file returns the baseline nav.js/index.html.
+    def _file_contents(_repo, path, _ref):
+        m = MagicMock()
+        if path.endswith("nav.js"):
+            m.decoded_content = _NAV.encode()
+        else:
+            m.decoded_content = b'<html>Crate Index<div class="g3"></div></html>'
+        return m
+
+    gh.get_file_contents.side_effect = _file_contents
+
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    dg = DocGenerationSettings(enabled=True)
+
+    change_a = Change("new_feature", "Widgets", "adds widgets", "y", [], [], "doc widgets")
+    change_b = Change("new_feature", "Governance", "adds governance", "y", [], [], "doc governance")
+    summary = ChangeSummary(pr_intent="i", changes=[change_a, change_b])
+    action_a = DocAction(
+        change=change_a, action="create_page", target_path="architecture/widgets.html"
+    )
+    action_b = DocAction(
+        change=change_b, action="create_page", target_path="architecture/governance.html"
+    )
+
+    draft_a = DocDraft(
+        action="create_page",
+        target_path="architecture/widgets.html",
+        updated_content="<html>widgets</html>",
+        change=change_a,
+        aux_edits=[],
+        aux_meta={
+            "nav": {
+                "label": "Widgets",
+                "href": "widgets.html",
+                "dot": "#10b981",
+                "section": "Architecture Deep-Dive",
+            },
+            "index": {"href": "widgets.html", "title": "Widgets", "blurb": "adds widgets"},
+        },
+    )
+    draft_b = DocDraft(
+        action="create_page",
+        target_path="architecture/governance.html",
+        updated_content="<html>governance</html>",
+        change=change_b,
+        aux_edits=[],
+        aux_meta={
+            "nav": {
+                "label": "Governance",
+                "href": "governance.html",
+                "dot": "#10b981",
+                "section": "Architecture Deep-Dive",
+            },
+            "index": {"href": "governance.html", "title": "Governance", "blurb": "adds governance"},
+        },
+    )
+
+    with (
+        patch("ai_reviewer.docs.updater.summarize_pr_changes", AsyncMock(return_value=summary)),
+        patch(
+            "ai_reviewer.docs.updater.route_changes", AsyncMock(return_value=[action_a, action_b])
+        ),
+        patch("ai_reviewer.docs.updater._apply_one", AsyncMock(side_effect=[draft_a, draft_b])),
+        patch("ai_reviewer.docs.updater.verify_draft", AsyncMock(side_effect=[draft_a, draft_b])),
+    ):
+        result = await run_doc_update(
+            repo="o/r", pr_number=1, gh=gh, anthropic_cfg=cfg, doc_generation=dg
+        )
+
+    assert result.pr_url == "https://example/pr/2"
+    call_kwargs = gh.create_doc_update_pr.call_args
+    file_writes = call_kwargs[1]["file_writes"] if call_kwargs[1] else call_kwargs[0][3]
+    nav_writes = [fw for fw in file_writes if fw.path.endswith("nav.js")]
+    # Exactly ONE nav.js write (not two clobbering each other).
+    assert len(nav_writes) == 1
+    assert "widgets.html" in nav_writes[0].content
+    assert "governance.html" in nav_writes[0].content
+    # Both page files are also present.
+    page_paths = {fw.path for fw in file_writes}
+    assert "architecture/widgets.html" in page_paths
+    assert "architecture/governance.html" in page_paths
+
+
+@pytest.mark.asyncio
+async def test_repo_doc_generation_overrides_honored():
+    """Per-repo .ai-reviewer.yaml doc_generation overrides (model/labels/draft) win over server defaults."""
+    gh, _ = _gh_for("diff", ["architecture/auto-follow.html"])
+    gh.load_repo_config.return_value = {
+        "doc_generation": {
+            "enabled": True,
+            "model": "repo-apply",
+            "pr_labels": ["L"],
+            "pr_draft": False,
+        },
+        "documentation": {"static_docs_dirs": ["architecture/"]},
+    }
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    dg = DocGenerationSettings(enabled=True)
+    change = Change("fix", "t", "w", "y", [], ["crates/gov/src/lib.rs"], "i")
+    summary = ChangeSummary(pr_intent="i", changes=[change])
+    action = DocAction(
+        change=change, action="update_section", target_path="architecture/auto-follow.html"
+    )
+    good = DocDraft(
+        action="update_section",
+        target_path="architecture/auto-follow.html",
+        updated_content="<html>updated</html>",
+        change=change,
+    )
+    with (
+        patch("ai_reviewer.docs.updater.summarize_pr_changes", AsyncMock(return_value=summary)),
+        patch("ai_reviewer.docs.updater.route_changes", AsyncMock(return_value=[action])),
+        patch(
+            "ai_reviewer.docs.updater.apply_update_section", AsyncMock(return_value=good)
+        ) as mock_apply,
+        patch("ai_reviewer.docs.updater.verify_draft", AsyncMock(return_value=good)),
+    ):
+        gh.get_file_contents.return_value = MagicMock(decoded_content=b"<html>old</html>")
+        await run_doc_update(repo="o/r", pr_number=1, gh=gh, anthropic_cfg=cfg, doc_generation=dg)
+    # repo `model` override flows to the apply stage (5th positional arg of apply_update_section)
+    assert mock_apply.await_args.args[4] == "repo-apply"
+    _, kwargs = gh.create_doc_update_pr.call_args
+    assert kwargs["labels"] == ["L"]
+    assert kwargs["draft"] is False
+
+
+@pytest.mark.asyncio
+async def test_skip_reason_when_failures_without_flags():
+    """All drafts failed (no flags) -> accurate skip_reason, no doc comment posted."""
+    gh, _ = _gh_for("diff", ["architecture/auto-follow.html"])
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    dg = DocGenerationSettings(enabled=True)
+    change = Change("fix", "t", "w", "y", [], ["crates/gov/src/lib.rs"], "i")
+    summary = ChangeSummary(pr_intent="i", changes=[change])
+    action = DocAction(
+        change=change, action="update_section", target_path="architecture/auto-follow.html"
+    )
+    errored = DocDraft(
+        action="update_section",
+        target_path="architecture/auto-follow.html",
+        updated_content="",
+        change=change,
+        error="patch failed",
+    )
+    with (
+        patch("ai_reviewer.docs.updater.summarize_pr_changes", AsyncMock(return_value=summary)),
+        patch("ai_reviewer.docs.updater.route_changes", AsyncMock(return_value=[action])),
+        patch("ai_reviewer.docs.updater.apply_update_section", AsyncMock(return_value=errored)),
+        patch("ai_reviewer.docs.updater.verify_draft", AsyncMock(return_value=errored)),
+    ):
+        gh.get_file_contents.return_value = MagicMock(decoded_content=b"<html>old</html>")
+        result = await run_doc_update(
+            repo="o/r", pr_number=1, gh=gh, anthropic_cfg=cfg, doc_generation=dg
+        )
+    assert result.skipped
+    assert "no doc updates produced" in (result.skip_reason or "")
+    assert not gh.post_or_update_doc_comment.called
+    assert not gh.create_doc_update_pr.called
