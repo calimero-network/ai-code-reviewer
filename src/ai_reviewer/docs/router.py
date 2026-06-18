@@ -68,12 +68,15 @@ def build_doc_index(existing_paths: list[str]) -> list[str]:
 
 
 def _mapping_target(
+    change: Change,
     mapping: dict[str, list[str]],
     changed_paths: list[str],
     doc_index: list[str],
 ) -> str | None:
+    # Prefer the change's own files; fall back to PR-level paths when the model gave none.
+    paths = change.files or changed_paths
     for glob_pattern, targets in mapping.items():
-        if any(fnmatch.fnmatch(p, glob_pattern) for p in changed_paths):
+        if any(fnmatch.fnmatch(p, glob_pattern) for p in paths):
             for t in targets:
                 if t in doc_index:
                     return t
@@ -97,7 +100,7 @@ async def route_changes(
     needs_model: list[Change] = []
 
     for change in summary.changes:
-        target = _mapping_target(source_to_docs_mapping, changed_paths, doc_index)
+        target = _mapping_target(change, source_to_docs_mapping, changed_paths, doc_index)
         if target is not None:
             actions.append(
                 DocAction(

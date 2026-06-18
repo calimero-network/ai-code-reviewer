@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import TYPE_CHECKING
 
@@ -118,7 +119,7 @@ async def summarize_pr_changes(
             except ValueError:
                 logger.warning("Skipping unparseable partial summary for a diff chunk")
         merged_input = f"## PR Title\n{pr_title}\n\n## Partial change-lists (JSON)\n" + "\n".join(
-            str(p) for p in partials
+            json.dumps(p) for p in partials
         )
         raw = await client.run_completion(
             model=model, system=_MERGE_SYSTEM, user=merged_input, max_tokens=4096

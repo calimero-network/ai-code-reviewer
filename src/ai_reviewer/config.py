@@ -353,9 +353,10 @@ def _parse_config(raw: dict[str, Any]) -> Config:
 
     # Doc generation settings
     docgen_raw = raw.get("doc_generation", {})
+    _dg_model = docgen_raw.get("model", "claude-haiku-4-5-20251001")
     doc_generation = DocGenerationSettings(
         enabled=docgen_raw.get("enabled", False),
-        model=docgen_raw.get("model", "claude-haiku-4-5-20251001"),
+        model=_dg_model,
         max_files=docgen_raw.get("max_files", 15),
         static_docs_dirs=docgen_raw.get(
             "static_docs_dirs", ["architecture/", "docs/", "docs-static/"]
@@ -363,8 +364,8 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         pr_labels=docgen_raw.get("pr_labels", ["automated-docs", "documentation"]),
         pr_draft=docgen_raw.get("pr_draft", True),
         understanding_model=docgen_raw.get("understanding_model", "claude-sonnet-4-6"),
-        apply_model=docgen_raw.get("apply_model", "claude-haiku-4-5-20251001"),
-        verify_model=docgen_raw.get("verify_model", "claude-haiku-4-5-20251001"),
+        apply_model=docgen_raw.get("apply_model", _dg_model),
+        verify_model=docgen_raw.get("verify_model", _dg_model),
         max_understanding_diff_chars=int(docgen_raw.get("max_understanding_diff_chars", 250_000)),
         allow_new_pages=bool(docgen_raw.get("allow_new_pages", True)),
         allow_new_sections=bool(docgen_raw.get("allow_new_sections", True)),

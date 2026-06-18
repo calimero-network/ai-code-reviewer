@@ -18,3 +18,18 @@ def test_apply_model_falls_back_to_legacy_model_field():
     # `model` stays as the legacy/back-compat apply model default.
     s = DocGenerationSettings()
     assert s.apply_model == s.model
+
+
+def test_loader_apply_verify_fall_back_to_legacy_model():
+    """When only `model` is set in YAML, apply_model/verify_model inherit it (loader)."""
+    from ai_reviewer.config import _parse_config
+
+    cfg = _parse_config({"doc_generation": {"model": "claude-legacy"}})
+    assert cfg.doc_generation.apply_model == "claude-legacy"
+    assert cfg.doc_generation.verify_model == "claude-legacy"
+    # An explicit apply_model still wins over the legacy fallback.
+    cfg2 = _parse_config(
+        {"doc_generation": {"model": "claude-legacy", "apply_model": "claude-apply"}}
+    )
+    assert cfg2.doc_generation.apply_model == "claude-apply"
+    assert cfg2.doc_generation.verify_model == "claude-legacy"
