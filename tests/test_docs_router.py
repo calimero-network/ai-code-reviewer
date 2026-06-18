@@ -184,12 +184,15 @@ def test_mapping_target_prefers_change_files():
 
     mapping = {"crates/gov/**": ["architecture/gov.html"]}
     changed = ["crates/gov/a.rs", "crates/widgets/b.rs"]
-    idx = ["architecture/gov.html"]
     gov = Change("fix", "t", "w", "y", [], ["crates/gov/a.rs"], "i")
     widget = Change("fix", "t", "w", "y", [], ["crates/widgets/b.rs"], "i")
     nofiles = Change("fix", "t", "w", "y", [], [], "i")
-    assert _mapping_target(gov, mapping, changed, idx) == "architecture/gov.html"
+    assert _mapping_target(gov, mapping, changed) == "architecture/gov.html"
     # widget change's own files don't match the gov glob -> no mapping target
-    assert _mapping_target(widget, mapping, changed, idx) is None
+    assert _mapping_target(widget, mapping, changed) is None
     # empty files -> fall back to PR-level paths (gov file present -> matches)
-    assert _mapping_target(nofiles, mapping, changed, idx) == "architecture/gov.html"
+    assert _mapping_target(nofiles, mapping, changed) == "architecture/gov.html"
+    # Markdown targets route too — an explicit mapping is NOT gated on the HTML index.
+    md_map = {"src/**": ["docs/api.md", "README.md"]}
+    md_change = Change("fix", "t", "w", "y", [], ["src/x.py"], "i")
+    assert _mapping_target(md_change, md_map, ["src/x.py"]) == "docs/api.md"

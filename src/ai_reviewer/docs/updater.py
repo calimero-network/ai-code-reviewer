@@ -217,7 +217,7 @@ async def run_doc_update(
     if not actions:
         return DocUpdateResult(skipped=True, skip_reason="no documentation targets routed")
 
-    if eff_max_files and len(actions) > eff_max_files:
+    if eff_max_files >= 0 and len(actions) > eff_max_files:
         logger.warning(
             "Capping doc updates from %d to max_files=%d (rest deferred to a future run)",
             len(actions),
@@ -237,7 +237,24 @@ async def run_doc_update(
         )
         return draft
 
-    drafts = await asyncio.gather(*[_pipeline(a) for a in actions])
+    # return_exceptions so one failing action (e.g. a create_page model error)
+    # is isolated to that target instead of aborting the whole doc-update run.
+    results = await asyncio.gather(*[_pipeline(a) for a in actions], return_exceptions=True)
+    drafts: list[DocDraft] = []
+    for action, res in zip(actions, results, strict=True):
+        if isinstance(res, BaseException):
+            logger.warning("Doc action for %s failed: %s", action.target_path, res)
+            drafts.append(
+                DocDraft(
+                    action=action.action,
+                    target_path=action.target_path,
+                    updated_content="",
+                    change=action.change,
+                    error=str(res),
+                )
+            )
+        else:
+            drafts.append(res)
 
     successful = [d for d in drafts if d.updated_content and not d.error and not d.flagged_reason]
     flagged = [d for d in drafts if d.flagged_reason]

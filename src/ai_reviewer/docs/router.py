@@ -71,15 +71,16 @@ def _mapping_target(
     change: Change,
     mapping: dict[str, list[str]],
     changed_paths: list[str],
-    doc_index: list[str],
 ) -> str | None:
-    # Prefer the change's own files; fall back to PR-level paths when the model gave none.
+    # Match the change's own files; fall back to PR-level paths when the model
+    # attributed none. An explicit mapping target is returned as-is REGARDLESS of
+    # extension (Markdown, HTML, …) — it is operator-configured, and its existence
+    # is verified later at apply time. (The HTML-only `doc_index` is used only for
+    # the LLM routing of UNMAPPED changes, never to gate explicit mappings.)
     paths = change.files or changed_paths
     for glob_pattern, targets in mapping.items():
         if any(fnmatch.fnmatch(p, glob_pattern) for p in paths):
-            for t in targets:
-                if t in doc_index:
-                    return t
+            return targets[0] if targets else None
     return None
 
 
@@ -100,7 +101,7 @@ async def route_changes(
     needs_model: list[Change] = []
 
     for change in summary.changes:
-        target = _mapping_target(change, source_to_docs_mapping, changed_paths, doc_index)
+        target = _mapping_target(change, source_to_docs_mapping, changed_paths)
         if target is not None:
             actions.append(
                 DocAction(

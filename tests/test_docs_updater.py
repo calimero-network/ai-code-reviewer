@@ -366,3 +366,41 @@ async def test_create_page_does_not_clone_itself():
         await _apply_one(action, gh, "o/r", "ref", "architecture/", cfg, "m", True)
     assert "widgets.html" not in captured["sibling_html"]
     assert "auto-follow.html" in captured["sibling_html"]
+
+
+@pytest.mark.asyncio
+async def test_one_action_exception_does_not_abort_batch():
+    """A single action raising (e.g. a create_page model error) must not abort the run."""
+    gh, _ = _gh_for("diff", ["architecture/auto-follow.html", "architecture/concepts.html"])
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    dg = DocGenerationSettings(enabled=True)
+    c1 = Change("new_feature", "A", "wa", "y", [], ["crates/gov/a.rs"], "i")
+    c2 = Change("fix", "B", "wb", "y", [], ["crates/gov/b.rs"], "i")
+    summary = ChangeSummary(pr_intent="i", changes=[c1, c2])
+    a1 = DocAction(change=c1, action="create_page", target_path="architecture/widgets.html")
+    a2 = DocAction(change=c2, action="update_section", target_path="architecture/concepts.html")
+    good = DocDraft(
+        action="update_section",
+        target_path="architecture/concepts.html",
+        updated_content="<html>ok</html>",
+        change=c2,
+    )
+    with (
+        patch("ai_reviewer.docs.updater.summarize_pr_changes", AsyncMock(return_value=summary)),
+        patch("ai_reviewer.docs.updater.route_changes", AsyncMock(return_value=[a1, a2])),
+        patch(
+            "ai_reviewer.docs.updater._apply_one",
+            AsyncMock(side_effect=[RuntimeError("model boom"), good]),
+        ),
+        patch(
+            "ai_reviewer.docs.updater.verify_draft", AsyncMock(side_effect=lambda **kw: kw["draft"])
+        ),
+    ):
+        result = await run_doc_update(
+            repo="o/r", pr_number=1, gh=gh, anthropic_cfg=cfg, doc_generation=dg
+        )
+    # The run completed despite the exception; the failure is isolated to its target.
+    assert any(d.target_path == "architecture/widgets.html" and d.error for d in result.failed)
+    assert len(result.successful) == 1
+    assert result.successful[0].target_path == "architecture/concepts.html"
+    assert gh.create_doc_update_pr.called

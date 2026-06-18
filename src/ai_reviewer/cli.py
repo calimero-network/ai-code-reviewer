@@ -638,7 +638,12 @@ async def _update_docs_async(
             console.print(f"[yellow]⚑  Flagged {d.target_path}: {d.flagged_reason}[/yellow]")
 
     if not result.successful:
-        console.print("[green]✅ No doc updates needed after scanning all candidates.[/green]")
+        if result.flagged:
+            console.print(
+                "[yellow]⚑ All candidate updates were flagged for human review — none shipped.[/yellow]"
+            )
+        else:
+            console.print("[green]✅ No doc updates needed after scanning all candidates.[/green]")
         return
 
     if dry_run:
