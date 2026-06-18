@@ -1,0 +1,152 @@
+"""Stage 3 (existing pages) — surgical update_section and additive add_section edits."""
+
+from __future__ import annotations
+
+import re
+from typing import TYPE_CHECKING
+
+from ai_reviewer.docs.analyzer import _apply_html_patches
+from ai_reviewer.docs.models import Change, DocAction, DocDraft
+
+if TYPE_CHECKING:
+    from ai_reviewer.config import AnthropicApiConfig
+
+_CARD_CYCLE = ["ga", "gb", "gc", "gd"]
+
+# Insert a new section just before the .content/.main close that precedes the nav script.
+_CONTENT_CLOSE_RE = re.compile(r"(\n</div>\s*\n</div>\s*\n<script src=\"nav\.js\")")
+
+_UPDATE_SYSTEM = """\
+You are updating an existing HTML documentation page after a code change.
+Output ONLY FIND/REPLACE blocks — do not return the whole file. Make the page reflect the
+change described, including ADDING a sentence/bullet where the change introduces something new.
+Format (repeatable):
+<<<FIND
+exact text copied verbatim from the page (enough to be unique)
+FIND>>>
+<<<REPLACE
+replacement text
+REPLACE>>>
+If no change is needed, output exactly: NO_UPDATE_NEEDED"""
+
+_ADD_SECTION_SYSTEM = """\
+You are adding ONE new section to an existing HTML documentation page.
+Output ONLY a single HTML block of the form:
+<div class="card {card_class}"><h2>Title</h2> ...content... </div>
+Use ONLY these constructs: <h2>/<h3>, <p>, <ul>/<ol>/<li>, <code>, <pre class="code">,
+<strong>, <em>. Do NOT invent CSS classes. No commentary before or after the block."""
+
+
+def next_card_class(html: str) -> str:
+    matches = re.findall(r'class="card (g[abcd])"', html)
+    if not matches:
+        return "ga"
+    last = matches[-1]
+    return _CARD_CYCLE[(_CARD_CYCLE.index(last) + 1) % len(_CARD_CYCLE)]
+
+
+def insert_section(html: str, section_html: str) -> str | None:
+    """Insert *section_html* just before the .content wrapper closes. None if no anchor."""
+    m = _CONTENT_CLOSE_RE.search(html)
+    if not m:
+        return None
+    insert_at = m.start(1)
+    return html[:insert_at] + "\n" + section_html + html[insert_at:]
+
+
+async def apply_update_section(
+    action: DocAction,
+    current_content: str,
+    change: Change,
+    anthropic_cfg: AnthropicApiConfig,
+    model: str,
+) -> DocDraft:
+    from ai_reviewer.agents.anthropic_client import AnthropicClient
+
+    user = (
+        f"## Page: {action.target_path}\n\n{current_content}\n\n"
+        f"## Change to reflect\ntitle: {change.title}\nwhat_changed: {change.what_changed}\n"
+        f"doc_impact: {change.doc_impact}\nsymbols: {', '.join(change.symbols)}\n"
+    )
+    async with AnthropicClient(anthropic_cfg) as client:
+        try:
+            raw = (
+                await client.run_completion(
+                    model=model, system=_UPDATE_SYSTEM, user=user, max_tokens=8192
+                )
+            ).strip()
+        except Exception as exc:  # noqa: BLE001
+            return DocDraft(
+                action="update_section",
+                target_path=action.target_path,
+                updated_content="",
+                change=change,
+                error=str(exc),
+            )
+
+    patched = _apply_html_patches(current_content, raw)
+    if patched is None:
+        return DocDraft(
+            action="update_section",
+            target_path=action.target_path,
+            updated_content="",
+            change=change,
+            before_content=current_content,
+            error="could not apply HTML patches (FIND not found or malformed)",
+        )
+    return DocDraft(
+        action="update_section",
+        target_path=action.target_path,
+        updated_content=patched,
+        before_content=current_content,
+        change=change,
+    )
+
+
+async def apply_add_section(
+    action: DocAction,
+    current_content: str,
+    change: Change,
+    anthropic_cfg: AnthropicApiConfig,
+    model: str,
+) -> DocDraft:
+    from ai_reviewer.agents.anthropic_client import AnthropicClient
+
+    card_class = next_card_class(current_content)
+    system = _ADD_SECTION_SYSTEM.replace("{card_class}", card_class)
+    user = (
+        f"## Page: {action.target_path}\n\n{current_content}\n\n"
+        f"## New thing to document\ntitle: {change.title}\nwhat_changed: {change.what_changed}\n"
+        f"why: {change.why}\ndoc_impact: {change.doc_impact}\n"
+    )
+    async with AnthropicClient(anthropic_cfg) as client:
+        try:
+            section = (
+                await client.run_completion(model=model, system=system, user=user, max_tokens=4096)
+            ).strip()
+        except Exception as exc:  # noqa: BLE001
+            return DocDraft(
+                action="add_section",
+                target_path=action.target_path,
+                updated_content="",
+                change=change,
+                error=str(exc),
+            )
+
+    merged = insert_section(current_content, section)
+    if merged is None:
+        return DocDraft(
+            action="add_section",
+            target_path=action.target_path,
+            updated_content="",
+            change=change,
+            before_content=current_content,
+            error="could not locate content-wrapper anchor for section insertion",
+        )
+    return DocDraft(
+        action="add_section",
+        target_path=action.target_path,
+        updated_content=merged,
+        before_content=current_content,
+        change=change,
+    )
