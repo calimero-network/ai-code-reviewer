@@ -2648,3 +2648,29 @@ class TestCreateDocUpdatePR:
                     pr_title="docs: update",
                     pr_body="body",
                 )
+
+    def test_raises_when_all_writes_fail(self):
+        from unittest.mock import MagicMock, patch
+
+        from ai_reviewer.docs.models import FileWrite
+        from ai_reviewer.github.client import GitHubClient
+
+        # Non-empty content (so the skip-empty guard does NOT fire) but the
+        # write itself raises a generic error -> caught, logged, nothing
+        # committed -> RuntimeError. Exercises the outer except branch.
+        mock_repo = MagicMock()
+        mock_repo.get_contents.side_effect = Exception("not found")  # -> create path
+        mock_repo.create_file.side_effect = Exception("write blocked")
+
+        with patch("ai_reviewer.github.client.Github") as MockGithub:
+            MockGithub.return_value.get_repo.return_value = mock_repo
+            client = GitHubClient(token="test-token")
+            with pytest.raises(RuntimeError, match="No files were successfully committed"):
+                client.create_doc_update_pr(
+                    repo_name="org/repo",
+                    base_branch="main",
+                    base_sha="abc1234",
+                    file_writes=[FileWrite(path="docs/new.md", content="# real content\n")],
+                    pr_title="docs: update",
+                    pr_body="body",
+                )
