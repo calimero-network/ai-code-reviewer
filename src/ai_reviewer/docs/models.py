@@ -11,6 +11,8 @@ CONFIDENCE_RANK: dict[str, int] = {"low": 0, "medium": 1, "high": 2}
 
 def meets_threshold(confidence: str, threshold: str) -> bool:
     """True if *confidence* is at least *threshold* on the low<medium<high scale."""
+    # Unknown confidence -> 0 (low) is intentional: an unrecognized verifier
+    # confidence must fail toward flagging, never silently meet the bar.
     return CONFIDENCE_RANK.get(confidence, 0) >= CONFIDENCE_RANK.get(threshold, 1)
 
 
@@ -37,7 +39,9 @@ class DocAction:
     action: str  # "update_section" | "add_section" | "create_page"
     target_path: str
     anchor: str | None = None
-    best_fit_reason: str = ""
+    best_fit_reason: str = (
+        ""  # required in practice; default only due to field ordering after `anchor`
+    )
 
 
 @dataclass(frozen=True)
@@ -70,20 +74,25 @@ class Verdict:
 def extract_json(text: str) -> dict:
     """Parse a JSON object from a model response, tolerating fences/prose.
 
-    Raises ValueError if no JSON object can be parsed.
+    Raises ValueError if no JSON *object* can be parsed (a bare array or
+    scalar is rejected — every pipeline stage expects an object).
     """
     s = text.strip()
     fence = re.search(r"```(?:json)?\s*([\s\S]*?)```", s)
     if fence:
         s = fence.group(1).strip()
     try:
-        return json.loads(s)
+        parsed = json.loads(s)
     except json.JSONDecodeError:
-        pass
+        parsed = None
+    if isinstance(parsed, dict):
+        return parsed
     obj = re.search(r"\{[\s\S]*\}", s)
     if obj:
         try:
-            return json.loads(obj.group(0))
+            parsed = json.loads(obj.group(0))
         except json.JSONDecodeError as exc:
             raise ValueError(f"could not parse JSON object: {exc}") from exc
+        if isinstance(parsed, dict):
+            return parsed
     raise ValueError("no JSON object found in response")

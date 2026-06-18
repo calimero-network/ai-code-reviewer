@@ -76,3 +76,31 @@ def test_docaction_fields():
 def test_verdict_fields():
     v = Verdict(reflects_change=False, confidence="low", notes="missed the invariant")
     assert v.reflects_change is False
+
+
+def test_extract_json_rejects_bare_array():
+    with pytest.raises(ValueError):
+        extract_json("[1, 2, 3]")
+
+
+def test_extract_json_rejects_fenced_invalid():
+    with pytest.raises(ValueError):
+        extract_json("```json\n{not valid}\n```")
+
+
+def test_meets_threshold_boundaries():
+    assert meets_threshold("low", "low")
+    assert meets_threshold("high", "high")
+
+
+def test_docaction_optional_fields_assigned():
+    c = Change("new_feature", "t", "w", "y", [], [], "i")
+    a = DocAction(
+        change=c,
+        action="create_page",
+        target_path="x.html",
+        anchor=None,
+        best_fit_reason="no existing home",
+    )
+    assert a.anchor is None
+    assert a.best_fit_reason == "no existing home"
