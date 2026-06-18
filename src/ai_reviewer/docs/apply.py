@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from ai_reviewer.docs.analyzer import _apply_html_patches
+from ai_reviewer.docs.analyzer import _apply_html_patches, _is_no_update_response
 from ai_reviewer.docs.models import Change, DocAction, DocDraft
 
 if TYPE_CHECKING:
@@ -81,8 +81,18 @@ async def apply_update_section(
                 target_path=action.target_path,
                 updated_content="",
                 change=change,
+                before_content=current_content,
                 error=str(exc),
             )
+
+    if _is_no_update_response(raw):
+        return DocDraft(
+            action="update_section",
+            target_path=action.target_path,
+            updated_content="",
+            before_content=current_content,
+            change=change,
+        )
 
     patched = _apply_html_patches(current_content, raw)
     if patched is None:
@@ -130,6 +140,7 @@ async def apply_add_section(
                 target_path=action.target_path,
                 updated_content="",
                 change=change,
+                before_content=current_content,
                 error=str(exc),
             )
 

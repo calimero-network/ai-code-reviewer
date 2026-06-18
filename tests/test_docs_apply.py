@@ -98,3 +98,19 @@ async def test_apply_add_section_inserts_card():
     assert draft.updated_content.index("Widgets") < draft.updated_content.index(
         '<script src="nav.js">'
     )
+    assert draft.before_content == _PAGE
+
+
+@pytest.mark.asyncio
+async def test_apply_update_section_no_update_needed_is_not_an_error():
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    change = Change("fix", "t", "w", "y", [], [], "i")
+    action = DocAction(change=change, action="update_section", target_path="architecture/x.html")
+    with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+        inst = AsyncMock()
+        inst.run_completion = AsyncMock(return_value="NO_UPDATE_NEEDED")
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+        draft = await apply_update_section(action, "<p>already fine</p>", change, cfg, "m")
+    assert draft.error is None  # NOT a failure
+    assert draft.updated_content == ""  # nothing to ship -> orchestrator drops it
