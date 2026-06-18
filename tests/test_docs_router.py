@@ -47,6 +47,7 @@ async def test_mapping_hit_routes_update_section_no_model_call():
     assert actions[0].action == "update_section"
     assert actions[0].target_path == "architecture/auto-follow.html"
     inst.run_completion.assert_not_called()
+    MockClient.assert_not_called()  # client never even constructed on the mapping-hit path
 
 
 @pytest.mark.asyncio
@@ -109,4 +110,35 @@ async def test_create_page_downgrades_to_add_section_when_pages_disabled():
             model="m",
         )
     assert actions[0].action == "add_section"
+    assert actions[0].target_path == "architecture/auto-follow.html"
+
+
+@pytest.mark.asyncio
+async def test_add_section_downgrades_to_update_section_when_sections_disabled():
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    decision = json.dumps(
+        {
+            "action": "add_section",
+            "target_path": "architecture/auto-follow.html",
+            "anchor": None,
+            "best_fit_reason": "x",
+            "best_fit_existing": "architecture/auto-follow.html",
+        }
+    )
+    with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+        inst = AsyncMock()
+        inst.run_completion = AsyncMock(return_value=decision)
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+        actions = await route_changes(
+            summary=_summary("fix", ["crates/x/src/lib.rs"]),
+            source_to_docs_mapping={},
+            changed_paths=["crates/x/src/lib.rs"],
+            doc_index=["architecture/auto-follow.html"],
+            allow_new_pages=True,
+            allow_new_sections=False,
+            anthropic_cfg=cfg,
+            model="m",
+        )
+    assert actions[0].action == "update_section"
     assert actions[0].target_path == "architecture/auto-follow.html"

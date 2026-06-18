@@ -97,7 +97,7 @@ async def route_changes(
 
             action = str(d.get("action", "add_section"))
             target_path = str(d.get("target_path", ""))
-            best_fit = str(d.get("best_fit_existing", "")) or (doc_index[0] if doc_index else "")
+            best_fit = str(d.get("best_fit_existing", ""))
 
             if action == "create_page" and not allow_new_pages:
                 if allow_new_sections and best_fit:
