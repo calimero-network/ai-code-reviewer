@@ -99,7 +99,9 @@ async def _apply_one(
     scan_dir = prefix or doc_dir
     nav_js = _read_file(gh, repo, f"{prefix}nav.js", ref) or ""
     siblings = [
-        p for p in gh.get_html_files_in_dirs(repo, ref, [scan_dir]) if not p.endswith("index.html")
+        p
+        for p in gh.get_html_files_in_dirs(repo, ref, [scan_dir])
+        if not p.endswith("index.html") and p != action.target_path
     ]
     sibling_html = _read_file(gh, repo, siblings[0], ref) if siblings else ""
     best_fit = siblings[0] if siblings else ""
@@ -175,6 +177,7 @@ async def run_doc_update(
     eff_max_diff = int(
         repo_docgen.get("max_understanding_diff_chars", doc_generation.max_understanding_diff_chars)
     )
+    eff_max_files = int(repo_docgen.get("max_files", doc_generation.max_files))
     eff_allow_pages = repo_docgen.get("allow_new_pages", doc_generation.allow_new_pages)
     eff_allow_sections = repo_docgen.get("allow_new_sections", doc_generation.allow_new_sections)
     eff_threshold = repo_docgen.get(
@@ -213,6 +216,14 @@ async def run_doc_update(
     )
     if not actions:
         return DocUpdateResult(skipped=True, skip_reason="no documentation targets routed")
+
+    if eff_max_files and len(actions) > eff_max_files:
+        logger.warning(
+            "Capping doc updates from %d to max_files=%d (rest deferred to a future run)",
+            len(actions),
+            eff_max_files,
+        )
+        actions = actions[:eff_max_files]
 
     async def _pipeline(action) -> DocDraft:
         draft = await _apply_one(

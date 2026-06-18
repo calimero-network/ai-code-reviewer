@@ -118,6 +118,9 @@ async def summarize_pr_changes(
                 partials.append(extract_json(raw))
             except ValueError:
                 logger.warning("Skipping unparseable partial summary for a diff chunk")
+        if not partials:
+            logger.warning("Map-reduce produced no parseable partials; returning empty summary")
+            return ChangeSummary(pr_intent=pr_title, changes=[])
         merged_input = f"## PR Title\n{pr_title}\n\n## Partial change-lists (JSON)\n" + "\n".join(
             json.dumps(p) for p in partials
         )

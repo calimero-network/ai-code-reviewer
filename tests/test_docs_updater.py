@@ -297,3 +297,72 @@ async def test_skip_reason_when_failures_without_flags():
     assert "no doc updates produced" in (result.skip_reason or "")
     assert not gh.post_or_update_doc_comment.called
     assert not gh.create_doc_update_pr.called
+
+
+@pytest.mark.asyncio
+async def test_max_files_caps_number_of_actions():
+    """max_files bounds how many doc targets are processed in one run."""
+    gh, _ = _gh_for("diff", ["architecture/auto-follow.html", "architecture/concepts.html"])
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    dg = DocGenerationSettings(enabled=True, max_files=1)
+    c1 = Change("fix", "A", "wa", "y", [], ["crates/gov/a.rs"], "i")
+    c2 = Change("fix", "B", "wb", "y", [], ["crates/gov/b.rs"], "i")
+    summary = ChangeSummary(pr_intent="i", changes=[c1, c2])
+    a1 = DocAction(change=c1, action="update_section", target_path="architecture/auto-follow.html")
+    a2 = DocAction(change=c2, action="update_section", target_path="architecture/concepts.html")
+    d1 = DocDraft(
+        action="update_section",
+        target_path="architecture/auto-follow.html",
+        updated_content="<html>1</html>",
+        change=c1,
+    )
+    d2 = DocDraft(
+        action="update_section",
+        target_path="architecture/concepts.html",
+        updated_content="<html>2</html>",
+        change=c2,
+    )
+    with (
+        patch("ai_reviewer.docs.updater.summarize_pr_changes", AsyncMock(return_value=summary)),
+        patch("ai_reviewer.docs.updater.route_changes", AsyncMock(return_value=[a1, a2])),
+        patch("ai_reviewer.docs.updater._apply_one", AsyncMock(side_effect=[d1, d2])) as mock_apply,
+        patch(
+            "ai_reviewer.docs.updater.verify_draft", AsyncMock(side_effect=lambda **kw: kw["draft"])
+        ),
+    ):
+        await run_doc_update(repo="o/r", pr_number=1, gh=gh, anthropic_cfg=cfg, doc_generation=dg)
+    assert mock_apply.await_count == 1  # capped at max_files=1
+
+
+@pytest.mark.asyncio
+async def test_create_page_does_not_clone_itself():
+    """The sibling template for a new page must never be the page being created."""
+    from ai_reviewer.docs.updater import _apply_one
+
+    gh = MagicMock()
+    gh.get_html_files_in_dirs.return_value = [
+        "architecture/widgets.html",  # the target itself
+        "architecture/auto-follow.html",  # a real sibling
+    ]
+
+    def _fc(_repo, path, _ref):
+        m = MagicMock()
+        m.decoded_content = f"<html>{path}</html>".encode()
+        return m
+
+    gh.get_file_contents.side_effect = _fc
+    change = Change("new_feature", "Widgets", "w", "y", [], [], "i")
+    action = DocAction(change=change, action="create_page", target_path="architecture/widgets.html")
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    captured = {}
+
+    async def _fake_create(**kw):
+        captured.update(kw)
+        return DocDraft(
+            action="create_page", target_path=action.target_path, updated_content="x", change=change
+        )
+
+    with patch("ai_reviewer.docs.updater.apply_create_page", _fake_create):
+        await _apply_one(action, gh, "o/r", "ref", "architecture/", cfg, "m", True)
+    assert "widgets.html" not in captured["sibling_html"]
+    assert "auto-follow.html" in captured["sibling_html"]

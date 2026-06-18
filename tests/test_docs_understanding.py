@@ -157,3 +157,29 @@ async def test_map_reduce_skips_unparseable_partial():
         inst.run_completion.call_count == 3
     )  # both files attempted (1st unparseable, skipped) + merge
     assert cs.changes[0].kind == "behavior_change"
+
+
+@pytest.mark.asyncio
+async def test_map_reduce_all_unparseable_returns_empty_no_merge_call():
+    """If every per-file partial is unparseable, return an empty summary WITHOUT a merge call."""
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    big_a = "diff --git a/a.rs b/a.rs\n" + ("+x\n" * 200)
+    big_b = "diff --git a/b.rs b/b.rs\n" + ("+y\n" * 200)
+    diff = big_a + big_b
+    with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+        inst = AsyncMock()
+        inst.run_completion = AsyncMock(side_effect=["not json", "also not json"])
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+        cs = await summarize_pr_changes(
+            pr_title="t",
+            pr_body="",
+            commit_messages=[],
+            diff=diff,
+            anthropic_cfg=cfg,
+            model="m",
+            max_diff_chars=100,
+        )
+    assert cs.changes == []
+    # Two per-file calls only — the merge call is skipped (no parseable partials).
+    assert inst.run_completion.call_count == 2
