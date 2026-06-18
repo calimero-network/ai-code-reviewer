@@ -114,3 +114,46 @@ async def test_map_reduce_over_cap_summarizes_per_file_then_merges():
     # 2 per-file calls + 1 merge call
     assert inst.run_completion.call_count == 3
     assert cs.changes[0].kind == "behavior_change"
+
+
+@pytest.mark.asyncio
+async def test_map_reduce_skips_unparseable_partial():
+    """An unparseable per-file partial is skipped, not aborted; merge still runs."""
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    big_file_a = "diff --git a/a.rs b/a.rs\n" + ("+x\n" * 200)
+    big_file_b = "diff --git a/b.rs b/b.rs\n" + ("+y\n" * 200)
+    diff = big_file_a + big_file_b
+    per_file = json.dumps(
+        {
+            "changes": [
+                {
+                    "kind": "fix",
+                    "title": "t",
+                    "what_changed": "w",
+                    "why": "y",
+                    "symbols": [],
+                    "files": [],
+                    "doc_impact": "i",
+                }
+            ]
+        }
+    )
+    merged = _SUMMARY_JSON
+    with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+        inst = AsyncMock()
+        inst.run_completion = AsyncMock(side_effect=["not json at all", per_file, merged])
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+        cs = await summarize_pr_changes(
+            pr_title="t",
+            pr_body="",
+            commit_messages=[],
+            diff=diff,
+            anthropic_cfg=cfg,
+            model="m",
+            max_diff_chars=100,
+        )
+    assert (
+        inst.run_completion.call_count == 3
+    )  # both files attempted (1st unparseable, skipped) + merge
+    assert cs.changes[0].kind == "behavior_change"
