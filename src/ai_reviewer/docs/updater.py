@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -91,11 +92,15 @@ async def _apply_one(action, gh, repo, ref, doc_dir, anthropic_cfg, dg) -> DocDr
         return await apply_add_section(
             action, current, action.change, anthropic_cfg, dg.apply_model
         )
-    # create_page: gather sibling/nav/index
-    nav_js = _read_file(gh, repo, f"{doc_dir}nav.js", ref) or ""
-    index_html = _read_file(gh, repo, f"{doc_dir}index.html", ref) or ""
+    # create_page: read sibling/nav/index from the TARGET's own directory so the
+    # read side matches where apply_create_page writes the aux edits.
+    target_dir = os.path.dirname(action.target_path)
+    prefix = f"{target_dir}/" if target_dir else ""
+    scan_dir = prefix or doc_dir
+    nav_js = _read_file(gh, repo, f"{prefix}nav.js", ref) or ""
+    index_html = _read_file(gh, repo, f"{prefix}index.html", ref) or ""
     siblings = [
-        p for p in gh.get_html_files_in_dirs(repo, ref, [doc_dir]) if not p.endswith("index.html")
+        p for p in gh.get_html_files_in_dirs(repo, ref, [scan_dir]) if not p.endswith("index.html")
     ]
     sibling_html = _read_file(gh, repo, siblings[0], ref) if siblings else ""
     best_fit = siblings[0] if siblings else ""

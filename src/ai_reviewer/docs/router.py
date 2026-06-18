@@ -15,6 +15,41 @@ logger = logging.getLogger(__name__)
 
 _DOC_DIR_PREFIXES = ("architecture/", "docs/", "docs-static/", "doc/")
 
+
+def _merge_changes(a: Change, b: Change) -> Change:
+    """Combine two changes that target the same page into one (frozen) Change."""
+    return Change(
+        kind=a.kind,
+        title=f"{a.title}; {b.title}",
+        what_changed=f"{a.what_changed}\n\n{b.what_changed}",
+        why=a.why or b.why,
+        symbols=list(dict.fromkeys([*a.symbols, *b.symbols])),
+        files=list(dict.fromkeys([*a.files, *b.files])),
+        doc_impact=f"{a.doc_impact}\n{b.doc_impact}".strip(),
+    )
+
+
+def _coalesce_actions(actions: list[DocAction]) -> list[DocAction]:
+    """One action per existing-page target (create_page stays distinct), merging the
+    changes of same-target actions so a single combined edit is produced per page —
+    otherwise multiple FileWrites for one path clobber each other at commit time."""
+    by_path: dict[str, DocAction] = {}
+    ordered: list[DocAction] = []
+    for a in actions:
+        if a.action == "create_page":
+            ordered.append(a)
+            continue
+        existing = by_path.get(a.target_path)
+        if existing is not None:
+            existing.change = _merge_changes(existing.change, a.change)
+            if a.action == "update_section":
+                existing.action = "update_section"  # prefer in-place patch over add
+        else:
+            by_path[a.target_path] = a
+            ordered.append(a)
+    return ordered
+
+
 _ROUTE_SYSTEM = """\
 You route a code change to the single best documentation action.
 You are given the change and a list of existing doc pages (with titles inferred from paths).
@@ -76,7 +111,7 @@ async def route_changes(
             needs_model.append(change)
 
     if not needs_model:
-        return actions
+        return _coalesce_actions(actions)
 
     index_listing = "\n".join(f"- {p}" for p in doc_index) or "(no existing doc pages)"
     async with AnthropicClient(anthropic_cfg) as client:
@@ -121,4 +156,4 @@ async def route_changes(
                     best_fit_reason=str(d.get("best_fit_reason", "")),
                 )
             )
-    return actions
+    return _coalesce_actions(actions)

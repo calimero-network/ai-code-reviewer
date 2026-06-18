@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import html
 import os
 import re
 from typing import TYPE_CHECKING
@@ -46,9 +47,11 @@ def insert_index_link(index_html: str, href: str, title: str, blurb: str) -> str
     if grid == -1:
         return None
     insert_at = grid + len('<div class="g3">')
+    safe_title = html.escape(title)
+    safe_blurb = html.escape(blurb)
     card = (
         f'\n  <a href="{href}" class="hero-card">'
-        f'<span class="card-icon">&#9670;</span><h3>{title}</h3><p>{blurb}</p></a>'
+        f'<span class="card-icon">&#9670;</span><h3>{safe_title}</h3><p>{safe_blurb}</p></a>'
     )
     return index_html[:insert_at] + card + index_html[insert_at:]
 

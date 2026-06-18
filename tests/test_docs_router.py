@@ -114,6 +114,39 @@ async def test_create_page_downgrades_to_add_section_when_pages_disabled():
 
 
 @pytest.mark.asyncio
+async def test_multiple_changes_same_page_coalesce_to_one_action():
+    from ai_reviewer.docs.models import ChangeSummary
+
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    summary = ChangeSummary(
+        pr_intent="x",
+        changes=[
+            Change("fix", "A", "change A", "y", [], ["crates/gov/src/a.rs"], "doc A"),
+            Change("fix", "B", "change B", "y", [], ["crates/gov/src/b.rs"], "doc B"),
+        ],
+    )
+    with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+        inst = AsyncMock()
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+        actions = await route_changes(
+            summary=summary,
+            source_to_docs_mapping={"crates/gov/**": ["architecture/auto-follow.html"]},
+            changed_paths=["crates/gov/src/a.rs", "crates/gov/src/b.rs"],
+            doc_index=["architecture/auto-follow.html"],
+            allow_new_pages=True,
+            allow_new_sections=True,
+            anthropic_cfg=cfg,
+            model="m",
+        )
+    assert len(actions) == 1
+    assert actions[0].target_path == "architecture/auto-follow.html"
+    assert "change A" in actions[0].change.what_changed
+    assert "change B" in actions[0].change.what_changed
+    inst.run_completion.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_add_section_downgrades_to_update_section_when_sections_disabled():
     cfg = AnthropicApiConfig(api_key="sk-test")
     decision = json.dumps(
