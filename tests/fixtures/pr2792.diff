@@ -1,0 +1,1596 @@
+diff --git a/crates/governance-store/src/lib.rs b/crates/governance-store/src/lib.rs
+index 4b1ec8096c..90a0192682 100644
+--- a/crates/governance-store/src/lib.rs
++++ b/crates/governance-store/src/lib.rs
+@@ -1161,18 +1161,18 @@ fn diff_sorted_context_hashes(
+ /// based on that. The handler's downstream `handle_auto_follow_enabled`
+ /// uses `join_context`, which is itself idempotent.
+ ///
+-/// Read failures are downgraded to a warn log and `Ok(())` — the
++/// Read failures are downgraded to a warn log and `Ok(None)` — the
+ /// apply-site has already written the row and committed by the time
+ /// this is called, so a transient read failure here should not roll
+ /// back the op via the caller's `?`. The synthesized event is a
+ /// best-effort optimisation; missing it means the joiner won't
+ /// backfill pre-existing contexts in this group, but they'll still
+ /// auto-follow future ones via the `ContextRegistered` event handler.
+-pub(crate) fn emit_auto_follow_set_if_enabled(
++pub(crate) fn build_auto_follow_set_if_enabled(
+     store: &Store,
+     group_id: &ContextGroupId,
+     member: &PublicKey,
+-) -> EyreResult<()> {
++) -> EyreResult<Option<crate::op_events::OpEvent>> {
+     let value = match MembershipRepository::new(store).member_value(group_id, member) {
+         Ok(Some(v)) => v,
+         Ok(None) => {
+@@ -1181,7 +1181,7 @@ pub(crate) fn emit_auto_follow_set_if_enabled(
+                 %member,
+                 "post-apply read found no member row — skipping auto-follow emission"
+             );
+-            return Ok(());
++            return Ok(None);
+         }
+         Err(err) => {
+             // Best-effort: log and continue. See the function-level
+@@ -1192,18 +1192,19 @@ pub(crate) fn emit_auto_follow_set_if_enabled(
+                 ?err,
+                 "post-apply read failed — skipping auto-follow emission"
+             );
+-            return Ok(());
++            return Ok(None);
+         }
+     };
+     if value.auto_follow.contexts {
+-        crate::op_events::notify(crate::op_events::OpEvent::AutoFollowSet {
++        Ok(Some(crate::op_events::OpEvent::AutoFollowSet {
+             group_id: group_id.to_bytes(),
+             member: *member,
+             contexts: true,
+             subgroups: value.auto_follow.subgroups,
+-        });
++        }))
++    } else {
++        Ok(None)
+     }
+-    Ok(())
+ }
+ 
+ ///
+@@ -1218,10 +1219,14 @@ fn apply_group_op_mutations(
+     group_id: &ContextGroupId,
+     signer: &PublicKey,
+     op: &GroupOp,
+-) -> EyreResult<(bool, Option<DivergenceReport>)> {
++) -> EyreResult<(
++    bool,
++    Option<DivergenceReport>,
++    Vec<crate::op_events::OpEvent>,
++)> {
+     let mut ctx = ops::group::GroupApplyCtx::new(store, group_id, signer);
+     let handled = ops::group::dispatch(&mut ctx, op)?;
+-    Ok((handled, ctx.divergence))
++    Ok((handled, ctx.divergence, ctx.pending_events))
+ }
+ 
+ /// Apply a [`SignedGroupOp`] to the local group store (signature, monotonic nonce, admin rules).
+@@ -1282,7 +1287,8 @@ pub fn apply_local_signed_group_op(store: &Store, op: &SignedGroupOp) -> EyreRes
+         return Ok(());
+     }
+ 
+-    let (handled, _divergence) = apply_group_op_mutations(store, &group_id, &op.signer, &op.op)?;
++    let (handled, _divergence, pending_events) =
++        apply_group_op_mutations(store, &group_id, &op.signer, &op.op)?;
+     // The `_divergence` outcome is dropped on the local-apply path —
+     // this entry point is used by callers (local replay, tests) that
+     // are not the gossipsub-receive path. The reconcile-via-anchor
+@@ -1325,6 +1331,31 @@ pub fn apply_local_signed_group_op(store: &Store, op: &SignedGroupOp) -> EyreRes
+     // retrying — so idempotency is a hard requirement for any new handler.
+     if op_log_contains_content_hash(store, &group_id, &content_hash)? {
+         store_nonce_window(store, &group_id, &op.signer, &nonce_window)?;
++        // #2770 — CANONICAL note on the dropped-on-dedup tradeoff (the
++        // namespace group-op and RootOp dedup branches share it):
++        //
++        // `pending_events` is intentionally dropped here. The mutation above
++        // re-collected events on this replay, but the op is already logged, so
++        // re-emitting would fire the event again on EVERY ordinary duplicate
++        // (network re-gossip, DAG replay) — exactly the duplicate-notification
++        // behaviour this change removes. Subscribers are idempotent + lossy-
++        // tolerant, so no-re-emit is strictly more correct for the common case.
++        //
++        // Accepted edge: a crash landing BETWEEN the op-log append below and
++        // the post-append flush leaves the op logged but its events un-emitted;
++        // the restart replay reaches this branch and drops them, so a one-time
++        // signal (e.g. `TeeMemberRemoved`) is not redelivered. This is the SAME
++        // bounded gap already documented + accepted for the broadcast
++        // lagged-drop case (see `calimero-context::self_purge` run-loop `Lagged`
++        // arm): NOT a forward-secrecy hole — FS on future writes is held by the
++        // key-rotation pipeline, not this purge — the residue is only stale,
++        // already-orphaned local key material.
++        //
++        // We deliberately do NOT re-emit here to cover that window: this branch
++        // cannot distinguish a crash-recovery replay from an ordinary duplicate,
++        // so it would regress the common case. A crash-safe fix belongs on the
++        // apply path (writing the self-purge marker deterministically as every
++        // node applies), tracked as TEE-lifecycle follow-up (#2772/#2771).
+         return Ok(());
+     }
+ 
+@@ -1360,6 +1391,10 @@ pub fn apply_local_signed_group_op(store: &Store, op: &SignedGroupOp) -> EyreRes
+         &op_bytes,
+     )?;
+ 
++    // #2770: flush events only after the op-log entry is durably appended.
++    for event in pending_events {
++        crate::op_events::notify(event);
++    }
+     Ok(())
+ }
+ 
+diff --git a/crates/governance-store/src/namespace/governance.rs b/crates/governance-store/src/namespace/governance.rs
+index 4936fb1907..13f3ae9f6d 100644
+--- a/crates/governance-store/src/namespace/governance.rs
++++ b/crates/governance-store/src/namespace/governance.rs
+@@ -230,14 +230,20 @@ impl<'a> NamespaceGovernance<'a> {
+                 delta_id = %hex::encode(delta_id),
+                 "namespace governance op already applied; skipping re-apply (#2327)"
+             );
++            // #2770: this early-return is BEFORE the RootOp mutations, so a
++            // replay re-collects no events and the post-`store_operation` flush
++            // below never runs for an already-logged op — same no-re-emit-on-
++            // replay behaviour (and same accepted crash-window gap) as the
++            // canonical dedup-tradeoff note in `apply_local_signed_group_op`.
+             return Ok(ApplyNamespaceOpResult::default());
+         }
+ 
+         let mut result = ApplyNamespaceOpResult::default();
++        let mut root_events: Vec<crate::op_events::OpEvent> = Vec::new();
+ 
+         match &op.op {
+             NamespaceOp::Root(root) => {
+-                self.apply_root_op(op, root)?;
++                root_events = self.apply_root_op(op, root)?;
+ 
+                 match root {
+                     RootOp::KeyDelivery {
+@@ -424,6 +430,11 @@ impl<'a> NamespaceGovernance<'a> {
+         self.advance_dag_head(delta_id, &op.parent_op_hashes, head.next_nonce)?;
+         self.store_operation(op)?;
+ 
++        // #2770: flush RootOp-path events only after the namespace op is appended.
++        for event in root_events {
++            crate::op_events::notify(event);
++        }
++
+         Ok(result)
+     }
+ 
+@@ -1272,7 +1283,8 @@ impl<'a> NamespaceGovernance<'a> {
+             }
+         }
+ 
+-        let (handled, divergence) = apply_group_op_mutations(self.store, group_id, signer, op)?;
++        let (handled, divergence, pending_events) =
++            apply_group_op_mutations(self.store, group_id, signer, op)?;
+         if !handled {
+             tracing::debug!(
+                 ?op,
+@@ -1365,6 +1377,15 @@ impl<'a> NamespaceGovernance<'a> {
+                 super::super::local_state::persist_group_op_log_entry(
+                     self.store, group_id, next_seq, new_heads, &op_bytes,
+                 )?;
++                // #2770: flush after the op-log append; a re-received op
++                // (already_logged) drops its queued events (no re-emit). See
++                // the canonical dedup-tradeoff note in
++                // `apply_local_signed_group_op` (lib.rs) for why dropping on
++                // replay is correct and why the crash-between-append-and-flush
++                // window is an accepted, bounded gap (not an FS hole).
++                for event in pending_events {
++                    crate::op_events::notify(event);
++                }
+             }
+         }
+ 
+@@ -1402,7 +1423,11 @@ impl<'a> NamespaceGovernance<'a> {
+         Ok(divergence)
+     }
+ 
+-    fn apply_root_op(&self, op: &SignedNamespaceOp, root: &RootOp) -> EyreResult<()> {
++    fn apply_root_op(
++        &self,
++        op: &SignedNamespaceOp,
++        root: &RootOp,
++    ) -> EyreResult<Vec<crate::op_events::OpEvent>> {
+         // Staleness telemetry for root ops whose correctness depends on
+         // the namespace's own meta+member set (`root_op_commits_to_
+         // namespace_state` whitelist). Same shape as the group-op branch
+@@ -1447,9 +1472,10 @@ impl<'a> NamespaceGovernance<'a> {
+         }
+ 
+         // Per-variant logic lives in `ops/namespace/<variant>.rs` (#2481).
+-        let ctx =
++        let mut ctx =
+             super::super::ops::namespace::NamespaceApplyCtx::new(self.store, self.namespace_id);
+-        super::super::ops::namespace::dispatch_root_op(&ctx, op, root)
++        super::super::ops::namespace::dispatch_root_op(&mut ctx, op, root)?;
++        Ok(ctx.take_events())
+     }
+ }
+ 
+diff --git a/crates/governance-store/src/namespace/membership.rs b/crates/governance-store/src/namespace/membership.rs
+index 295b778517..013dc2f1b8 100644
+--- a/crates/governance-store/src/namespace/membership.rs
++++ b/crates/governance-store/src/namespace/membership.rs
+@@ -8,7 +8,7 @@ use calimero_store::Store;
+ use eyre::{bail, Result as EyreResult};
+ use sha2::Digest;
+ 
+-use super::super::emit_auto_follow_set_if_enabled;
++use super::super::build_auto_follow_set_if_enabled;
+ use super::super::membership::role_from_invited_role;
+ /// Namespace-scoped service for handling `RootOp::MemberJoined`.
+ pub struct NamespaceMembershipService<'a> {
+@@ -30,7 +30,7 @@ impl<'a> NamespaceMembershipService<'a> {
+         member: &PublicKey,
+         signed_invitation: &SignedGroupOpenInvitation,
+         joined_at: Option<u64>,
+-    ) -> EyreResult<()> {
++    ) -> EyreResult<Option<crate::op_events::OpEvent>> {
+         let inv = &signed_invitation.invitation;
+         let group_id = inv.group_id;
+ 
+@@ -58,7 +58,7 @@ impl<'a> NamespaceMembershipService<'a> {
+         // so subsequent direct-membership lookups (e.g. removal,
+         // capability writes, list_group_members) reflect their join.
+         if MembershipRepository::new(self.store).has_direct_member(&group_id, member)? {
+-            return Ok(());
++            return Ok(None);
+         }
+ 
+         let role = role_from_invited_role(inv.invited_role);
+@@ -82,8 +82,9 @@ impl<'a> NamespaceMembershipService<'a> {
+         // Open-subgroup self-joiner with `contexts: true` (the post-#2422
+         // default) would only auto-follow FUTURE contexts, not the ones
+         // already registered when they joined.
+-        emit_auto_follow_set_if_enabled(self.store, &group_id, member)?;
+-        Ok(())
++        Ok(build_auto_follow_set_if_enabled(
++            self.store, &group_id, member,
++        )?)
+     }
+ 
+     /// Validate an open invitation for the responder key-delivery path:
+diff --git a/crates/governance-store/src/ops/group/context.rs b/crates/governance-store/src/ops/group/context.rs
+index c057b50c5e..3ec7d7056a 100644
+--- a/crates/governance-store/src/ops/group/context.rs
++++ b/crates/governance-store/src/ops/group/context.rs
+@@ -37,6 +37,12 @@ pub(crate) struct GroupApplyCtx<'a> {
+     /// pipeline; the node-side handler routes it to the
+     /// reconcile-via-anchor path.
+     pub(crate) divergence: Option<DivergenceReport>,
++    /// Op-events queued during apply, flushed by the caller AFTER the
++    /// op-log entry is persisted (see #2770). Mirrors `divergence`'s
++    /// out-parameter pattern. Handlers MUST `queue_event` rather than
++    /// calling `op_events::notify` directly, or they reintroduce the
++    /// emit-before-persist race.
++    pub(crate) pending_events: Vec<crate::op_events::OpEvent>,
+ }
+ 
+ impl<'a> GroupApplyCtx<'a> {
+@@ -54,9 +60,14 @@ impl<'a> GroupApplyCtx<'a> {
+             settings: GroupSettingsService::new(store, *group_id),
+             context_registration: ContextRegistrationService::new(store, *group_id),
+             divergence: None,
++            pending_events: Vec::new(),
+         }
+     }
+ 
++    pub(crate) fn queue_event(&mut self, event: crate::op_events::OpEvent) {
++        self.pending_events.push(event);
++    }
++
+     pub(crate) fn store(&self) -> &'a Store {
+         self.store
+     }
+diff --git a/crates/governance-store/src/ops/group/context_registered.rs b/crates/governance-store/src/ops/group/context_registered.rs
+index 8dee6d6b23..2d64ca50ef 100644
+--- a/crates/governance-store/src/ops/group/context_registered.rs
++++ b/crates/governance-store/src/ops/group/context_registered.rs
+@@ -27,7 +27,7 @@ pub(crate) fn apply(
+     // propagation) that the context→group mapping has just been
+     // persisted. See `crate::registration_notify` for rationale.
+     crate::registration_notify::notify(*context_id);
+-    crate::op_events::notify(crate::op_events::OpEvent::ContextRegistered {
++    ctx.queue_event(crate::op_events::OpEvent::ContextRegistered {
+         group_id: group_id.to_bytes(),
+         context_id: *context_id,
+     });
+diff --git a/crates/governance-store/src/ops/group/member_added.rs b/crates/governance-store/src/ops/group/member_added.rs
+index 4e118c5d32..d5f9249568 100644
+--- a/crates/governance-store/src/ops/group/member_added.rs
++++ b/crates/governance-store/src/ops/group/member_added.rs
+@@ -1,8 +1,8 @@
+ //! `GroupOp::MemberAdded` apply handler. Extracted from
+ //! `apply_group_op_mutations` in #2304.
+ 
++use super::super::super::build_auto_follow_set_if_enabled;
+ use super::super::super::contexts::restore_member_context_identities;
+-use super::super::super::emit_auto_follow_set_if_enabled;
+ use super::context::GroupApplyCtx;
+ use crate::{
+     cascade_remove_member_from_group_tree, DenyListRepository, MembershipError,
+@@ -40,7 +40,7 @@ pub(crate) fn apply(
+     // no-op. Idempotent on first-time adds: the joiner's later
+     // `join_context` sees an existing row and skips.
+     restore_member_context_identities(store, group_id, member)?;
+-    crate::op_events::notify(crate::op_events::OpEvent::MemberAdded {
++    ctx.queue_event(crate::op_events::OpEvent::MemberAdded {
+         group_id: group_id.to_bytes(),
+         member: *member,
+         role: role.clone(),
+@@ -56,6 +56,8 @@ pub(crate) fn apply(
+     // The handler short-circuits via `NotForSelf` on every node
+     // except the joiner, so the cascade only fires once per
+     // membership change.
+-    emit_auto_follow_set_if_enabled(store, group_id, member)?;
++    if let Some(event) = build_auto_follow_set_if_enabled(ctx.store(), ctx.group_id(), member)? {
++        ctx.queue_event(event);
++    }
+     Ok(())
+ }
+diff --git a/crates/governance-store/src/ops/group/member_joined_via_tee_attestation.rs b/crates/governance-store/src/ops/group/member_joined_via_tee_attestation.rs
+index c5a1a2f3cc..cba98c1419 100644
+--- a/crates/governance-store/src/ops/group/member_joined_via_tee_attestation.rs
++++ b/crates/governance-store/src/ops/group/member_joined_via_tee_attestation.rs
+@@ -1,7 +1,7 @@
+ //! `GroupOp::MemberJoinedViaTeeAttestation` apply handler. Extracted from
+ //! `apply_group_op_mutations` in #2304.
+ 
+-use super::super::super::emit_auto_follow_set_if_enabled;
++use super::super::super::build_auto_follow_set_if_enabled;
+ use super::context::GroupApplyCtx;
+ use crate::{DenyListRepository, MembershipError};
+ use calimero_primitives::context::GroupMemberRole;
+@@ -40,7 +40,7 @@ pub(crate) fn apply(
+     // Same rationale as `MemberAdded`: a TEE rejoining after a
+     // prior removal should have their deny-list entry cleared.
+     DenyListRepository::new(store).clear(group_id, member)?;
+-    crate::op_events::notify(crate::op_events::OpEvent::TeeMemberAdmitted {
++    ctx.queue_event(crate::op_events::OpEvent::TeeMemberAdmitted {
+         group_id: group_id.to_bytes(),
+         member: *member,
+     });
+@@ -53,6 +53,8 @@ pub(crate) fn apply(
+     // creates a second cascade — both join_context attempts are
+     // idempotent (see auto_follow.rs:101-107), so the only cost
+     // is two rate-limiter tokens. Documented and accepted.
+-    emit_auto_follow_set_if_enabled(store, group_id, member)?;
++    if let Some(event) = build_auto_follow_set_if_enabled(ctx.store(), ctx.group_id(), member)? {
++        ctx.queue_event(event);
++    }
+     Ok(())
+ }
+diff --git a/crates/governance-store/src/ops/group/member_left.rs b/crates/governance-store/src/ops/group/member_left.rs
+index 596f3be4e0..4ec19d2a21 100644
+--- a/crates/governance-store/src/ops/group/member_left.rs
++++ b/crates/governance-store/src/ops/group/member_left.rs
+@@ -101,12 +101,12 @@ pub(crate) fn apply(
+             // state-delta traffic on those topics is dropped
+             // until they re-join.
+             DenyListRepository::new(store).mark(sub, member)?;
+-            crate::op_events::notify(crate::op_events::OpEvent::MemberRemoved {
++            ctx.queue_event(crate::op_events::OpEvent::MemberRemoved {
+                 group_id: sub.to_bytes(),
+                 member: *member,
+             });
+             if *role == GroupMemberRole::ReadOnlyTee {
+-                crate::op_events::notify(crate::op_events::OpEvent::TeeMemberRemoved {
++                ctx.queue_event(crate::op_events::OpEvent::TeeMemberRemoved {
+                     group_id: sub.to_bytes(),
+                     member: *member,
+                 });
+@@ -156,14 +156,14 @@ pub(crate) fn apply(
+         expected_group_state_hash,
+         expected_context_state_hashes,
+     );
+-    crate::op_events::notify(crate::op_events::OpEvent::MemberRemoved {
++    ctx.queue_event(crate::op_events::OpEvent::MemberRemoved {
+         group_id: group_id.to_bytes(),
+         member: *member,
+     });
+     // Role-scoped follow-up for the root-group removal. See the
+     // matching block in `member_removed.rs` for rationale.
+     if leaver_role == GroupMemberRole::ReadOnlyTee {
+-        crate::op_events::notify(crate::op_events::OpEvent::TeeMemberRemoved {
++        ctx.queue_event(crate::op_events::OpEvent::TeeMemberRemoved {
+             group_id: group_id.to_bytes(),
+             member: *member,
+         });
+diff --git a/crates/governance-store/src/ops/group/member_removed.rs b/crates/governance-store/src/ops/group/member_removed.rs
+index 57bc7c4376..e2be5ba33f 100644
+--- a/crates/governance-store/src/ops/group/member_removed.rs
++++ b/crates/governance-store/src/ops/group/member_removed.rs
+@@ -104,7 +104,7 @@ pub(crate) fn apply(
+         expected_group_state_hash,
+         expected_context_state_hashes,
+     );
+-    crate::op_events::notify(crate::op_events::OpEvent::MemberRemoved {
++    ctx.queue_event(crate::op_events::OpEvent::MemberRemoved {
+         group_id: group_id.to_bytes(),
+         member: *member,
+     });
+@@ -113,7 +113,7 @@ pub(crate) fn apply(
+     // soft-leave path deliberately skips. Non-TEE removals stay
+     // soft-leave so rejoin/keyshare flows can re-use the local rows.
+     if removed_role == Some(GroupMemberRole::ReadOnlyTee) {
+-        crate::op_events::notify(crate::op_events::OpEvent::TeeMemberRemoved {
++        ctx.queue_event(crate::op_events::OpEvent::TeeMemberRemoved {
+             group_id: group_id.to_bytes(),
+             member: *member,
+         });
+diff --git a/crates/governance-store/src/ops/group/member_set_auto_follow.rs b/crates/governance-store/src/ops/group/member_set_auto_follow.rs
+index 4b3262d6d7..4b835a1321 100644
+--- a/crates/governance-store/src/ops/group/member_set_auto_follow.rs
++++ b/crates/governance-store/src/ops/group/member_set_auto_follow.rs
+@@ -37,7 +37,7 @@ pub(crate) fn apply(
+         subgroups: *auto_follow_subgroups,
+     };
+     MembershipRepository::new(store).set_auto_follow(group_id, target, flags)?;
+-    crate::op_events::notify(crate::op_events::OpEvent::AutoFollowSet {
++    ctx.queue_event(crate::op_events::OpEvent::AutoFollowSet {
+         group_id: group_id.to_bytes(),
+         member: *target,
+         contexts: *auto_follow_contexts,
+diff --git a/crates/governance-store/src/ops/namespace.rs b/crates/governance-store/src/ops/namespace.rs
+index 9388f6fc1d..ea59e9f3e3 100644
+--- a/crates/governance-store/src/ops/namespace.rs
++++ b/crates/governance-store/src/ops/namespace.rs
+@@ -31,7 +31,7 @@ use eyre::Result as EyreResult;
+ /// Apply a `RootOp` against `ctx`. Thin router — variant-specific
+ /// logic lives in the per-op submodules.
+ pub(crate) fn dispatch_root_op(
+-    ctx: &NamespaceApplyCtx<'_>,
++    ctx: &mut NamespaceApplyCtx<'_>,
+     op: &SignedNamespaceOp,
+     root: &RootOp,
+ ) -> EyreResult<()> {
+diff --git a/crates/governance-store/src/ops/namespace/admin_changed.rs b/crates/governance-store/src/ops/namespace/admin_changed.rs
+index 2d6c33f4f4..13eecd7e8a 100644
+--- a/crates/governance-store/src/ops/namespace/admin_changed.rs
++++ b/crates/governance-store/src/ops/namespace/admin_changed.rs
+@@ -9,7 +9,7 @@ use calimero_primitives::identity::PublicKey;
+ use eyre::Result as EyreResult;
+ 
+ pub(crate) fn apply(
+-    ctx: &NamespaceApplyCtx<'_>,
++    ctx: &mut NamespaceApplyCtx<'_>,
+     op: &SignedNamespaceOp,
+     new_admin: PublicKey,
+ ) -> EyreResult<()> {
+diff --git a/crates/governance-store/src/ops/namespace/context.rs b/crates/governance-store/src/ops/namespace/context.rs
+index e73ae5d64c..51ddd5b5b4 100644
+--- a/crates/governance-store/src/ops/namespace/context.rs
++++ b/crates/governance-store/src/ops/namespace/context.rs
+@@ -16,6 +16,11 @@ use eyre::{bail, Result as EyreResult};
+ pub(crate) struct NamespaceApplyCtx<'a> {
+     store: &'a Store,
+     namespace_id: [u8; 32],
++    /// Op-events queued during apply, flushed AFTER the namespace op-log
++    /// entry is persisted (#2770). Handlers MUST queue_event rather than
++    /// calling op_events::notify directly, or they reintroduce the
++    /// emit-before-persist race.
++    pending_events: Vec<crate::op_events::OpEvent>,
+ }
+ 
+ impl<'a> NamespaceApplyCtx<'a> {
+@@ -23,6 +28,7 @@ impl<'a> NamespaceApplyCtx<'a> {
+         Self {
+             store,
+             namespace_id,
++            pending_events: Vec::new(),
+         }
+     }
+ 
+@@ -34,6 +40,17 @@ impl<'a> NamespaceApplyCtx<'a> {
+         self.namespace_id
+     }
+ 
++    pub(crate) fn queue_event(&mut self, event: crate::op_events::OpEvent) {
++        self.pending_events.push(event);
++    }
++
++    /// Drains and returns all queued events, leaving the internal buffer
++    /// empty (destructive). Calling this a second time returns an empty
++    /// `Vec` — the post-persist flush must `take` exactly once.
++    pub(crate) fn take_events(&mut self) -> Vec<crate::op_events::OpEvent> {
++        std::mem::take(&mut self.pending_events)
++    }
++
+     /// Convenience: assert `signer` is a namespace-root admin or
+     /// bail with `MembershipError::NotAdmin`. Hoisted from
+     /// `NamespaceGovernance::require_namespace_admin` so handlers
+diff --git a/crates/governance-store/src/ops/namespace/group_created.rs b/crates/governance-store/src/ops/namespace/group_created.rs
+index 8d25b020f9..53c059160d 100644
+--- a/crates/governance-store/src/ops/namespace/group_created.rs
++++ b/crates/governance-store/src/ops/namespace/group_created.rs
+@@ -2,7 +2,7 @@
+ //! `NamespaceGovernance::execute_group_created` in #2481.
+ 
+ use super::context::NamespaceApplyCtx;
+-use crate::op_events::{notify as notify_op_event, OpEvent};
++use crate::op_events::OpEvent;
+ use crate::{
+     ApplyError, GroupCreatedRejection, MembershipRepository, MetaRepository, NamespaceError,
+ };
+@@ -12,7 +12,7 @@ use calimero_primitives::context::GroupMemberRole;
+ use eyre::{bail, Result as EyreResult};
+ 
+ pub(crate) fn apply(
+-    ctx: &NamespaceApplyCtx<'_>,
++    ctx: &mut NamespaceApplyCtx<'_>,
+     op: &SignedNamespaceOp,
+     group_id: [u8; 32],
+     parent_id: [u8; 32],
+@@ -118,7 +118,7 @@ pub(crate) fn apply(
+     }
+     MembershipRepository::new(store).add_member(&gid, &op.signer, GroupMemberRole::Admin)?;
+ 
+-    notify_op_event(OpEvent::SubgroupCreated {
++    ctx.queue_event(OpEvent::SubgroupCreated {
+         namespace_id,
+         parent_group_id: parent_id,
+         child_group_id: group_id,
+diff --git a/crates/governance-store/src/ops/namespace/group_deleted.rs b/crates/governance-store/src/ops/namespace/group_deleted.rs
+index d0df68125a..cb06fc9cd5 100644
+--- a/crates/governance-store/src/ops/namespace/group_deleted.rs
++++ b/crates/governance-store/src/ops/namespace/group_deleted.rs
+@@ -12,7 +12,7 @@ use calimero_context_config::types::ContextGroupId;
+ use eyre::Result as EyreResult;
+ 
+ pub(crate) fn apply(
+-    ctx: &NamespaceApplyCtx<'_>,
++    ctx: &mut NamespaceApplyCtx<'_>,
+     op: &SignedNamespaceOp,
+     root_group_id: [u8; 32],
+     cascade_group_ids: &[[u8; 32]],
+diff --git a/crates/governance-store/src/ops/namespace/group_reparented.rs b/crates/governance-store/src/ops/namespace/group_reparented.rs
+index 5b97ab0d6e..19a34316cf 100644
+--- a/crates/governance-store/src/ops/namespace/group_reparented.rs
++++ b/crates/governance-store/src/ops/namespace/group_reparented.rs
+@@ -2,14 +2,14 @@
+ //! `NamespaceGovernance::execute_group_reparented` in #2481.
+ 
+ use super::context::NamespaceApplyCtx;
+-use crate::op_events::{notify as notify_op_event, OpEvent};
++use crate::op_events::OpEvent;
+ use crate::{NamespaceRepository, ReparentOutcome};
+ use calimero_context_client::local_governance::SignedNamespaceOp;
+ use calimero_context_config::types::ContextGroupId;
+ use eyre::Result as EyreResult;
+ 
+ pub(crate) fn apply(
+-    ctx: &NamespaceApplyCtx<'_>,
++    ctx: &mut NamespaceApplyCtx<'_>,
+     op: &SignedNamespaceOp,
+     child_group_id: [u8; 32],
+     new_parent_id: [u8; 32],
+@@ -19,8 +19,9 @@ pub(crate) fn apply(
+     let new_parent = ContextGroupId::from(new_parent_id);
+     match NamespaceRepository::new(ctx.store()).reparent(&child, &new_parent)? {
+         ReparentOutcome::Reparented { old_parent } => {
+-            notify_op_event(OpEvent::SubgroupReparented {
+-                namespace_id: ctx.namespace_id(),
++            let ns_id = ctx.namespace_id();
++            ctx.queue_event(OpEvent::SubgroupReparented {
++                namespace_id: ns_id,
+                 old_parent_group_id: old_parent.to_bytes(),
+                 new_parent_group_id: new_parent_id,
+                 child_group_id,
+diff --git a/crates/governance-store/src/ops/namespace/member_joined.rs b/crates/governance-store/src/ops/namespace/member_joined.rs
+index aeab655af2..562d8c3f98 100644
+--- a/crates/governance-store/src/ops/namespace/member_joined.rs
++++ b/crates/governance-store/src/ops/namespace/member_joined.rs
+@@ -9,16 +9,16 @@ use calimero_primitives::identity::PublicKey;
+ use eyre::Result as EyreResult;
+ 
+ pub(crate) fn apply(
+-    ctx: &NamespaceApplyCtx<'_>,
++    ctx: &mut NamespaceApplyCtx<'_>,
+     op: &SignedNamespaceOp,
+     member: &PublicKey,
+     signed_invitation: &SignedGroupOpenInvitation,
+     joined_at: Option<u64>,
+ ) -> EyreResult<()> {
+-    NamespaceMembershipService::new(ctx.store(), ctx.namespace_id()).apply_member_joined(
+-        &op.signer,
+-        member,
+-        signed_invitation,
+-        joined_at,
+-    )
++    let event = NamespaceMembershipService::new(ctx.store(), ctx.namespace_id())
++        .apply_member_joined(&op.signer, member, signed_invitation, joined_at)?;
++    if let Some(event) = event {
++        ctx.queue_event(event);
++    }
++    Ok(())
+ }
+diff --git a/crates/governance-store/src/ops/namespace/member_joined_open.rs b/crates/governance-store/src/ops/namespace/member_joined_open.rs
+index 7aa7b1ea81..a6dfca5a80 100644
+--- a/crates/governance-store/src/ops/namespace/member_joined_open.rs
++++ b/crates/governance-store/src/ops/namespace/member_joined_open.rs
+@@ -23,7 +23,7 @@ use calimero_primitives::identity::PublicKey;
+ use eyre::Result as EyreResult;
+ 
+ pub(crate) fn apply(
+-    ctx: &NamespaceApplyCtx<'_>,
++    ctx: &mut NamespaceApplyCtx<'_>,
+     op: &SignedNamespaceOp,
+     member: PublicKey,
+     group_id: [u8; 32],
+diff --git a/crates/governance-store/src/ops/namespace/policy_updated.rs b/crates/governance-store/src/ops/namespace/policy_updated.rs
+index b63cc77cd7..3986290c91 100644
+--- a/crates/governance-store/src/ops/namespace/policy_updated.rs
++++ b/crates/governance-store/src/ops/namespace/policy_updated.rs
+@@ -8,7 +8,7 @@ use super::context::NamespaceApplyCtx;
+ use calimero_context_client::local_governance::SignedNamespaceOp;
+ use eyre::Result as EyreResult;
+ 
+-pub(crate) fn apply(ctx: &NamespaceApplyCtx<'_>, op: &SignedNamespaceOp) -> EyreResult<()> {
++pub(crate) fn apply(ctx: &mut NamespaceApplyCtx<'_>, op: &SignedNamespaceOp) -> EyreResult<()> {
+     ctx.require_namespace_admin(&op.signer)?;
+     tracing::debug!("PolicyUpdated: stored in DAG log, no additional state mutation");
+     Ok(())
+diff --git a/crates/governance-store/src/tests.rs b/crates/governance-store/src/tests.rs
+index f084cfcf01..7f59012ce3 100644
+--- a/crates/governance-store/src/tests.rs
++++ b/crates/governance-store/src/tests.rs
+@@ -5137,7 +5137,8 @@ fn apply_group_op_mutations_surfaces_divergence_on_hash_mismatch() {
+         expected_context_state_hashes: Vec::new(),
+     };
+ 
+-    let (handled, divergence) = apply_group_op_mutations(&store, &gid, &admin, &op).unwrap();
++    let (handled, divergence, _pending_events) =
++        apply_group_op_mutations(&store, &gid, &admin, &op).unwrap();
+     assert!(handled, "MemberRemoved should be handled");
+     let report = divergence.expect("hash mismatch must produce a DivergenceReport");
+     assert!(
+@@ -5184,7 +5185,8 @@ fn apply_group_op_mutations_no_divergence_on_matching_hash() {
+         expected_context_state_hashes: Vec::new(),
+     };
+ 
+-    let (handled, divergence) = apply_group_op_mutations(&store, &gid, &admin, &op).unwrap();
++    let (handled, divergence, _pending_events) =
++        apply_group_op_mutations(&store, &gid, &admin, &op).unwrap();
+     assert!(handled);
+     assert!(
+         divergence.is_none(),
+@@ -5749,6 +5751,340 @@ mod auto_follow_tests {
+             "explicit opt-out via SetMemberAutoFollow must stick"
+         );
+     }
++
++    /// #2770: when `MemberAdded` fires, the op-log entry must already be
++    /// persisted. Before the post-persist drain, the handler emitted the
++    /// event BEFORE the op-log append, so a subscriber reacting to the
++    /// event could read a log that did not yet contain the op.
++    ///
++    /// The event is delivered on a process-wide `tokio::broadcast`, and
++    /// `apply_local_signed_group_op` sends synchronously. To catch the
++    /// ordering (not merely the post-apply steady state), a dedicated
++    /// observer thread parks on `recv()` and snapshots the op-log THE
++    /// MOMENT the event arrives — concurrently with the apply call still
++    /// running on this thread. Pre-fix (emit-before-persist) the observer
++    /// wakes during the gap between `notify` and `persist_*` and reads a
++    /// log that does NOT yet contain the op; post-fix the drain runs only
++    /// after the append, so the observer always reads `true`.
++    ///
++    /// NOTE: this is a DETERMINISTIC GREEN (proves the fixed persist-then-notify
++    /// ordering) but only a BEST-EFFORT RED (regression detection) — see the
++    /// `Barrier` comment in the body for why a fully deterministic RED would need
++    /// a test-only sync hook in the apply hot path, which we deliberately omit.
++    #[test]
++    fn member_added_event_fires_after_op_log_append() {
++        use std::sync::{Arc, Barrier};
++
++        use crate::op_events::{self, OpEvent};
++
++        let mut rng = OsRng;
++        let (store, gid, gid_bytes, admin_sk, _existing_member_sk) = seed(&mut rng);
++
++        // Subscribe BEFORE spawning the observer / applying.
++        let mut rx = op_events::subscribe();
++
++        let new_member_sk = PrivateKey::random(&mut rng);
++        let new_member_pk = new_member_sk.public_key();
++
++        let op = SignedGroupOp::sign(
++            &admin_sk,
++            gid_bytes,
++            vec![],
++            [0u8; 32],
++            1,
++            GroupOp::MemberAdded {
++                member: new_member_pk,
++                role: GroupMemberRole::Member,
++            },
++        )
++        .unwrap();
++        let content_hash = op.content_hash().unwrap();
++
++        // Observer thread: blocks on `recv()`, then snapshots whether the
++        // op-log already contains our op at the instant the event fires.
++        // `Store` is `Clone` (shared handle to the same backing DB), so the
++        // snapshot reads the same state the applying thread is writing.
++        let observer_store = store.clone();
++        // Rendezvous: both threads wait here so the observer enters its
++        // `try_recv` spin loop concurrently with the applier, not after the
++        // applier has finished (the window the old pre-loop ready-signal left
++        // open).
++        //
++        // RED/GREEN strength: for the FIXED code (persist-then-notify) this is a
++        // DETERMINISTIC green — the event can only be observed after the append,
++        // so the snapshot is always `true` regardless of thread timing. As a RED
++        // regression-catcher it is best-effort: in principle a regression
++        // (notify-then-persist) is only caught if the observer reads the event
++        // inside the notify→persist window. In practice that window is reliably
++        // hit because after the barrier the applier must run the membership
++        // mutations AND the op-log append (substantial store work) before it
++        // reaches `notify`, whereas the observer only needs to enter a tight
++        // spin loop — orders of magnitude less work — so it is already polling
++        // long before the event fires. A FULLY deterministic RED would need a
++        // synchronization point injected BETWEEN the append and the flush in the
++        // production apply path; we deliberately do not add a test-only hook to
++        // that hot path. The structural guarantee is the persist-then-flush
++        // ordering visible in `apply_local_signed_group_op` itself.
++        let barrier = Arc::new(Barrier::new(2));
++        let observer_barrier = Arc::clone(&barrier);
++        let observer = std::thread::spawn(move || {
++            observer_barrier.wait();
++            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
++            loop {
++                if std::time::Instant::now() >= deadline {
++                    return None;
++                }
++                match rx.try_recv() {
++                    Ok(OpEvent::MemberAdded {
++                        group_id, member, ..
++                    }) if group_id == gid_bytes && member == new_member_pk => {
++                        return Some(
++                            crate::local_state::op_log_contains_content_hash(
++                                &observer_store,
++                                &gid,
++                                &content_hash,
++                            )
++                            .unwrap(),
++                        );
++                    }
++                    Ok(_) => {} // unrelated events from parallel tests
++                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
++                        // `yield_now` (not `spin_loop`): poll tightly but let the
++                        // scheduler run the applier thread, so a single-core or
++                        // cooperative scheduler can't starve it into the 10s
++                        // deadline. Still polls fast enough to snapshot close to
++                        // the broadcast send.
++                        std::thread::yield_now();
++                    }
++                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
++                        // Capacity-induced miss (parallel tests flooded the
++                        // channel). Fail loudly rather than returning `None`,
++                        // which the caller would misreport as "event never
++                        // fired" and bury the real cause.
++                        panic!(
++                            "observer lagged by {n} events before MemberAdded — test inconclusive"
++                        );
++                    }
++                    Err(tokio::sync::broadcast::error::TryRecvError::Closed) => return None,
++                }
++            }
++        });
++
++        // Release the observer and immediately apply: the observer is now
++        // spinning on `try_recv`, racing the applier's persist.
++        barrier.wait();
++        apply_local_signed_group_op(&store, &op).unwrap();
++
++        let log_contained_at_emit = observer
++            .join()
++            .unwrap()
++            .expect("MemberAdded event should have fired for the new joiner");
++        assert!(
++            log_contained_at_emit,
++            "op-log entry must be persisted before MemberAdded fires (#2770)"
++        );
++    }
++
++    /// #2770: re-applying an already-logged op must NOT re-fire its event.
++    /// The queued events are dropped on the content-hash dedup early-return.
++    #[test]
++    fn replayed_group_op_does_not_re_emit() {
++        use crate::op_events::{self, OpEvent};
++
++        let mut rng = OsRng;
++        let (store, _gid, gid_bytes, admin_sk, _existing_member_sk) = seed(&mut rng);
++
++        let new_member_sk = PrivateKey::random(&mut rng);
++        let new_member_pk = new_member_sk.public_key();
++
++        let op = SignedGroupOp::sign(
++            &admin_sk,
++            gid_bytes,
++            vec![],
++            [0u8; 32],
++            1,
++            GroupOp::MemberAdded {
++                member: new_member_pk,
++                role: GroupMemberRole::Member,
++            },
++        )
++        .unwrap();
++
++        // Subscribe BEFORE the first apply so the receiver is in place ahead of
++        // every emit — there is no subscribe-to-apply gap a parallel-test flood
++        // could exploit. We then count how many `MemberAdded` events for
++        // (gid, member) appear across BOTH applies: the first must emit exactly
++        // one, the replay (already-logged) must emit none, so the total is 1.
++        // This is stronger than asserting absence — it doubles as a POSITIVE
++        // control (an event mechanism that silently fired zero times would fail
++        // here too) — and it is timing-independent because both applies and
++        // `op_events::notify` are synchronous on THIS thread, so all events are
++        // buffered before the single drain below.
++        let mut rx = op_events::subscribe();
++        apply_local_signed_group_op(&store, &op).unwrap(); // first apply emits
++        apply_local_signed_group_op(&store, &op).unwrap(); // replay (already logged)
++
++        let mut member_added = 0usize;
++        loop {
++            match rx.try_recv() {
++                Ok(OpEvent::MemberAdded {
++                    group_id, member, ..
++                }) if group_id == gid_bytes && member == new_member_pk => member_added += 1,
++                Ok(_) => {} // unrelated events from parallel tests
++                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
++                    // A capacity flood (1024) from parallel tests could drop the
++                    // events we count — fail loudly rather than under-counting
++                    // into a false pass.
++                    panic!("drain lagged by {n} events — replay re-emit check inconclusive");
++                }
++                Err(_) => break, // Empty (drained) or Closed — nothing more to read
++            }
++        }
++        assert_eq!(
++            member_added, 1,
++            "first apply must emit MemberAdded exactly once and the replay must \
++             not re-emit it (#2770)"
++        );
++    }
++
++    /// #2770 (namespace RootOp path): when `SubgroupCreated` fires, the
++    /// namespace op-log entry for the driving `RootOp::GroupCreated` must
++    /// already be persisted. Same concurrent-observer technique as
++    /// `member_added_event_fires_after_op_log_append`, but on the
++    /// namespace-apply path (`NamespaceGovernance::apply_signed_op` →
++    /// `dispatch_root_op` → `group_created::apply`): a dedicated observer
++    /// thread parks on `recv()` and snapshots
++    /// `NamespaceOpLogService::contains_op(delta_id)` the instant the
++    /// event arrives — concurrently with the apply still running. Pre-fix
++    /// (the dormant direct `notify_op_event` in `group_created::apply`)
++    /// the observer would wake before `store_operation`, reading a log
++    /// that does NOT yet contain the op; post-fix the events are drained
++    /// only after the namespace op is appended, so the snapshot is always
++    /// `true`.
++    ///
++    /// NOTE: deterministic GREEN, best-effort RED — same characterization as
++    /// `member_added_event_fires_after_op_log_append` (see its body comment).
++    #[test]
++    fn subgroup_created_event_fires_after_namespace_op_persist() {
++        use std::sync::{Arc, Barrier};
++
++        use calimero_context_client::local_governance::{NamespaceOp, RootOp, SignedNamespaceOp};
++
++        use super::NamespaceGovernance;
++        use crate::op_events::{self, OpEvent};
++        use crate::NamespaceOpLogService;
++
++        let mut rng = OsRng;
++        let admin_sk = PrivateKey::random(&mut rng);
++        let admin_sk_bytes: [u8; 32] = *admin_sk;
++        let admin_pk = admin_sk.public_key();
++
++        let ns_id = [0xA0u8; 32];
++        let ns_gid = calimero_context_config::types::ContextGroupId::from(ns_id);
++        let new_group_id = [0xCCu8; 32];
++
++        // Minimal namespace root: admin meta + admin membership + the
++        // local namespace identity (so the originator-style apply path is
++        // exercised end to end).
++        let store = test_store();
++        MetaRepository::new(&store)
++            .save(&ns_gid, &sample_meta_with_admin(admin_pk))
++            .unwrap();
++        MembershipRepository::new(&store)
++            .add_member(&ns_gid, &admin_pk, GroupMemberRole::Admin)
++            .unwrap();
++        NamespaceRepository::new(&store)
++            .store_identity(&ns_gid, &admin_pk, &admin_sk_bytes, &[0u8; 32])
++            .unwrap();
++
++        let op = SignedNamespaceOp::sign(
++            &admin_sk,
++            ns_id,
++            vec![],
++            [0u8; 32],
++            1,
++            NamespaceOp::Root(RootOp::GroupCreated {
++                group_id: new_group_id,
++                parent_id: ns_id,
++            }),
++        )
++        .unwrap();
++        // `delta_id` is the op's content hash — the key the namespace
++        // op-log is indexed by (see `NamespaceOpLogService::store_signed_operation`).
++        let delta_id = op.content_hash().unwrap();
++
++        // Subscribe BEFORE spawning the observer / applying.
++        let mut rx = op_events::subscribe();
++
++        // Observer thread: blocks on `recv()`, then snapshots whether the
++        // namespace op-log already contains the op at the instant the
++        // `SubgroupCreated` event fires. `Store` is `Clone` (shared handle
++        // to the same backing DB), so the snapshot reads the same state
++        // the applying thread is writing.
++        let observer_store = store.clone();
++        // Rendezvous: observer enters its `try_recv` spin loop concurrently with
++        // the applier. Same RED/GREEN characterization as the group-path test
++        // (`member_added_event_fires_after_op_log_append`): deterministic GREEN
++        // for the fixed persist-then-notify ordering, best-effort RED for a
++        // regression (the applier runs the RootOp mutations + `store_operation`
++        // before `notify`, so the observer is reliably spinning first); a fully
++        // deterministic RED would need a hot-path test hook we deliberately omit.
++        let barrier = Arc::new(Barrier::new(2));
++        let observer_barrier = Arc::clone(&barrier);
++        let observer = std::thread::spawn(move || {
++            observer_barrier.wait();
++            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
++            loop {
++                if std::time::Instant::now() >= deadline {
++                    return None;
++                }
++                match rx.try_recv() {
++                    Ok(OpEvent::SubgroupCreated {
++                        namespace_id,
++                        parent_group_id,
++                        child_group_id,
++                    }) if namespace_id == ns_id
++                        && parent_group_id == ns_id
++                        && child_group_id == new_group_id =>
++                    {
++                        return Some(
++                            NamespaceOpLogService::new(&observer_store, ns_id)
++                                .contains_op(delta_id)
++                                .unwrap(),
++                        );
++                    }
++                    Ok(_) => {} // unrelated events from parallel tests
++                    Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
++                        // `yield_now` (not `spin_loop`): poll tightly but let the
++                        // scheduler run the applier thread (single-core / coop
++                        // scheduler safety). Still snapshots close to the send.
++                        std::thread::yield_now();
++                    }
++                    Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
++                        // Capacity-induced miss: fail loudly rather than
++                        // misreporting it as "event never fired".
++                        panic!("observer lagged by {n} events before SubgroupCreated — test inconclusive");
++                    }
++                    Err(tokio::sync::broadcast::error::TryRecvError::Closed) => return None,
++                }
++            }
++        });
++
++        // Release the observer and immediately apply.
++        barrier.wait();
++        NamespaceGovernance::new(&store, ns_id)
++            .apply_signed_op(&op)
++            .unwrap();
++
++        let log_contained_at_emit = observer
++            .join()
++            .unwrap()
++            .expect("SubgroupCreated event should have fired for the new subgroup");
++        assert!(
++            log_contained_at_emit,
++            "namespace op-log entry must be persisted before SubgroupCreated fires (#2770)"
++        );
++    }
+ }
+ 
+ // ---------------------------------------------------------------------
+diff --git a/docs/superpowers/plans/2026-06-17-emit-op-events-after-persist.md b/docs/superpowers/plans/2026-06-17-emit-op-events-after-persist.md
+new file mode 100644
+index 0000000000..553c7933d9
+--- /dev/null
++++ b/docs/superpowers/plans/2026-06-17-emit-op-events-after-persist.md
+@@ -0,0 +1,480 @@
++# Emit OpEvents After Op-Log Persist (#2770) — Implementation Plan (PR-1)
++
++> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
++
++**Goal:** Stop emitting governance `OpEvent`s before the op-log entry is persisted — collect events during apply and flush them only after the op-log append succeeds, on both the group-op path and the namespace RootOp path.
++
++**Architecture:** Mirror the existing `GroupApplyCtx.divergence` out-parameter: each apply context grows a `pending_events: Vec<OpEvent>` sink + a `queue_event` helper. Per-op handlers push instead of calling `op_events::notify`. After the op-log persists (append branch only), the apply functions drain the sink and notify. Incremental + green-throughout: an unconverted site keeps emitting before persist (pre-existing behavior), a converted site emits after — both still fire, so the tree compiles and existing tests pass at every step.
++
++**Tech Stack:** Rust (toolchain 1.88.0 — fmt via `rustup run 1.88.0 cargo fmt`), `calimero-governance-store`, `tokio::sync::broadcast` op-events, `cargo test`.
++
++**Scope guardrails:**
++- Spec: `docs/superpowers/specs/2026-06-17-tee-lifecycle-correctness-design.md` (PR-1).
++- `GroupKeyDelivered` (`governance.rs:1026-1032`) stays a direct `notify_op_event` — off the op-append path, latency-sensitive `join_group` wake. **Do not touch it.**
++- Drain **only on the append branch**, never on the content-hash dedup early-return (that's the replay path — stops replay re-emits, the intended net-positive semantic change).
++- Keep emit **inside** the synchronous apply call (drain before the apply fn returns) — do NOT move emit to the caller, or the subscribe-then-apply-then-drain tests break.
++- Out of scope: removing the `tee_subgroup_admit` wake-then-reread (follow-up once PR-1 + #2772 land); PR-2 (#2726), PR-3 (#2771).
++- No AI attribution in commits. No published-surface change (`calimero-server-primitives`/`calimero-tee-attestation`), no mero-tee rev bump.
++
++---
++
++## File Structure
++
++| File | Change | Responsibility |
++|---|---|---|
++| `crates/governance-store/src/ops/group/context.rs` | Modify | `GroupApplyCtx`: add `pending_events` + `queue_event`. |
++| `crates/governance-store/src/lib.rs` | Modify | `apply_group_op_mutations` returns events; `apply_local_signed_group_op` drains after persist; `emit_auto_follow_set_if_enabled` → returns `Option<OpEvent>`. |
++| `crates/governance-store/src/namespace/governance.rs` | Modify | `apply_group_op_inner` drains after persist; `apply_signed_op`/`apply_root_op` collect + drain RootOp events after `store_operation`. |
++| `crates/governance-store/src/ops/group/{member_added,member_joined_via_tee_attestation,member_removed,member_left,member_set_auto_follow,context_registered}.rs` | Modify | Push group events into the ctx sink. |
++| `crates/governance-store/src/ops/namespace/context.rs` | Modify | `NamespaceApplyCtx`: add `pending_events` + `queue_event`. |
++| `crates/governance-store/src/ops/namespace.rs` | Modify | `dispatch_root_op` + handlers → `&mut NamespaceApplyCtx`. |
++| `crates/governance-store/src/ops/namespace/{group_created,group_reparented,member_joined}.rs` | Modify | Push namespace events into the ctx sink. |
++| `crates/governance-store/src/namespace/membership.rs` | Modify | `NamespaceMembershipService` member-joined returns the auto-follow event instead of notifying. |
++| `crates/governance-store/src/tests.rs` | Modify | New behavioral tests (race-gone, no-re-emit-on-replay, namespace event-after-reorder). |
++
++---
++
++## Task 1: Group-path plumbing (sink + drain, no sites converted yet)
++
++Lays the group infrastructure with zero behavior change (the sink stays empty until Task 2).
++
++**Files:** `ops/group/context.rs`, `lib.rs`.
++
++- [ ] **Step 1: Add the sink to `GroupApplyCtx`**
++
++In `crates/governance-store/src/ops/group/context.rs`, add a field after `divergence` and a method in the impl:
++
++```rust
++    /// Op-events queued during apply, flushed by the caller AFTER the
++    /// op-log entry is persisted (see #2770). Mirrors `divergence`'s
++    /// out-parameter pattern. Handlers MUST `queue_event` rather than
++    /// calling `op_events::notify` directly, or they reintroduce the
++    /// emit-before-persist race.
++    pub(crate) pending_events: Vec<crate::op_events::OpEvent>,
++```
++
++In `new(...)`, add `pending_events: Vec::new(),` to the struct literal. Add the method to `impl<'a> GroupApplyCtx<'a>`:
++
++```rust
++    pub(crate) fn queue_event(&mut self, event: crate::op_events::OpEvent) {
++        self.pending_events.push(event);
++    }
++```
++
++- [ ] **Step 2: Return the events from `apply_group_op_mutations`**
++
++In `crates/governance-store/src/lib.rs`, change `apply_group_op_mutations` (currently `lib.rs:1203-1212`) to:
++
++```rust
++fn apply_group_op_mutations(
++    store: &Store,
++    group_id: &ContextGroupId,
++    signer: &PublicKey,
++    op: &GroupOp,
++) -> EyreResult<(bool, Option<DivergenceReport>, Vec<crate::op_events::OpEvent>)> {
++    let mut ctx = ops::group::GroupApplyCtx::new(store, group_id, signer);
++    let handled = ops::group::dispatch(&mut ctx, op)?;
++    Ok((handled, ctx.divergence, ctx.pending_events))
++}
++```
++
++- [ ] **Step 3: Drain at the `lib.rs` flush site (append branch only)**
++
++In `apply_local_signed_group_op`, update the destructure (currently `let (handled, _divergence) = apply_group_op_mutations(...)?;` at `lib.rs:1272`) to capture the events, and drain them after the append. Keep the dedup early-return un-drained:
++
++```rust
++    let (handled, _divergence, pending_events) =
++        apply_group_op_mutations(store, &group_id, &op.signer, &op.op)?;
++```
++
++In the dedup early-return branch (`if op_log_contains_content_hash(...)? { store_nonce_window(...)?; return Ok(()); }` at ~1313-1316) — leave it exactly as-is (do NOT drain; this is the replay path). After `persist_group_governance_progress(...)?` (~1340-1348) and before the final `Ok(())`, add:
++
++```rust
++    // #2770: flush events only after the op-log entry is durably appended.
++    for event in pending_events {
++        crate::op_events::notify(event);
++    }
++    Ok(())
++```
++
++- [ ] **Step 4: Drain at the `governance.rs` group flush site (inside the append block)**
++
++In `crates/governance-store/src/namespace/governance.rs` `apply_group_op_inner`, update the destructure (currently `let (handled, divergence) = apply_group_op_mutations(...)?;` at ~1275) to:
++
++```rust
++        let (handled, divergence, pending_events) =
++            apply_group_op_mutations(self.store, group_id, signer, op)?;
++```
++
++Inside the existing `if handled { ... if !already_logged { ... persist_group_op_log_entry(...)?; } }` block, immediately AFTER `persist_group_op_log_entry(...)?` (~1365-1367) and still inside the `if !already_logged` body, add:
++
++```rust
++                // #2770: flush after the op-log append; a re-received op
++                // (already_logged) drops its queued events (no re-emit).
++                for event in pending_events {
++                    crate::op_events::notify(event);
++                }
++```
++
++> NOTE: `pending_events` is moved into the `if !already_logged` block, so the `already_logged` (replay) and `!handled` paths drop it without notifying — exactly the desired no-re-emit-on-replay. Confirm the borrow checker is happy (the vec is consumed once); if `pending_events` is referenced after the block elsewhere, it isn't here. The `divergence` return (`Ok(divergence)`) is unchanged.
++
++- [ ] **Step 5: Verify it compiles + existing tests green (no behavior change yet)**
++
++Run: `rustup run 1.88.0 cargo test -p calimero-governance-store`
++Expected: PASS. The sink is empty (no sites converted), so events still fire from the old `notify` calls in the handlers; this task only adds dormant plumbing.
++
++- [ ] **Step 6: Format + commit**
++
++```bash
++rustup run 1.88.0 cargo fmt -p calimero-governance-store
++git add crates/governance-store/src/ops/group/context.rs crates/governance-store/src/lib.rs crates/governance-store/src/namespace/governance.rs
++git commit -m "refactor(governance-store): add group-apply event sink + post-persist drain (#2770)"
++```
++
++---
++
++## Task 2: Convert the direct group emit sites + behavioral tests
++
++Move the 8 direct group emit sites from `notify` to `ctx.queue_event` (the auto-follow helper is Task 3). Each converted event now fires after persist. Add the race-gone + no-re-emit tests.
++
++**Files:** `ops/group/{member_added,member_joined_via_tee_attestation,member_removed,member_left,member_set_auto_follow,context_registered}.rs`; `tests.rs`.
++
++- [ ] **Step 1: Write the failing behavioral test (race-gone)**
++
++In `crates/governance-store/src/tests.rs`, add a test that proves the op-log entry is visible when the event fires. Model it on the existing `end_to_end_event_fires_after_op_apply` (~5488) — subscribe, apply an op, drain the event with a deadline — but in the event handler, assert the op-log already contains the op:
++
++```rust
++#[test]
++fn member_added_event_fires_after_op_log_append() {
++    // #2770: when MemberAdded fires, the op-log entry must already be persisted.
++    let (store, gid, _admin_pk, admin_sk, member_pk) = seed(&mut OsRng); // reuse the existing seed helper
++    let mut rx = crate::op_events::subscribe();
++
++    let op = SignedGroupOp::sign(
++        &admin_sk, gid.to_bytes(), vec![], [0u8; 32], 1,
++        GroupOp::MemberAdded { member: member_pk, role: GroupMemberRole::Member },
++    ).unwrap();
++    let content_hash = op.content_hash().unwrap();
++    apply_local_signed_group_op(&store, &op).unwrap();
++
++    // Drain to the MemberAdded for our (gid, member) within a deadline.
++    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
++    loop {
++        assert!(std::time::Instant::now() < deadline, "MemberAdded never fired");
++        if let Ok(crate::op_events::OpEvent::MemberAdded { group_id, member, .. }) = rx.try_recv() {
++            if group_id == gid.to_bytes() && member == member_pk {
++                // The load-bearing assertion: op-log already has the entry.
++                assert!(
++                    crate::local_state::op_log_contains_content_hash(&store, &gid, &content_hash).unwrap(),
++                    "op-log entry must be persisted before MemberAdded fires (#2770)"
++                );
++                break;
++            }
++        }
++    }
++}
++```
++
++> NOTE: match the EXACT names of the existing `seed` helper + `SignedGroupOp::sign` arg order used by neighbors in `tests.rs` (the dossier shows `end_to_end_event_fires_after_op_apply` ~5488 and `member_added_emits_synthesized_auto_follow_set` ~5595 — copy their fixture + sign pattern). If `op_log_contains_content_hash` is module-private, use the in-crate path it's defined at (`crate::local_state::op_log_contains_content_hash` or wherever `tests.rs` can reach it).
++
++- [ ] **Step 2: Run it — fails today (event fires before persist)**
++
++Run: `rustup run 1.88.0 cargo test -p calimero-governance-store member_added_event_fires_after_op_log_append -- --nocapture`
++Expected: FAIL — the assertion inside the handler fails (event currently fires before the op-log append).
++
++- [ ] **Step 3: Convert the 8 direct group emit sites**
++
++Each `crate::op_events::notify(crate::op_events::OpEvent::X { ... });` becomes `ctx.queue_event(crate::op_events::OpEvent::X { ... });` (handlers already hold `&mut ctx`). Convert verbatim:
++
++- `ops/group/member_added.rs:43` — `MemberAdded { group_id: group_id.to_bytes(), member: *member, role: role.clone() }`.
++- `ops/group/member_joined_via_tee_attestation.rs:43` — `TeeMemberAdmitted { group_id: group_id.to_bytes(), member: *member }`.
++- `ops/group/member_removed.rs:107` — `MemberRemoved { group_id: group_id.to_bytes(), member: *member }`; and `:116` — `TeeMemberRemoved { group_id: group_id.to_bytes(), member: *member }`.
++- `ops/group/member_left.rs:104` (loop) — `MemberRemoved { group_id: sub.to_bytes(), member: *member }`; `:109` — `TeeMemberRemoved { group_id: sub.to_bytes(), member: *member }`; `:159` — `MemberRemoved { group_id: group_id.to_bytes(), member: *member }`; `:166` — `TeeMemberRemoved { group_id: group_id.to_bytes(), member: *member }`. **Preserve insertion order** (MemberRemoved before TeeMemberRemoved is contractual) — `Vec` push order does this naturally.
++- `ops/group/member_set_auto_follow.rs:40` — `AutoFollowSet { group_id: group_id.to_bytes(), member: *target, contexts: *auto_follow_contexts, subgroups: *auto_follow_subgroups }`.
++- `ops/group/context_registered.rs:30` — `ContextRegistered { group_id: group_id.to_bytes(), context_id: *context_id }`. **Leave `crate::registration_notify::notify(*context_id);` at `:29` untouched** (different channel).
++
++Some handlers reference `store`/`group_id` directly; they also have `ctx` in scope (the `&mut GroupApplyCtx` param). Use `ctx.queue_event(...)`.
++
++- [ ] **Step 4: Run the new test + existing op-event tests**
++
++Run: `rustup run 1.88.0 cargo test -p calimero-governance-store member_added_event_fires_after_op_log_append`
++Expected: PASS (event now fires after persist).
++Run: `rustup run 1.88.0 cargo test -p calimero-governance-store` — all existing op-event tests still green.
++
++- [ ] **Step 5: Add the no-re-emit-on-replay test**
++
++```rust
++#[test]
++fn replayed_group_op_does_not_re_emit() {
++    // #2770: re-applying an already-logged op must NOT re-fire its event.
++    let (store, gid, _admin_pk, admin_sk, member_pk) = seed(&mut OsRng);
++    let op = SignedGroupOp::sign(
++        &admin_sk, gid.to_bytes(), vec![], [0u8; 32], 1,
++        GroupOp::MemberAdded { member: member_pk, role: GroupMemberRole::Member },
++    ).unwrap();
++    apply_local_signed_group_op(&store, &op).unwrap(); // first apply emits
++
++    let mut rx = crate::op_events::subscribe(); // subscribe AFTER first apply
++    apply_local_signed_group_op(&store, &op).unwrap(); // replay (already logged)
++
++    // No MemberAdded for (gid, member) should arrive in a short window.
++    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(300);
++    while std::time::Instant::now() < deadline {
++        if let Ok(crate::op_events::OpEvent::MemberAdded { group_id, member, .. }) = rx.try_recv() {
++            assert!(
++                !(group_id == gid.to_bytes() && member == member_pk),
++                "replay must not re-emit MemberAdded (#2770)"
++            );
++        }
++    }
++}
++```
++
++Run: `rustup run 1.88.0 cargo test -p calimero-governance-store replayed_group_op_does_not_re_emit`
++Expected: PASS.
++
++- [ ] **Step 6: Format + commit**
++
++```bash
++rustup run 1.88.0 cargo fmt -p calimero-governance-store
++git add crates/governance-store/src/ops/group/ crates/governance-store/src/tests.rs
++git commit -m "refactor(governance-store): queue group op-events for post-persist flush (#2770)"
++```
++
++---
++
++## Task 3: AutoFollowSet helper returns the event (group callers)
++
++`emit_auto_follow_set_if_enabled` does a post-mutation read and conditionally notifies. Change it to RETURN the event so callers push into their sink (decouples it from ctx type — needed because it's also called on the namespace path in Task 5).
++
++**Files:** `lib.rs`; `ops/group/{member_added,member_joined_via_tee_attestation}.rs`.
++
++- [ ] **Step 1: Refactor the helper to return `Option<OpEvent>`**
++
++In `crates/governance-store/src/lib.rs`, replace `emit_auto_follow_set_if_enabled` (1158-1194) with a builder that returns the event (keep the best-effort read-error → `None` swallow; rename to reflect it no longer notifies):
++
++```rust
++pub(crate) fn build_auto_follow_set_if_enabled(
++    store: &Store,
++    group_id: &ContextGroupId,
++    member: &PublicKey,
++) -> EyreResult<Option<crate::op_events::OpEvent>> {
++    let value = match MembershipRepository::new(store).member_value(group_id, member) {
++        Ok(Some(v)) => v,
++        Ok(None) => {
++            tracing::warn!(
++                group_id = %hex::encode(group_id.to_bytes()), %member,
++                "post-apply read found no member row — skipping auto-follow emission"
++            );
++            return Ok(None);
++        }
++        Err(err) => {
++            tracing::warn!(
++                group_id = %hex::encode(group_id.to_bytes()), %member, ?err,
++                "post-apply read failed — skipping auto-follow emission"
++            );
++            return Ok(None);
++        }
++    };
++    if value.auto_follow.contexts {
++        Ok(Some(crate::op_events::OpEvent::AutoFollowSet {
++            group_id: group_id.to_bytes(),
++            member: *member,
++            contexts: true,
++            subgroups: value.auto_follow.subgroups,
++        }))
++    } else {
++        Ok(None)
++    }
++}
++```
++
++- [ ] **Step 2: Update the two group callers to push into the sink**
++
++In `ops/group/member_added.rs:59` and `ops/group/member_joined_via_tee_attestation.rs:56`, replace `emit_auto_follow_set_if_enabled(store, group_id, member)?;` with:
++
++```rust
++    if let Some(event) = crate::build_auto_follow_set_if_enabled(ctx.store(), ctx.group_id(), member)? {
++        ctx.queue_event(event);
++    }
++```
++
++(Use `ctx.store()` / `ctx.group_id()` accessors — they exist on `GroupApplyCtx`. Adjust the path to `build_auto_follow_set_if_enabled` to however these modules reference crate-root fns — neighbors already call `emit_auto_follow_set_if_enabled` so use the same path with the new name.)
++
++- [ ] **Step 3: Leave the namespace caller temporarily compiling**
++
++`crates/governance-store/src/namespace/membership.rs:71` also calls the old fn. To keep the tree green until Task 5 fully refactors that path, update it minimally to use the new builder + notify directly (it still emits before persist on the namespace path for now — acceptable transient, fixed in Task 5):
++
++```rust
++    if let Some(event) = crate::build_auto_follow_set_if_enabled(self.store, &group_id, member)? {
++        crate::op_events::notify(event);
++    }
++```
++
++- [ ] **Step 4: Build + existing auto-follow test green**
++
++Run: `rustup run 1.88.0 cargo test -p calimero-governance-store member_added_emits_synthesized_auto_follow_set`
++Expected: PASS (auto-follow events still fire — now after persist on the group path).
++Run: `rustup run 1.88.0 cargo test -p calimero-governance-store` — green.
++
++- [ ] **Step 5: Format + commit**
++
++```bash
++rustup run 1.88.0 cargo fmt -p calimero-governance-store
++git add crates/governance-store/src/lib.rs crates/governance-store/src/ops/group/ crates/governance-store/src/namespace/membership.rs
++git commit -m "refactor(governance-store): auto-follow-set returns event for sink (#2770)"
++```
++
++---
++
++## Task 4: Namespace-path plumbing (sink + drain, no sites converted yet)
++
++Thread a sink through the RootOp path. Dormant until Task 5.
++
++**Files:** `ops/namespace/context.rs`, `ops/namespace.rs`, all namespace handler signatures, `namespace/governance.rs`.
++
++- [ ] **Step 1: Add the sink to `NamespaceApplyCtx`**
++
++In `crates/governance-store/src/ops/namespace/context.rs`, add a field + method (it has no `divergence` analog today):
++
++```rust
++// in the struct:
++    pending_events: Vec<crate::op_events::OpEvent>,
++// in new(): pending_events: Vec::new(),
++// in impl:
++    pub(crate) fn queue_event(&mut self, event: crate::op_events::OpEvent) {
++        self.pending_events.push(event);
++    }
++    pub(crate) fn take_events(&mut self) -> Vec<crate::op_events::OpEvent> {
++        std::mem::take(&mut self.pending_events)
++    }
++```
++
++- [ ] **Step 2: Flip `dispatch_root_op` + all namespace handlers to `&mut`**
++
++In `crates/governance-store/src/ops/namespace.rs`, change `dispatch_root_op(ctx: &NamespaceApplyCtx<'_>, ...)` to `ctx: &mut NamespaceApplyCtx<'_>`. Then change EVERY per-op handler signature it calls to take `&mut NamespaceApplyCtx<'_>`: `group_created::apply`, `group_deleted::apply`, `group_reparented::apply`, `admin_changed::apply`, `policy_updated::apply`, `member_joined::apply`, `member_joined_open::apply` (all in `ops/namespace/*.rs`). Handlers that don't emit just take `&mut` and ignore it — required because they share the one dispatch signature.
++
++- [ ] **Step 3: Make `apply_root_op` build a mutable ctx and return the events**
++
++In `crates/governance-store/src/namespace/governance.rs`, change `apply_root_op` (1405-1453) to return the collected events:
++
++```rust
++    fn apply_root_op(&self, op: &SignedNamespaceOp, root: &RootOp)
++        -> EyreResult<Vec<crate::op_events::OpEvent>> {
++        // ... existing staleness telemetry ...
++        let mut ctx =
++            super::super::ops::namespace::NamespaceApplyCtx::new(self.store, self.namespace_id);
++        super::super::ops::namespace::dispatch_root_op(&mut ctx, op, root)?;
++        Ok(ctx.take_events())
++    }
++```
++
++- [ ] **Step 4: Collect + drain in `apply_signed_op` after `store_operation`**
++
++In `apply_signed_op`, capture the events from the Root arm and flush them after the durable append. Change the `NamespaceOp::Root(root) => { self.apply_root_op(op, root)?; }` arm (~240) to bind the events into a function-scoped vec declared before the `match`:
++
++```rust
++        let mut root_events: Vec<crate::op_events::OpEvent> = Vec::new();
++        match &op.op {
++            NamespaceOp::Root(root) => {
++                root_events = self.apply_root_op(op, root)?;
++            }
++            // ... other arms unchanged ...
++        }
++```
++
++Then after `self.store_operation(op)?;` (~425) and before `Ok(result)`:
++
++```rust
++        // #2770: flush RootOp-path events only after the namespace op is appended.
++        for event in root_events {
++            crate::op_events::notify(event);
++        }
++        Ok(result)
++```
++
++> NOTE: confirm the exact shape of the `match &op.op` arms in `apply_signed_op` (the dossier shows the Root arm; other arms like `Group { .. }` go through `decrypt_and_apply_group_op` and produce no namespace-ctx events, so `root_events` stays empty for them — correct). Keep the existing `?` error propagation.
++
++- [ ] **Step 5: Compiles + existing namespace tests green (no behavior change)**
++
++Run: `rustup run 1.88.0 cargo test -p calimero-governance-store`
++Expected: PASS. Sink is empty (no namespace sites converted yet); events still fire from the old `notify_op_event` calls.
++
++- [ ] **Step 6: Format + commit**
++
++```bash
++rustup run 1.88.0 cargo fmt -p calimero-governance-store
++git add crates/governance-store/src/ops/namespace/ crates/governance-store/src/ops/namespace.rs crates/governance-store/src/namespace/governance.rs
++git commit -m "refactor(governance-store): add namespace-apply event sink + post-persist drain (#2770)"
++```
++
++---
++
++## Task 5: Convert the namespace emit sites + behavioral test
++
++Move the 3 namespace emit sites to the sink. Add the namespace event-after-reorder test.
++
++**Files:** `ops/namespace/{group_created,group_reparented,member_joined}.rs`, `namespace/membership.rs`, `tests.rs`.
++
++- [ ] **Step 1: Convert `SubgroupCreated` and `SubgroupReparented`**
++
++- `ops/namespace/group_created.rs:121` — replace `notify_op_event(OpEvent::SubgroupCreated { namespace_id, parent_group_id: parent_id, child_group_id: group_id });` with `ctx.queue_event(OpEvent::SubgroupCreated { namespace_id, parent_group_id: parent_id, child_group_id: group_id });` (handler now holds `&mut ctx`).
++- `ops/namespace/group_reparented.rs:22` — replace `notify_op_event(OpEvent::SubgroupReparented { namespace_id: ctx.namespace_id(), old_parent_group_id: old_parent.to_bytes(), new_parent_group_id: new_parent_id, child_group_id });` with `ctx.queue_event(OpEvent::SubgroupReparented { ... same fields ... });`.
++
++- [ ] **Step 2: Convert the MemberJoined auto-follow path**
++
++`member_joined::apply` (`ops/namespace/member_joined.rs`) delegates to `NamespaceMembershipService` (`namespace/membership.rs`), which currently builds + notifies the auto-follow event (the Task-3 transient). Refactor so the service RETURNS the event and `member_joined::apply` pushes it into `ctx`:
++
++- In `crates/governance-store/src/namespace/membership.rs`, change the member-joined method (around `:62-72`) to return `EyreResult<Option<crate::op_events::OpEvent>>`: replace the `if let Some(event) = ... { crate::op_events::notify(event); } Ok(())` (the Task-3 transient) with `Ok(crate::build_auto_follow_set_if_enabled(self.store, &group_id, member)?)` (return it; the `add_member` call above stays).
++- In `ops/namespace/member_joined.rs`, where it calls the service's member-joined method, capture the returned `Option` and push: `if let Some(event) = service.apply_member_joined(...)? { ctx.queue_event(event); }`. (Match the actual method/var names in the file; `member_joined_open.rs` if it shares the path needs the same treatment — check it.)
++
++> NOTE: read `ops/namespace/member_joined.rs` + `namespace/membership.rs` to get the exact method name + call shape. The goal: the auto-follow event for a namespace MemberJoined ends up in the RootOp sink (flushed after `store_operation`), not notified inline.
++
++- [ ] **Step 3: Write the namespace event-after-reorder test**
++
++In `tests.rs`, mirror an existing `SubgroupCreated`-observing test (namespace/tests has the apply harness) — apply a `RootOp::GroupCreated` and assert the `SubgroupCreated` event still arrives AND the namespace op-log already contains the op when it fires:
++
++```rust
++#[test]
++fn subgroup_created_event_fires_after_namespace_op_persist() {
++    // #2770: SubgroupCreated must still be observed, and the namespace op
++    // must already be in the log when it fires.
++    // (Use the existing namespace apply-harness: build a namespace, subscribe,
++    //  apply a signed RootOp::GroupCreated, drain SubgroupCreated within a
++    //  deadline, and assert NamespaceOpLogService::contains_op(delta_id) is true
++    //  inside the handler. Copy the harness/seed from the existing namespace
++    //  tests that exercise GroupCreated apply.)
++}
++```
++
++> Fill the body from the existing namespace-apply test pattern (the harness that signs + applies a `SignedNamespaceOp` and the `op_events::subscribe()` + drain idiom). The load-bearing assertion: `NamespaceOpLogService::new(&store, ns_id).contains_op(delta_id).unwrap()` is true at the moment `SubgroupCreated` fires.
++
++- [ ] **Step 4: Run the namespace tests**
++
++Run: `rustup run 1.88.0 cargo test -p calimero-governance-store subgroup_created_event_fires_after_namespace_op_persist -- --nocapture`
++Expected: PASS.
++Run: `rustup run 1.88.0 cargo test -p calimero-governance-store` — all green (incl. existing SubgroupCreated/SubgroupReparented/MemberJoined tests after the reorder).
++
++- [ ] **Step 5: Format + commit**
++
++```bash
++rustup run 1.88.0 cargo fmt -p calimero-governance-store
++git add crates/governance-store/src/ops/namespace/ crates/governance-store/src/namespace/membership.rs crates/governance-store/src/tests.rs
++git commit -m "refactor(governance-store): queue namespace op-events for post-persist flush (#2770)"
++```
++
++---
++
++## Final verification
++
++- [ ] **Whole-affected-crate + dependents (the subscribers live in calimero-context/node)**
++
++```bash
++rustup run 1.88.0 cargo fmt --all -- --check
++rustup run 1.88.0 cargo test -p calimero-governance-store -p calimero-context -p calimero-node
++```
++Expected: fmt clean (1.88 rustfmt); all green. The `calimero-context` (`auto_follow`, `self_purge`) + `calimero-node` (e2e) consumers must still pass — they tolerate the timing change (idempotent + lossy-tolerant).
++
++- [ ] **Scope self-check:** only `calimero-governance-store` files changed; `GroupKeyDelivered` (`governance.rs:1026-1032`) untouched (still a direct `notify_op_event`); no `calimero-server-primitives`/`calimero-tee-attestation` change. Add a PR/changelog note: "OpEvents now emit after the op-log append; replays no longer re-emit (idempotent subscribers unaffected)."
++
++- [ ] **Grep for stragglers:** `grep -rn "op_events::notify\|notify_op_event" crates/governance-store/src/ops crates/governance-store/src/namespace/membership.rs` — confirm the only remaining direct calls are `GroupKeyDelivered` (intentional) and none in the converted handlers.
+diff --git a/docs/superpowers/specs/2026-06-17-tee-lifecycle-correctness-design.md b/docs/superpowers/specs/2026-06-17-tee-lifecycle-correctness-design.md
+new file mode 100644
+index 0000000000..e37808122f
+--- /dev/null
++++ b/docs/superpowers/specs/2026-06-17-tee-lifecycle-correctness-design.md
+@@ -0,0 +1,97 @@
++# TEE membership-lifecycle correctness — #2770 / #2726 / #2771 (shared design)
++
++| | |
++|---|---|
++| **Issues** | core #2770 (emit-before-persist race), #2726 (subgroup purge-failure reconcile), #2771 (redundant transient ReadOnlyTee row in flipped-to-Open subgroups) |
++| **Scope** | Three sequenced PRs in the governance-store self-purge + apply subsystem. One shared design; one PR each. |
++| **Date** | 2026-06-17 |
++| **Lineage** | Builds on the merged self-purge namespace sweep (#2721/#2725/#2724/#2764), Phase 1 admission (#2772, open), and group-key deletion (#2776, open/merge-ready). |
++
++---
++
++## Sequencing & dependencies
++
++```
++#2770 (PR-1) ──────────────── independent (apply-path: group + namespace)
++#2776 (open, merge-ready) ──▶ #2726 (PR-2)   ← only hard dep; runs in parallel with PR-1
++#2772 (open, merge-ready) ──▶ #2771 (PR-3)
++```
++
++- **PR-1 (#2770)** is independent (governance-store apply path); it removes a pre-existing race and can land any time.
++- **PR-2 (#2726)** hard-depends **only on #2776** (its residue check looks for the AES `GroupKeyEntry` rows #2776's purge deletes). It does **not** hard-depend on PR-1 — research confirmed the "delete op-log while apply still writing it" window is **pre-existing and orthogonal** (the namespace purge path already lives with it), so PR-2 inherits whatever apply ordering the base provides. **PR-1 and PR-2 can proceed in parallel.**
++- **PR-3 (#2771)** depends on **#2772** (the `tee_subgroup_admit` subscriber + the create/visibility surface it builds on).
++
++---
++
++## PR-1 — #2770: emit OpEvents after the op-log entry persists
++
++**Problem.** In the **group-op** apply path (`apply_group_op_mutations`, `lib.rs:~1271` / `governance.rs:~1275`), per-op handlers call `op_events::notify` *inside* dispatch — before the op-log entry is persisted (`lib.rs:~1339` / `governance.rs:~1365`). There is no transaction, and writes are write-through. A subscriber on another task can react to the event and read the op-log back before it's written. This forced the bounded wake-then-reread in `tee_subgroup_admit` (#2772) and opens a "self_purge deletes the op-log while apply is still writing it" window.
++
++**Decision (settled): emit-on-append-only.** Today the mutation re-runs (and re-emits) on idempotent replay. Research confirmed **no subscriber relies on replay re-emission** — `auto_follow`, `self_purge`, `tee_subgroup_admit` are all idempotent and tolerate dropped events (the broadcast channel is lossy under lag). So we emit **once, on first op-log append**, not on replay/dedup. Strictly more correct.
++
++**Mechanism (Option A — collect-then-flush):**
++- Add `pending_events: Vec<OpEvent>` to `GroupApplyCtx` (`ops/group/context.rs`), mirroring the existing `pub(crate) divergence` field; add a `queue_event` helper.
++- The **8 group emit sites** push into the sink instead of calling `notify`: `member_added.rs` (`MemberAdded` + the `emit_auto_follow_set_if_enabled` helper `AutoFollowSet`), `member_joined_via_tee_attestation.rs` (`TeeMemberAdmitted` + `AutoFollowSet`), `member_removed.rs` (`MemberRemoved`/`TeeMemberRemoved`), `member_left.rs` (`MemberRemoved`/`TeeMemberRemoved`, cascade + self), `member_set_auto_follow.rs` (`AutoFollowSet`), `context_registered.rs` (`ContextRegistered`).
++- `apply_group_op_mutations` returns the collected events (extend the existing `divergence` return).
++- **Drain + notify after persist, on the append branch only** — both flush sites: `lib.rs` after `persist_group_governance_progress` (inside the append path, not the content-hash dedup early-return) and `governance.rs` after `persist_group_op_log_entry` (inside `if handled && !already_logged`). Gating on the append achieves emit-once.
++
++**Must NOT move:** `GroupKeyDelivered` (`governance.rs:~1029`, the `apply_received_group_key` path) — it's not a per-op-dispatch emit, has no op-log append to gate on, and its `join_group` wake-then-reread is latency-sensitive. Leave it exactly as a direct `notify`.
++
++**Namespace path — IN SCOPE (confirmed racy).** Research traced `apply_signed_op`: the RootOp emit happens in `dispatch_root_op` (`governance.rs:240`) but the op-log entry persists later at `store_operation` (`governance.rs:425`) — same emit-before-persist race as the group path. So PR-1 must **also** thread a sink through `NamespaceApplyCtx` (currently sink-less) + `dispatch_root_op`, and drain after `store_operation`. **Three namespace emit sites:** `SubgroupCreated` (`ops/namespace/group_created.rs:121`), `SubgroupReparented` (`ops/namespace/group_reparented.rs:22`), and `MemberJoined`/`MemberJoinedOpen` → `emit_auto_follow_set_if_enabled` (`namespace/membership.rs:71`). The RootOp path's own dedup is *before* emit (`governance.rs:227`), so it doesn't double-emit on replay — only the persist-ordering needs fixing.
++
++**Replay semantics (observable, document it):** append-gated drain also stops re-emitting on duplicate/backfill/retry of an already-logged op (today it re-emits). No *first* apply loses its event (every emit-worthy op also appends on first apply); the change only removes spurious replay re-emits — a net improvement worth a changelog note.
++
++**Follow-up (not in PR-1):** once both PR-1 and #2772 are merged, remove the now-redundant bounded wake-then-reread in `tee_subgroup_admit::handle_new_tee_member` (fold into PR-2 or a tiny standalone cleanup). Add a doc note on `GroupApplyCtx.pending_events`: future group handlers must `queue_event`, never `notify` directly, or they reintroduce the race.
++
++**Tests:** a subscriber that reads the op-log on its triggering event observes the entry (race gone); a replayed op does not double-emit; existing governance-store + the three subscribers' tests stay green.
++
++---
++
++## PR-2 — #2726: subgroup purge-failure reconcile
++
++**Problem.** A subgroup-only self-purge whose load-bearing delete partially fails leaves private key residue with no recovery: the `PurgeAction::Subgroup` path writes no marker, `purge_subgroup_for_self` returns no `Result`, and the startup `reconcile_sweep` (which only handles namespace-root markers) never retries it. The one-level-down mirror of the gap #2721 closed.
++
++**Three steps:**
++
++1. **`Result`-refactor `purge_subgroup_for_self`** (`self_purge.rs:759`): return `eyre::Result<()>`, `Err` **iff** the load-bearing `delete_group_local_rows` step (`self_purge.rs:800`) fails; best-effort context/tree-edge failures stay non-fatal (mirror the namespace two-class split). The caller marks-before / clears-on-`Ok` / leaves-on-`Err`.
++
++2. **Marker storage A1** (confirmed over A2): a **new `calimero-store` key prefix + `PendingSubgroupPurge` key type + `PendingSubgroupPurgeRepository`**, each a 1:1 copy of `PendingSelfPurge`/`PendingSelfPurgeRepository`. Rationale: the marker key is `[prefix][32-byte id]` with a `()` value, so reusing the namespace marker type (A2) makes subgroup markers **byte-indistinguishable** from namespace markers — and disambiguating by re-resolving the namespace is impossible exactly in the failure case (the subgroup's tree edges are already deleted). A1 gives the sweep a disjoint, unambiguous enumerator. Pick the next free prefix byte (verify against the `*_PREFIX` list; `0x3F` appears free).
++   - **Mark before purge** on the `PurgeAction::Subgroup` arm (`self_purge.rs:694`, symmetric to the namespace arm at `:707`); clear on `Ok`, leave on `Err`.
++
++3. **Extend `reconcile_sweep`** with a **second loop** over the new marker repo, **run after the existing namespace pass** (namespace-first: any subgroup under a just-namespace-purged subtree then hits the already-purged predicate and clears its stale marker for free). No marker-precedence logic is needed — research confirmed a namespace-root TEE eviction emits a *single* root `TeeMemberRemoved` (the `cascade_remove_member_from_group_tree` cascade is silent / ContextIdentity-only), so concurrent namespace+subgroup markers for one node don't arise from a root eviction. The subgroup pass applies a **3-state predicate** (checking the **subgroup `gid`**, not root — and it cannot reuse the namespace "identity-gone" signal since identity is namespace-scoped):
++   - **healthy** — `MembershipRepository::role_of(gid, self_pk).is_some()` (direct role) → clear marker, don't purge.
++   - **evicted-with-residue** — no role **and** residue present → re-run `purge_subgroup_for_self` (idempotent).
++   - **already-purged** — no role **and** no residue → clear marker, don't purge.
++   - **Residue = dual-family (the #2776 interaction):** `GroupKeyring::load_current_key_record(gid).is_some()` (AES `GroupKeyEntry`) **OR** `SigningKeysRepository::get_key(gid, self_pk).is_some()` (signing key). #2776 made `delete_group_local_rows` delete both, non-atomically with a first-error return, so a partial failure can leave "signing gone / AES present" — checking only signing keys would miss it.
++   - Reuse `PurgeBranch::Subgroup` + extend `ReconcileOutcome` for metrics.
++
++**Startup-only** sweep (periodic is a deferred follow-up). **Effort ~5–7 dev-days.** `purge_subgroup_for_self` has only 2 callers (the live arm + one test) and the namespace cascade uses a different path, so the `Result`-refactor is isolated. Group-key deletion runs **only** via the public `delete_group_local_rows` (the `delete_all_for_group` helpers are `pub(crate)`); the residue *probes* (`load_current_key_record`, `get_key`) are public, so reading residue from `calimero-context` is fine.
++
++**Tests:** mark-before-purge symmetry; `Result` drives clear/leave; the 3-state predicate (residue-present → purge; already-purged → clear; healthy → clear), with residue covering both key families incl. the signing-gone/AES-present case; namespace-first ordering clears a subgroup marker under a purged namespace; no false-purge of a re-admitted subgroup member. **Test caveat:** `InMemoryDB` deletes always succeed, so we can't inject a real `delete_group_local_rows` failure — follow the existing namespace tests' pattern (unit-test the pure decision functions + hand-seed the post-failure "marker + residue present" store state + drive the happy-path cascade on a clean store), not a fault-injecting `Store` mock. Match #2725 coverage.
++
++---
++
++## PR-3 — #2771: eliminate the redundant transient admission (structural fix)
++
++**Problem (real & structural, not cosmetic-only).** There is **no atomic create-Open path** — `CreateGroupRequest` carries no visibility, so every Open subgroup is born **Restricted** (default) then flipped via a separate `SubgroupVisibilitySet` op. In the window between create and flip, the `tee_subgroup_admit` create-time subscriber **reliably** admits the entitled TEE node into the (momentarily Restricted) subgroup — writing a direct `ReadOnlyTee` row **and delivering the per-subgroup key**. After the flip to Open, the node would have read the subgroup via inheritance + the namespace key anyway, so the admission + key delivery are **redundant**, on **every** Open-subgroup creation.
++
++**Why not prune after the flip (rejected).** A silent local delete of the redundant row **breaks convergence**: `hash_group_state` hashes every `GroupMember` row, so a local-only delete diverges the subgroup state hash across peers → permanent governance desync. An op-based prune is disproportionate (a new replicated op in a security-sensitive path that would emit `TeeMemberRemoved` → trigger `self_purge` → strip the keys, the opposite of intent).
++
++**Fix (structural): born-Open create — Option C (no wire-format break).** Add an optional `visibility` (default Restricted) to the create request, and when Open is requested, have the create-group **handler** establish Open *before* the create's `SubgroupCreated` event reaches the subscriber — by emitting the existing replicated **`SubgroupVisibilitySet { Open }` op** as part of the create flow (Option C), rather than adding a `visibility` field to the borsh-serialized `RootOp::GroupCreated` (Option A — rejected: it's a replicated-op wire-format break that changes op-log hashes, breaks un-upgraded peers, and touches `op-adapter`/`governance-types`).
++
++Why C is sufficient: the only node that does the redundant admission is the **creator** (it runs `tee_subgroup_admit` + holds the keys). C closes the window on the creator (visibility row Open before the subscriber's `is_open_chain_to_namespace` check), so it never self-admits; remote peers converge via the replicated visibility op and never self-admit anyway. **The make-or-break:** the Open visibility row must be committed **before** `notify_op_event(SubgroupCreated)` so the subscriber sees Open and skips.
++
++**Keep key minting unconditional** — do NOT skip the per-subgroup key mint for born-Open: it's load-bearing for the subscriber's key-holder check *and* for a later flip-to-Restricted. (So PR-3 adds no conditional-minting logic — simpler.)
++
++**Scope:** the wire `CreateGroupApiRequest` (`server/primitives`, backward-compatible optional field) **and** the namespace-subgroup path `CreateGroupInNamespaceBody` (the path meroctl actually uses) both need the field for end-to-end born-Open; plus the internal `CreateGroupRequest` (free to extend) and ~5 constructor sites (all default to Restricted). No change to the `SubgroupVisibilitySet` apply itself. No published-contract / mero-tee impact.
++
++**Tests:** a subgroup created with `visibility: Open` is Open immediately (no flip); `tee_subgroup_admit` does NOT admit the TEE node into it (no redundant row, no key delivery); default (no visibility) stays Restricted (unchanged behavior); existing create-then-flip still works.
++
++---
++
++## Non-goals / out of scope
++
++- Periodic reconcile sweep (PR-2 is startup-only; periodic is a later follow-up).
++- Adding `visibility` to the borsh `RootOp::GroupCreated` (PR-3 Option A — rejected; use the second-op approach to avoid a replicated-op wire break).
++- Any change to `GroupKeyDelivered` semantics (stays a direct, pre-persist-safe notify).
++- mdma / mero-tee — these are core-only changes; no contract-crate (`calimero-server-primitives`, `calimero-tee-attestation`) public-surface change, so no mero-tee rev bump.
