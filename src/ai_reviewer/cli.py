@@ -624,6 +624,9 @@ async def _update_docs_async(
     if result.skipped:
         for d in result.failed:
             console.print(f"[yellow]⚠️  Skipped {d.target_path}: {d.error}[/yellow]")
+        if result.flagged:
+            for d in result.flagged:
+                console.print(f"[yellow]⚑  Flagged {d.target_path}: {d.flagged_reason}[/yellow]")
         console.print(f"[dim]ℹ️  {result.skip_reason}[/dim]")
         return
 

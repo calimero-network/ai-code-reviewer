@@ -115,3 +115,19 @@ async def test_no_changes_skips():
         )
     assert result.skipped
     assert not gh.create_doc_update_pr.called
+
+
+@pytest.mark.asyncio
+async def test_open_doc_pr_dedupe_guard_skips():
+    gh, _ = _gh_for("diff", ["architecture/auto-follow.html"])
+    gh.has_open_doc_update_pr.return_value = True
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    dg = DocGenerationSettings(enabled=True)
+    with patch("ai_reviewer.docs.updater.summarize_pr_changes", AsyncMock()) as mock_sum:
+        result = await run_doc_update(
+            repo="o/r", pr_number=1, gh=gh, anthropic_cfg=cfg, doc_generation=dg
+        )
+    assert result.skipped
+    assert "open doc-update PR" in (result.skip_reason or "")
+    mock_sum.assert_not_called()  # guard fires before the Understand stage
+    assert not gh.create_doc_update_pr.called
