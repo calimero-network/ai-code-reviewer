@@ -2533,11 +2533,8 @@ class TestCreateDocUpdatePR:
     def test_creates_branch_and_commits_files(self):
         from unittest.mock import MagicMock, patch
 
-        from ai_reviewer.docs.analyzer import DocDraft, DocSuggestion
+        from ai_reviewer.docs.models import FileWrite
         from ai_reviewer.github.client import GitHubClient
-
-        suggestion = DocSuggestion(file="README.md", reason="stale")
-        draft = DocDraft(suggestion=suggestion, updated_content="# New content\n")
 
         mock_repo = MagicMock()
         mock_repo.get_contents.side_effect = Exception("not found")  # file doesn't exist yet
@@ -2552,7 +2549,7 @@ class TestCreateDocUpdatePR:
                 repo_name="org/repo",
                 base_branch="main",
                 base_sha="abc1234",
-                updates=[draft],
+                file_writes=[FileWrite(path="README.md", content="# New content\n")],
                 pr_title="docs: auto-update for PR #42",
                 pr_body="Auto-generated.",
             )
@@ -2569,11 +2566,8 @@ class TestCreateDocUpdatePR:
     def test_updates_existing_file(self):
         from unittest.mock import MagicMock, patch
 
-        from ai_reviewer.docs.analyzer import DocDraft, DocSuggestion
+        from ai_reviewer.docs.models import FileWrite
         from ai_reviewer.github.client import GitHubClient
-
-        suggestion = DocSuggestion(file="docs/api.md", reason="stale")
-        draft = DocDraft(suggestion=suggestion, updated_content="# Updated API\n")
 
         mock_existing = MagicMock()
         mock_existing.sha = "blobsha123"
@@ -2591,7 +2585,7 @@ class TestCreateDocUpdatePR:
                 repo_name="org/repo",
                 base_branch="main",
                 base_sha="abc1234",
-                updates=[draft],
+                file_writes=[FileWrite(path="docs/api.md", content="# Updated API\n")],
                 pr_title="docs: update",
                 pr_body="body",
             )
@@ -2602,21 +2596,11 @@ class TestCreateDocUpdatePR:
         assert update_call.args[2] == "# Updated API\n"
         assert update_call.args[3] == "blobsha123"
 
-    def test_skips_drafts_with_errors(self):
+    def test_skips_empty_content_file_writes(self):
         from unittest.mock import MagicMock, patch
 
-        from ai_reviewer.docs.analyzer import DocDraft, DocSuggestion
+        from ai_reviewer.docs.models import FileWrite
         from ai_reviewer.github.client import GitHubClient
-
-        good = DocDraft(
-            suggestion=DocSuggestion(file="README.md", reason="stale"),
-            updated_content="# Good\n",
-        )
-        bad = DocDraft(
-            suggestion=DocSuggestion(file="docs/bad.md", reason="stale"),
-            updated_content="",
-            error="fetch failed",
-        )
 
         mock_repo = MagicMock()
         mock_repo.get_contents.side_effect = Exception("not found")
@@ -2631,26 +2615,23 @@ class TestCreateDocUpdatePR:
                 repo_name="org/repo",
                 base_branch="main",
                 base_sha="abc1234",
-                updates=[good, bad],
+                file_writes=[
+                    FileWrite(path="README.md", content="# Good\n"),
+                    FileWrite(path="docs/bad.md", content=""),
+                ],
                 pr_title="docs: update",
                 pr_body="body",
             )
 
-        # Only one file committed — the bad draft was skipped
+        # Only one file committed — the empty-content FileWrite was skipped
         assert mock_repo.create_file.call_count == 1
         assert mock_repo.create_file.call_args.args[0] == "README.md"
 
     def test_raises_if_no_files_committed(self):
         from unittest.mock import MagicMock, patch
 
-        from ai_reviewer.docs.analyzer import DocDraft, DocSuggestion
+        from ai_reviewer.docs.models import FileWrite
         from ai_reviewer.github.client import GitHubClient
-
-        bad = DocDraft(
-            suggestion=DocSuggestion(file="docs/bad.md", reason="stale"),
-            updated_content="",
-            error="fetch failed",
-        )
 
         mock_repo = MagicMock()
         mock_repo.get_contents.side_effect = Exception("not found")
@@ -2663,7 +2644,7 @@ class TestCreateDocUpdatePR:
                     repo_name="org/repo",
                     base_branch="main",
                     base_sha="abc1234",
-                    updates=[bad],
+                    file_writes=[FileWrite(path="docs/bad.md", content="")],
                     pr_title="docs: update",
                     pr_body="body",
                 )

@@ -28,7 +28,7 @@ from ai_reviewer.models.findings import ConsolidatedFinding, Severity, compute_f
 from ai_reviewer.models.review import ConsolidatedReview
 
 if TYPE_CHECKING:
-    from ai_reviewer.docs.analyzer import DocDraft
+    from ai_reviewer.docs.models import FileWrite
 
 logger = logging.getLogger(__name__)
 
@@ -1584,7 +1584,7 @@ class GitHubClient:
         repo_name: str,
         base_branch: str,
         base_sha: str,
-        updates: list[DocDraft],
+        file_writes: list[FileWrite],
         pr_title: str,
         pr_body: str,
         assignee: str | None = None,
@@ -1594,8 +1594,9 @@ class GitHubClient:
     ) -> str:
         """Create a branch, commit updated doc files, and open a PR.
 
-        *updates* is a list of ``DocDraft`` objects.  Only drafts with non-empty
-        ``updated_content`` and no ``error`` are committed.
+        *file_writes* is a list of ``FileWrite`` objects.  Each entry is
+        committed to the branch (create if absent, update if present).  Entries
+        with empty ``content`` are skipped.
 
         Returns the HTML URL of the newly opened PR.
         """
@@ -1617,45 +1618,34 @@ class GitHubClient:
             except Exception as e2:
                 raise RuntimeError(f"Could not create or reset branch {branch_name}: {e2}") from e2
 
-        # Commit each updated file onto the new branch
+        # Commit each FileWrite onto the new branch
         committed: list[str] = []
-        for doc_update in updates:
-            if not doc_update.updated_content or doc_update.error:
-                logger.warning(
-                    "Skipping %s: %s",
-                    doc_update.suggestion.file,
-                    doc_update.error or "empty content",
-                )
+        for fw in file_writes:
+            if not fw.content:
+                logger.warning("Skipping %s: empty content", fw.path)
                 continue
-            path = doc_update.suggestion.file
             try:
                 existing_sha: str | None = None
                 try:
-                    existing = repo.get_contents(path, ref=branch_name)
+                    existing = repo.get_contents(fw.path, ref=branch_name)
                     if not isinstance(existing, list):
                         existing_sha = existing.sha
                 except Exception as inner_e:
                     _raise_if_forbidden(inner_e)
                     # file doesn't exist yet — create it
 
-                commit_msg = f"docs: auto-update {path}"
+                commit_msg = f"docs: auto-update {fw.path}"
                 if existing_sha:
                     repo.update_file(
-                        path,
-                        commit_msg,
-                        doc_update.updated_content,
-                        existing_sha,
-                        branch=branch_name,
+                        fw.path, commit_msg, fw.content, existing_sha, branch=branch_name
                     )
                 else:
-                    repo.create_file(
-                        path, commit_msg, doc_update.updated_content, branch=branch_name
-                    )
-                committed.append(path)
-                logger.info("Committed updated %s to %s", path, branch_name)
+                    repo.create_file(fw.path, commit_msg, fw.content, branch=branch_name)
+                committed.append(fw.path)
+                logger.info("Committed %s to %s", fw.path, branch_name)
             except Exception as e:
                 _raise_if_forbidden(e)
-                logger.warning("Could not commit %s: %s", path, e)
+                logger.warning("Could not commit %s: %s", fw.path, e)
 
         if not committed:
             raise RuntimeError("No files were successfully committed — aborting PR creation")
