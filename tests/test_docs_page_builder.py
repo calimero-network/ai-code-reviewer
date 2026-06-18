@@ -102,8 +102,9 @@ async def test_create_page_orphan_guard_downgrades_when_nav_anchor_missing():
     section_block = '<div class="card gb"><h2>Widgets</h2><p>new</p></div>'
     with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
         inst = AsyncMock()
-        # First call = page body (unused after downgrade), then add_section block.
-        inst.run_completion = AsyncMock(side_effect=["<html>page</html>", section_block])
+        # nav anchor missing -> guard downgrades to apply_add_section, which makes ONE
+        # run_completion call for the section; build_new_page is never reached.
+        inst.run_completion = AsyncMock(return_value=section_block)
         MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
         MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
 
@@ -125,3 +126,32 @@ async def test_create_page_orphan_guard_downgrades_when_nav_anchor_missing():
     assert draft.action == "add_section"
     assert draft.target_path == "architecture/auto-follow.html"
     assert all(not fw.path.endswith("widgets.html") for fw in draft.aux_edits)
+
+
+@pytest.mark.asyncio
+async def test_create_page_orphan_guard_errors_when_no_best_fit():
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    change = Change("new_feature", "Widgets", "adds widgets", "y", [], [], "doc widgets")
+    action = DocAction(change=change, action="create_page", target_path="architecture/widgets.html")
+    with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+        inst = AsyncMock()
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+        draft = await apply_create_page(
+            action=action,
+            sibling_html=_SIBLING,
+            nav_js="const NAV = [];",
+            index_html="<html></html>",
+            change=change,
+            section_group="Nonexistent Section",
+            dot="#10b981",
+            anthropic_cfg=cfg,
+            model="m",
+            allow_new_sections=True,
+            best_fit_for_downgrade="",
+            best_fit_html="",
+        )
+    assert draft.error is not None
+    assert "orphan guard" in draft.error
+    assert draft.updated_content == ""
+    inst.run_completion.assert_not_called()

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 from typing import TYPE_CHECKING
 
@@ -26,7 +27,7 @@ Output ONLY the page HTML, nothing else."""
 
 def insert_nav_entry(nav_js: str, label: str, href: str, dot: str, section: str) -> str | None:
     """Insert a NAV entry right after the `{ section: '<section>' }` marker. None if absent."""
-    pattern = re.compile(r"(\{\s*section:\s*'" + re.escape(section) + r"'\s*\},?[ \t]*\n)")
+    pattern = re.compile(r"(\{\s*section:\s*['\"]" + re.escape(section) + r"['\"]\s*\},?[ \t]*\n)")
     m = pattern.search(nav_js)
     if not m:
         return None
@@ -118,20 +119,13 @@ async def apply_create_page(
         anthropic_cfg=anthropic_cfg,
         model=model,
     )
-    aux = [
-        FileWrite(
-            path="architecture/nav.js" if "/" in action.target_path else "nav.js",
-            content=new_nav,
-        )
-    ]
+    doc_dir = os.path.dirname(action.target_path)
+    nav_path = f"{doc_dir}/nav.js" if doc_dir else "nav.js"
+    index_path = f"{doc_dir}/index.html" if doc_dir else "index.html"
+    aux = [FileWrite(path=nav_path, content=new_nav)]
     new_index = insert_index_link(index_html, href, change.title, change.what_changed[:120])
     if new_index is not None:
-        aux.append(
-            FileWrite(
-                path="architecture/index.html" if "/" in action.target_path else "index.html",
-                content=new_index,
-            )
-        )
+        aux.append(FileWrite(path=index_path, content=new_index))
     return DocDraft(
         action="create_page",
         target_path=action.target_path,
