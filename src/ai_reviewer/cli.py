@@ -623,12 +623,16 @@ async def _update_docs_async(
 
     if result.skipped:
         for d in result.failed:
-            console.print(f"[yellow]⚠️  Skipped {d.suggestion.file}: {d.error}[/yellow]")
+            console.print(f"[yellow]⚠️  Skipped {d.target_path}: {d.error}[/yellow]")
         console.print(f"[dim]ℹ️  {result.skip_reason}[/dim]")
         return
 
     for d in result.failed:
-        console.print(f"[yellow]⚠️  Skipped {d.suggestion.file}: {d.error}[/yellow]")
+        console.print(f"[yellow]⚠️  Skipped {d.target_path}: {d.error}[/yellow]")
+
+    if result.flagged:
+        for d in result.flagged:
+            console.print(f"[yellow]⚑  Flagged {d.target_path}: {d.flagged_reason}[/yellow]")
 
     if not result.successful:
         console.print("[green]✅ No doc updates needed after scanning all candidates.[/green]")
@@ -639,7 +643,7 @@ async def _update_docs_async(
             f"\n[yellow]Dry run — would update {len(result.successful)} file(s):[/yellow]\n"
         )
         for draft in result.successful:
-            console.print(f"[bold]━━ {draft.suggestion.file} ━━[/bold]")
+            console.print(f"[bold]━━ {draft.target_path} ━━[/bold]")
             preview_lines = draft.updated_content.splitlines()[:60]
             console.print("\n".join(preview_lines))
             if len(draft.updated_content.splitlines()) > 60:
