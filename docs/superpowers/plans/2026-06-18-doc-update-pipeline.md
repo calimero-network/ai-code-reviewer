@@ -814,7 +814,7 @@ async def route_changes(
                     model=model, system=_ROUTE_SYSTEM, user=user, max_tokens=512
                 )
                 d = extract_json(raw)
-            except (ValueError, Exception) as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 — extract_json ValueError or any client error
                 logger.warning("Routing failed for %r: %s", change.title, exc)
                 continue
 
@@ -1548,7 +1548,7 @@ async def verify_draft(
                 model=model, system=_VERIFY_SYSTEM, user=user, max_tokens=512
             )
             v = extract_json(raw)
-        except (ValueError, Exception) as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 — extract_json ValueError or any client error
             logger.warning("Verify failed for %s: %s — flagging", draft.target_path, exc)
             return replace(draft, updated_content="",
                            flagged_reason=f"verification error: {exc}")
