@@ -109,7 +109,10 @@ async def apply_update_section(
             try:
                 retry = (
                     await client.run_completion(
-                        model=model, system=_UPDATE_SYSTEM, user=user + _REPAIR_NOTE, max_tokens=8192
+                        model=model,
+                        system=_UPDATE_SYSTEM,
+                        user=user + _REPAIR_NOTE,
+                        max_tokens=8192,
                     )
                 ).strip()
             except Exception:  # noqa: BLE001
