@@ -56,17 +56,34 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _SCRIPT_STYLE_RE = re.compile(r"(?is)<(script|style)\b.*?</\1>")
 _WS_RE = re.compile(r"[ \t]+")
 _HEADING_RE = re.compile(r"(?is)<h([1-6])[^>]*>(.*?)</h\1>")
-_PREVIEW_MAX_LINES = 14
-_PREVIEW_MAX_CHARS = 1400
+_CODE_RE = re.compile(r"(?is)<code[^>]*>(.*?)</code>")
+_STRONG_RE = re.compile(r"(?is)<(strong|b)[^>]*>(.*?)</\1>")
+_EM_RE = re.compile(r"(?is)<(em|i)[^>]*>(.*?)</\1>")
+_LI_RE = re.compile(r"(?is)<li[^>]*>(.*?)</li>")
+_PRE_RE = re.compile(r"(?is)<pre[^>]*>(.*?)</pre>")
+_BLOCK_RE = re.compile(r"(?is)</?(?:p|div|ul|ol|section|tr)[^>]*>|<br\s*/?>")
+_PREVIEW_MAX_LINES = 16
+_PREVIEW_MAX_CHARS = 1600
 
 
-def _strip_html(s: str) -> list[str]:
-    """HTML → plain-text lines: drop script/style, turn tags into line breaks,
-    decode entities, collapse whitespace."""
-    s = _SCRIPT_STYLE_RE.sub(" ", s)
-    s = _TAG_RE.sub("\n", s)
-    s = html.unescape(s)
-    return [ln for ln in (_WS_RE.sub(" ", x).strip() for x in s.splitlines()) if ln]
+def _norm(s: str) -> str:
+    """Strip leftover tags, decode entities, collapse intra-line whitespace."""
+    return _WS_RE.sub(" ", html.unescape(_TAG_RE.sub("", s))).strip()
+
+
+def _html_to_md_lines(fragment: str) -> list[str]:
+    """Convert an HTML fragment to Markdown lines: inline <code>/<strong>/<em>
+    become `code`/**bold**/*italics* (kept inline so prose stays whole), headings
+    become bold lines, <li> become bullets, block elements become line breaks."""
+    s = _SCRIPT_STYLE_RE.sub(" ", fragment)
+    s = _CODE_RE.sub(lambda m: f" `{_norm(m.group(1))}` ", s)
+    s = _STRONG_RE.sub(lambda m: f" **{_norm(m.group(2))}** ", s)
+    s = _EM_RE.sub(lambda m: f" *{_norm(m.group(2))}* ", s)
+    s = _PRE_RE.sub(lambda m: f"\n{_norm(m.group(1))}\n", s)
+    s = _HEADING_RE.sub(lambda m: f"\n**{_norm(m.group(2))}**\n", s)
+    s = _LI_RE.sub(lambda m: f"\n- {_norm(m.group(1))}\n", s)
+    s = _BLOCK_RE.sub("\n", s)
+    return [ln for ln in (_norm(x) for x in s.splitlines()) if ln]
 
 
 def _as_blockquote(lines: list[str]) -> str:
@@ -82,18 +99,25 @@ def _as_blockquote(lines: list[str]) -> str:
     return "\n".join(out)
 
 
+def _strip_html(s: str) -> list[str]:
+    """Plain-text lines (no Markdown) — used for the new-page heading fallback."""
+    return [
+        _norm(x) for x in _TAG_RE.sub("\n", _SCRIPT_STYLE_RE.sub(" ", s)).splitlines() if x.strip()
+    ]
+
+
 def _rendered_change(draft: DocDraft) -> str:
-    """Reviewer-facing preview of what the DOCS now say — the added prose with
-    HTML stripped (a heading outline for a brand-new page)."""
+    """Reviewer-facing preview of what the DOCS now say, as GitHub-rendered
+    Markdown — the added prose (a heading outline for a brand-new page)."""
     if draft.action == "create_page":
         items = []
         for lvl, raw in _HEADING_RE.findall(draft.updated_content):
-            txt = _WS_RE.sub(" ", html.unescape(_TAG_RE.sub("", raw))).strip()
+            txt = _norm(raw)
             if txt:
                 items.append(f"{'  ' * (int(lvl) - 1)}- {txt}")
         return _as_blockquote(items or _strip_html(draft.updated_content))
-    before = set(_strip_html(draft.before_content or ""))
-    added = [ln for ln in _strip_html(draft.updated_content) if ln not in before]
+    before = set(_html_to_md_lines(draft.before_content or ""))
+    added = [ln for ln in _html_to_md_lines(draft.updated_content) if ln not in before]
     return _as_blockquote(added) if added else "> _(no rendered-text delta — see file diff)_"
 
 
