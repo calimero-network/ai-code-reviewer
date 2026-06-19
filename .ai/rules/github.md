@@ -28,6 +28,12 @@ class GitHubClient:
     def probe_repo_paths(self, repo_name: str, ref: str, paths: list[str]) -> set[str]: ...
     def find_doc_bot_comment(self, pr: PullRequest, marker: str) -> int | None: ...
     def post_or_update_doc_comment(self, pr: PullRequest, body: str, marker: str) -> None: ...
+    async def create_doc_update_pr(self, repo: str, branch: str, file_writes: list[FileWrite], title: str, body: str) -> str: ...
+
+class FileWrite:
+    """Represents a file to be committed."""
+    path: str           # File path in repository
+    content: str        # File content (empty string skipped)
 
 class ReviewFormatter:
     """Formats ConsolidatedReview for different outputs."""
@@ -56,6 +62,9 @@ This module fetches data and posts results. Review logic is in orchestrator.
 
 ### G6: Doc-Bot Comment Deduplication
 `post_or_update_doc_comment` uses an HTML comment marker (`<!-- AI-CODE-REVIEWER-DOC-BOT -->`) to find and update an existing comment instead of creating duplicates. `find_doc_bot_comment` searches issue comments for the marker. `probe_repo_paths` checks whether convention files and architecture directories exist in the repo (short list, ~6-8 items, one `get_contents` call each).
+
+### G7: Documentation Update PR Creation
+`create_doc_update_pr` creates a PR with file updates by accepting a `list[FileWrite]` parameter. This decouples GitHub commit logic from domain objects, allowing commits of primary documentation pages and auxiliary files (nav.js, index.html) in a single PR. Entries with empty content are skipped during iteration.
 
 ## Webhook Handling
 
