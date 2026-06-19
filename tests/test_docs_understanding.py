@@ -183,3 +183,25 @@ async def test_map_reduce_all_unparseable_returns_empty_no_merge_call():
     assert cs.changes == []
     # Two per-file calls only — the merge call is skipped (no parseable partials).
     assert inst.run_completion.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_unparseable_summary_returns_empty_not_crash():
+    """A non-JSON stage-1 response yields an empty summary, not an unhandled error."""
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+        inst = AsyncMock()
+        inst.run_completion = AsyncMock(return_value="sorry, I can't produce JSON")
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+        cs = await summarize_pr_changes(
+            pr_title="t",
+            pr_body="",
+            commit_messages=[],
+            diff="small diff",
+            anthropic_cfg=cfg,
+            model="m",
+            max_diff_chars=10_000,
+        )
+    assert cs.changes == []
+    assert cs.pr_intent == "t"  # falls back to the PR title

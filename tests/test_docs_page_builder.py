@@ -182,10 +182,11 @@ def test_wire_new_pages_folds_multiple_pages_into_one_nav():
             },
         },
     ]
-    nav_out, index_out = wire_new_pages(
+    nav_out, index_out, wired = wire_new_pages(
         _NAV, '<html>Crate Index<div class="g3"></div></html>', metas
     )
     assert nav_out is not None
+    assert wired == {"widgets.html", "governance.html"}
     assert "widgets.html" in nav_out
     assert "governance.html" in nav_out
     # Both entries land after the section marker (only one exists in _NAV).
@@ -205,9 +206,10 @@ def test_wire_new_pages_returns_none_when_no_section_anchor():
             }
         }
     ]
-    nav_out, index_out = wire_new_pages(_NAV, "<html></html>", metas)
+    nav_out, index_out, wired = wire_new_pages(_NAV, "<html></html>", metas)
     assert nav_out is None
     assert index_out is None
+    assert wired == set()
 
 
 def test_insert_nav_entry_escapes_quotes_in_label():

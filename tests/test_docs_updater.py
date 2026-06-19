@@ -404,3 +404,82 @@ async def test_one_action_exception_does_not_abort_batch():
     assert len(result.successful) == 1
     assert result.successful[0].target_path == "architecture/concepts.html"
     assert gh.create_doc_update_pr.called
+
+
+@pytest.mark.asyncio
+async def test_create_page_not_committed_when_nav_unwired():
+    """A new page whose nav entry can't wire is dropped (no orphan page), not shipped."""
+    gh, _ = _gh_for("diff", ["architecture/auto-follow.html"])
+
+    def _fc(_repo, path, _ref):
+        m = MagicMock()
+        m.decoded_content = b"const NAV = [];" if path.endswith("nav.js") else b"<html></html>"
+        return m
+
+    gh.get_file_contents.side_effect = _fc
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    dg = DocGenerationSettings(enabled=True)
+    change = Change("new_feature", "Widgets", "w", "y", [], [], "i")
+    summary = ChangeSummary(pr_intent="i", changes=[change])
+    action = DocAction(change=change, action="create_page", target_path="architecture/widgets.html")
+    draft = DocDraft(
+        action="create_page",
+        target_path="architecture/widgets.html",
+        updated_content="<html>widgets</html>",
+        change=change,
+        aux_edits=[],
+        aux_meta={
+            "nav": {
+                "label": "Widgets",
+                "href": "widgets.html",
+                "dot": "#10b981",
+                "section": "Nonexistent Section",
+            },
+            "index": {"href": "widgets.html", "title": "Widgets", "blurb": "w"},
+        },
+    )
+    with (
+        patch("ai_reviewer.docs.updater.summarize_pr_changes", AsyncMock(return_value=summary)),
+        patch("ai_reviewer.docs.updater.route_changes", AsyncMock(return_value=[action])),
+        patch("ai_reviewer.docs.updater._apply_one", AsyncMock(return_value=draft)),
+        patch(
+            "ai_reviewer.docs.updater.verify_draft", AsyncMock(side_effect=lambda **kw: kw["draft"])
+        ),
+    ):
+        result = await run_doc_update(
+            repo="o/r", pr_number=1, gh=gh, anthropic_cfg=cfg, doc_generation=dg
+        )
+    assert result.skipped
+    assert not gh.create_doc_update_pr.called
+
+
+@pytest.mark.asyncio
+async def test_repo_model_override_also_drives_verify():
+    """Legacy repo `model` override flows to the verify stage too (not just apply)."""
+    gh, _ = _gh_for("diff", ["architecture/auto-follow.html"])
+    gh.load_repo_config.return_value = {
+        "doc_generation": {"enabled": True, "model": "repo-model"},
+        "documentation": {"static_docs_dirs": ["architecture/"]},
+    }
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    dg = DocGenerationSettings(enabled=True)
+    change = Change("fix", "t", "w", "y", [], ["crates/gov/src/lib.rs"], "i")
+    summary = ChangeSummary(pr_intent="i", changes=[change])
+    action = DocAction(
+        change=change, action="update_section", target_path="architecture/auto-follow.html"
+    )
+    good = DocDraft(
+        action="update_section",
+        target_path="architecture/auto-follow.html",
+        updated_content="<html>x</html>",
+        change=change,
+    )
+    with (
+        patch("ai_reviewer.docs.updater.summarize_pr_changes", AsyncMock(return_value=summary)),
+        patch("ai_reviewer.docs.updater.route_changes", AsyncMock(return_value=[action])),
+        patch("ai_reviewer.docs.updater.apply_update_section", AsyncMock(return_value=good)),
+        patch("ai_reviewer.docs.updater.verify_draft", AsyncMock(return_value=good)) as mock_verify,
+    ):
+        gh.get_file_contents.return_value = MagicMock(decoded_content=b"<html>old</html>")
+        await run_doc_update(repo="o/r", pr_number=1, gh=gh, anthropic_cfg=cfg, doc_generation=dg)
+    assert mock_verify.await_args.kwargs["model"] == "repo-model"

@@ -81,6 +81,16 @@ def _split_diff_by_file(diff: str) -> list[str]:
     return [c for c in chunks if c.strip()]
 
 
+def _safe_summary(raw: str, pr_intent_fallback: str) -> ChangeSummary:
+    """Parse a model summary; an unparseable response yields an empty summary
+    (the run skips) rather than aborting with an unhandled error."""
+    try:
+        return _summary_from_dict(extract_json(raw))
+    except ValueError as exc:
+        logger.warning("Stage-1 summary JSON unparseable (%s); returning empty summary", exc)
+        return ChangeSummary(pr_intent=pr_intent_fallback, changes=[])
+
+
 async def summarize_pr_changes(
     *,
     pr_title: str,
@@ -102,7 +112,7 @@ async def summarize_pr_changes(
                 user=_user_prompt(pr_title, pr_body, commit_messages, diff),
                 max_tokens=4096,
             )
-            return _summary_from_dict(extract_json(raw))
+            return _safe_summary(raw, pr_title)
 
         # Map-reduce: summarize each file chunk (truncated to the cap), then merge.
         logger.info("Diff %d chars exceeds cap %d — map-reduce", len(diff), max_diff_chars)
@@ -127,4 +137,4 @@ async def summarize_pr_changes(
         raw = await client.run_completion(
             model=model, system=_MERGE_SYSTEM, user=merged_input, max_tokens=4096
         )
-        return _summary_from_dict(extract_json(raw))
+        return _safe_summary(raw, pr_title)

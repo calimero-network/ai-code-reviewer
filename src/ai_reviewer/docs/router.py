@@ -66,18 +66,19 @@ def build_doc_index(existing_paths: list[str]) -> list[str]:
     return [p for p in existing_paths if p.startswith(_DOC_DIR_PREFIXES) and p.endswith(".html")]
 
 
-def _mapping_target(
+def _mapping_targets(
     change: Change,
     mapping: dict[str, list[str]],
     changed_paths: list[str],
-) -> str | None:
-    # Match the change's own files (fall back to PR-level when none). Explicit
-    # mapping targets return as-is — any extension; existence checked at apply time.
+) -> list[str]:
+    # Match the change's own files (fall back to PR-level when none). All mapped
+    # targets return as-is — any extension; existence checked at apply time.
     paths = change.files or changed_paths
+    out: list[str] = []
     for glob_pattern, targets in mapping.items():
         if any(fnmatch.fnmatch(p, glob_pattern) for p in paths):
-            return targets[0] if targets else None
-    return None
+            out.extend(t for t in targets if t not in out)
+    return out
 
 
 async def route_changes(
@@ -97,15 +98,16 @@ async def route_changes(
     needs_model: list[Change] = []
 
     for change in summary.changes:
-        target = _mapping_target(change, source_to_docs_mapping, changed_paths)
-        if target is not None:
-            actions.append(
+        targets = _mapping_targets(change, source_to_docs_mapping, changed_paths)
+        if targets:
+            actions.extend(
                 DocAction(
                     change=change,
                     action="update_section",
-                    target_path=target,
+                    target_path=t,
                     best_fit_reason="source_to_docs_mapping",
                 )
+                for t in targets
             )
         else:
             needs_model.append(change)

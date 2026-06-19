@@ -17,12 +17,12 @@ _CARD_CYCLE = ["ga", "gb", "gc", "gd"]
 _CONTENT_CLOSE_RE = re.compile(r"(\n</div>\s*\n</div>\s*\n<script src=\"nav\.js\")")
 
 _UPDATE_SYSTEM = """\
-You are updating an existing HTML documentation page after a code change.
-Output ONLY FIND/REPLACE blocks — do not return the whole file. Make the page reflect the
+You are updating an existing documentation file (HTML or Markdown) after a code change.
+Output ONLY FIND/REPLACE blocks — do not return the whole file. Make the file reflect the
 change described, including ADDING a sentence/bullet where the change introduces something new.
 Format (repeatable):
 <<<FIND
-exact text copied verbatim from the page (enough to be unique)
+exact text copied verbatim from the file (enough to be unique)
 FIND>>>
 <<<REPLACE
 replacement text

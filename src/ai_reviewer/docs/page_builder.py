@@ -141,13 +141,15 @@ async def apply_create_page(
 
 def wire_new_pages(
     baseline_nav: str, baseline_index: str, metas: list[dict]
-) -> tuple[str | None, str | None]:
-    """Fold every new page's nav entry into ONE nav.js and every index link into ONE index.html.
+) -> tuple[str | None, str | None, set[str]]:
+    """Fold new pages' nav entries into ONE nav.js and their index links into ONE index.html.
 
-    Returns (nav_content_or_None, index_content_or_None) — None when nothing was wired/changed.
+    Returns (nav|None, index|None, wired_hrefs); wired_hrefs are the pages whose nav
+    entry was inserted — only those should be committed (others would be orphans).
     """
     nav = baseline_nav
     nav_changed = False
+    wired: set[str] = set()
     for m in metas:
         n = m.get("nav")
         if not n:
@@ -155,13 +157,14 @@ def wire_new_pages(
         updated = insert_nav_entry(nav, n["label"], n["href"], n["dot"], n["section"])
         if updated is not None:
             nav, nav_changed = updated, True
+            wired.add(n["href"])
     index = baseline_index
     index_changed = False
     for m in metas:
         ix = m.get("index")
-        if not ix:
+        if not ix or ix.get("href") not in wired:  # don't link an unwired page
             continue
         updated = insert_index_link(index, ix["href"], ix["title"], ix["blurb"])
         if updated is not None:
             index, index_changed = updated, True
-    return (nav if nav_changed else None, index if index_changed else None)
+    return (nav if nav_changed else None, index if index_changed else None, wired)

@@ -171,7 +171,9 @@ async def run_doc_update(
     eff_understanding_model = (
         repo_docgen.get("understanding_model") or doc_generation.understanding_model
     )
-    eff_verify_model = repo_docgen.get("verify_model") or doc_generation.verify_model
+    eff_verify_model = (
+        repo_docgen.get("verify_model") or repo_docgen.get("model") or doc_generation.verify_model
+    )
     eff_pr_labels = repo_docgen.get("pr_labels", doc_generation.pr_labels)
     eff_pr_draft = repo_docgen.get("pr_draft", doc_generation.pr_draft)
     eff_max_diff = int(
@@ -281,28 +283,46 @@ async def run_doc_update(
             skip_reason=reason,
         )
 
+    # create_page drafts are committed only after their nav entry wires (below);
+    # everything else commits its content + aux edits directly.
     file_writes: list[FileWrite] = []
-    for d in successful:
-        file_writes.append(FileWrite(path=d.target_path, content=d.updated_content))
-        file_writes.extend(d.aux_edits)
-
-    # Wire new pages per-directory so multiple new pages share one nav.js/index.html
-    # (no clobber); pages in other dirs wire into their own nav.
     create_by_dir: dict[str, list[DocDraft]] = {}
     for d in successful:
         if d.action == "create_page" and d.aux_meta:
             create_by_dir.setdefault(os.path.dirname(d.target_path), []).append(d)
+        else:
+            file_writes.append(FileWrite(path=d.target_path, content=d.updated_content))
+            file_writes.extend(d.aux_edits)
+
+    # Wire new pages per-directory so multiple new pages share one nav.js/index.html
+    # (no clobber); a page ships ONLY if its nav entry wired (orphan guard).
     for target_dir, group in create_by_dir.items():
         prefix = f"{target_dir}/" if target_dir else ""
         baseline_nav = _read_file(gh, repo, f"{prefix}nav.js", ref) or ""
         baseline_index = _read_file(gh, repo, f"{prefix}index.html", ref) or ""
-        nav_content, index_content = wire_new_pages(
+        nav_content, index_content, wired = wire_new_pages(
             baseline_nav, baseline_index, [d.aux_meta for d in group if d.aux_meta]
         )
+        for d in group:
+            href = (d.aux_meta or {}).get("nav", {}).get("href")
+            if href in wired:
+                file_writes.append(FileWrite(path=d.target_path, content=d.updated_content))
+            else:
+                logger.warning(
+                    "Skipping new page %s: nav wiring failed (orphan guard)", d.target_path
+                )
         if nav_content is not None:
             file_writes.append(FileWrite(path=f"{prefix}nav.js", content=nav_content))
         if index_content is not None:
             file_writes.append(FileWrite(path=f"{prefix}index.html", content=index_content))
+
+    if not file_writes:
+        return DocUpdateResult(
+            failed=failed,
+            flagged=flagged,
+            skipped=True,
+            skip_reason="no committable doc updates (new pages could not be wired)",
+        )
 
     pr_url = gh.create_doc_update_pr(
         repo_name=repo,
