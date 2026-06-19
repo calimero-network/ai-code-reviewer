@@ -483,3 +483,61 @@ async def test_repo_model_override_also_drives_verify():
         gh.get_file_contents.return_value = MagicMock(decoded_content=b"<html>old</html>")
         await run_doc_update(repo="o/r", pr_number=1, gh=gh, anthropic_cfg=cfg, doc_generation=dg)
     assert mock_verify.await_args.kwargs["model"] == "repo-model"
+
+
+@pytest.mark.asyncio
+async def test_pr_body_excludes_orphan_skipped_page():
+    """PR body lists only committed docs; an orphan-skipped new page is not listed."""
+    gh, _ = _gh_for("diff", ["architecture/auto-follow.html"])
+
+    def _fc(_repo, path, _ref):
+        m = MagicMock()
+        m.decoded_content = b"const NAV = [];" if path.endswith("nav.js") else b"<html>old</html>"
+        return m
+
+    gh.get_file_contents.side_effect = _fc
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    dg = DocGenerationSettings(enabled=True)
+    c1 = Change("fix", "A", "wa", "y", [], ["crates/gov/a.rs"], "i")
+    c2 = Change("new_feature", "Widgets", "wb", "y", [], [], "i")
+    summary = ChangeSummary(pr_intent="i", changes=[c1, c2])
+    a1 = DocAction(change=c1, action="update_section", target_path="architecture/auto-follow.html")
+    a2 = DocAction(change=c2, action="create_page", target_path="architecture/widgets.html")
+    d1 = DocDraft(
+        action="update_section",
+        target_path="architecture/auto-follow.html",
+        updated_content="<html>up</html>",
+        change=c1,
+    )
+    d2 = DocDraft(
+        action="create_page",
+        target_path="architecture/widgets.html",
+        updated_content="<html>w</html>",
+        change=c2,
+        aux_edits=[],
+        aux_meta={
+            "nav": {
+                "label": "W",
+                "href": "widgets.html",
+                "dot": "#10b981",
+                "section": "Nonexistent",
+            },
+            "index": None,
+        },
+    )
+    with (
+        patch("ai_reviewer.docs.updater.summarize_pr_changes", AsyncMock(return_value=summary)),
+        patch("ai_reviewer.docs.updater.route_changes", AsyncMock(return_value=[a1, a2])),
+        patch("ai_reviewer.docs.updater._apply_one", AsyncMock(side_effect=[d1, d2])),
+        patch(
+            "ai_reviewer.docs.updater.verify_draft", AsyncMock(side_effect=lambda **kw: kw["draft"])
+        ),
+    ):
+        result = await run_doc_update(
+            repo="o/r", pr_number=1, gh=gh, anthropic_cfg=cfg, doc_generation=dg
+        )
+    assert gh.create_doc_update_pr.called
+    body = gh.create_doc_update_pr.call_args.kwargs["pr_body"]
+    assert "auto-follow.html" in body
+    assert "widgets.html" not in body  # orphan-skipped -> not listed as updated
+    assert all(d.target_path != "architecture/widgets.html" for d in result.successful)

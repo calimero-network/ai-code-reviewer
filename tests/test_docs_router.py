@@ -196,3 +196,45 @@ def test_mapping_targets_prefer_change_files():
     md_map = {"src/**": ["docs/api.md", "README.md"]}
     md_change = Change("fix", "t", "w", "y", [], ["src/x.py"], "i")
     assert _mapping_targets(md_change, md_map, ["src/x.py"]) == ["docs/api.md", "README.md"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_create_page_targets_coalesce():
+    """Two changes routed to the same NEW page path collapse to one create_page action."""
+    from ai_reviewer.docs.models import ChangeSummary
+
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    summary = ChangeSummary(
+        pr_intent="x",
+        changes=[
+            Change("new_feature", "A", "wa", "y", [], ["crates/w/a.rs"], "i"),
+            Change("new_feature", "B", "wb", "y", [], ["crates/w/b.rs"], "i"),
+        ],
+    )
+    decision = json.dumps(
+        {
+            "action": "create_page",
+            "target_path": "architecture/widgets.html",
+            "anchor": None,
+            "best_fit_reason": "x",
+            "best_fit_existing": "",
+        }
+    )
+    with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+        inst = AsyncMock()
+        inst.run_completion = AsyncMock(return_value=decision)
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+        actions = await route_changes(
+            summary=summary,
+            source_to_docs_mapping={},
+            changed_paths=["crates/w/a.rs", "crates/w/b.rs"],
+            doc_index=["architecture/auto-follow.html"],
+            allow_new_pages=True,
+            allow_new_sections=True,
+            anthropic_cfg=cfg,
+            model="m",
+        )
+    create = [a for a in actions if a.target_path == "architecture/widgets.html"]
+    assert len(create) == 1  # deduped, not two
+    assert "wa" in create[0].change.what_changed and "wb" in create[0].change.what_changed

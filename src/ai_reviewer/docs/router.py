@@ -30,14 +30,11 @@ def _merge_changes(a: Change, b: Change) -> Change:
 
 
 def _coalesce_actions(actions: list[DocAction]) -> list[DocAction]:
-    """One action per existing-page target (create_page stays distinct); merges
-    same-target changes so a single combined edit ships per page (no clobber)."""
+    """One action per target_path; merges same-target changes into a single edit
+    (covers update/add AND duplicate create_page) so no two writes clobber one path."""
     by_path: dict[str, DocAction] = {}
     ordered: list[DocAction] = []
     for a in actions:
-        if a.action == "create_page":
-            ordered.append(a)
-            continue
         existing = by_path.get(a.target_path)
         if existing is not None:
             existing.change = _merge_changes(existing.change, a.change)

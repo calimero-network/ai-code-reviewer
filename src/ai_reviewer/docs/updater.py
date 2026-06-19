@@ -324,16 +324,21 @@ async def run_doc_update(
             skip_reason="no committable doc updates (new pages could not be wired)",
         )
 
+    # Report only drafts whose content was actually committed — an orphan-skipped
+    # create_page is in `successful` but was never written to the branch.
+    shipped_paths = {fw.path for fw in file_writes}
+    shipped = [d for d in successful if d.target_path in shipped_paths]
+
     pr_url = gh.create_doc_update_pr(
         repo_name=repo,
         base_branch=base_branch,
         base_sha=ref,
         file_writes=file_writes,
         pr_title=f"docs: auto-update for PR #{pr_number} — {pr.title}",
-        pr_body=_build_pr_body(pr_number, pr.html_url, successful, flagged),
+        pr_body=_build_pr_body(pr_number, pr.html_url, shipped, flagged),
         assignee=pr.user.login if pr.user else None,
         labels=eff_pr_labels,
         draft=eff_pr_draft,
         pr_number=pr_number,
     )
-    return DocUpdateResult(successful=successful, failed=failed, flagged=flagged, pr_url=pr_url)
+    return DocUpdateResult(successful=shipped, failed=failed, flagged=flagged, pr_url=pr_url)
