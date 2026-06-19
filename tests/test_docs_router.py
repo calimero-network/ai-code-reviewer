@@ -238,3 +238,34 @@ async def test_duplicate_create_page_targets_coalesce():
     create = [a for a in actions if a.target_path == "architecture/widgets.html"]
     assert len(create) == 1  # deduped, not two
     assert "wa" in create[0].change.what_changed and "wb" in create[0].change.what_changed
+
+
+@pytest.mark.asyncio
+async def test_empty_target_path_dropped():
+    """A routed action with an empty target_path (e.g. create_page) is dropped, not appended."""
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    decision = json.dumps(
+        {
+            "action": "create_page",
+            "target_path": "",
+            "anchor": None,
+            "best_fit_reason": "x",
+            "best_fit_existing": "",
+        }
+    )
+    with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+        inst = AsyncMock()
+        inst.run_completion = AsyncMock(return_value=decision)
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+        actions = await route_changes(
+            summary=_summary("new_feature", ["crates/w/a.rs"]),
+            source_to_docs_mapping={},
+            changed_paths=["crates/w/a.rs"],
+            doc_index=["architecture/auto-follow.html"],
+            allow_new_pages=True,
+            allow_new_sections=True,
+            anthropic_cfg=cfg,
+            model="m",
+        )
+    assert actions == []

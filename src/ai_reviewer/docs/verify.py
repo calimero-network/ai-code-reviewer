@@ -51,7 +51,10 @@ async def verify_draft(
             logger.warning("Verify failed for %s: %s — flagging", draft.target_path, exc)
             return replace(draft, updated_content="", flagged_reason=f"verification error: {exc}")
 
-    reflects = bool(v.get("reflects_change", False))
+    # Parse robustly: a JSON string like "false" is truthy under bool(); only an
+    # explicit true (bool or "true") counts as reflecting — everything else flags.
+    _rc = v.get("reflects_change", False)
+    reflects = _rc is True or (isinstance(_rc, str) and _rc.strip().lower() == "true")
     confidence = str(v.get("confidence", "low"))
     notes = str(v.get("notes", ""))
     if reflects and meets_threshold(confidence, threshold):

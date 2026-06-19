@@ -117,3 +117,26 @@ async def test_high_confidence_rejection_not_labeled_low_confidence():
     assert out.flagged_reason is not None
     assert "does not reflect" in out.flagged_reason
     assert "low-confidence" not in out.flagged_reason
+
+
+@pytest.mark.asyncio
+async def test_string_false_reflects_change_is_flagged():
+    """A JSON string 'false' for reflects_change must NOT pass the gate (bool('false') is truthy)."""
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    c = Change("fix", "t", "w", "y", [], [], "i")
+    draft = DocDraft(
+        action="update_section",
+        target_path="x.html",
+        updated_content="<p>x</p>",
+        before_content="<p>old</p>",
+        change=c,
+    )
+    verdict = json.dumps({"reflects_change": "false", "confidence": "high", "notes": "no"})
+    with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+        inst = AsyncMock()
+        inst.run_completion = AsyncMock(return_value=verdict)
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+        out = await verify_draft(draft=draft, anthropic_cfg=cfg, model="m", threshold="medium")
+    assert out.updated_content == ""  # flagged, not shipped
+    assert out.flagged_reason is not None

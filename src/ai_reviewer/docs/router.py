@@ -143,8 +143,9 @@ async def route_changes(
                 action = "update_section"
             if action in ("update_section", "add_section") and not target_path:
                 target_path = best_fit
-                if not target_path:
-                    continue
+            if not target_path:  # covers create_page too — never route to an empty path
+                logger.info("Dropping change %r: empty target_path", change.title)
+                continue
 
             actions.append(
                 DocAction(
