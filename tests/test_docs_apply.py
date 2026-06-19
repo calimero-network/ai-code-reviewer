@@ -63,21 +63,68 @@ async def test_apply_update_section_uses_find_replace():
 
 
 @pytest.mark.asyncio
-async def test_apply_update_section_bad_patch_flags():
+async def test_apply_update_section_bad_patch_flags_when_no_fallback():
+    """A patch that never applies errors out when the add_section fallback is disabled.
+    Two model calls: the initial attempt + one verbatim-copy retry, both unmatched."""
     cfg = AnthropicApiConfig(api_key="sk-test")
     change = Change("fix", "t", "w", "y", [], [], "i")
     action = DocAction(change=change, action="update_section", target_path="architecture/x.html")
+    bad = "<<<FIND\nNOT PRESENT\nFIND>>>\n<<<REPLACE\nx\nREPLACE>>>"
     with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
         inst = AsyncMock()
-        inst.run_completion = AsyncMock(
-            return_value="<<<FIND\nNOT PRESENT\nFIND>>>\n<<<REPLACE\nx\nREPLACE>>>"
+        inst.run_completion = AsyncMock(return_value=bad)
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        draft = await apply_update_section(
+            action, "<p>actual</p>", change, cfg, "m", allow_new_sections=False
         )
+    assert draft.updated_content == ""
+    assert draft.error is not None
+    assert inst.run_completion.call_count == 2  # initial + one repair retry
+
+
+@pytest.mark.asyncio
+async def test_apply_update_section_retries_then_succeeds():
+    """A first patch whose FIND doesn't match is retried; the corrected retry applies."""
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    change = Change("fix", "t", "w", "y", [], [], "i")
+    action = DocAction(change=change, action="update_section", target_path="architecture/x.html")
+    bad = "<<<FIND\nNOT PRESENT\nFIND>>>\n<<<REPLACE\nx\nREPLACE>>>"
+    good = "<<<FIND\n<p>actual</p>\nFIND>>>\n<<<REPLACE\n<p>fixed</p>\nREPLACE>>>"
+    with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+        inst = AsyncMock()
+        inst.run_completion = AsyncMock(side_effect=[bad, good])
         MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
         MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
 
         draft = await apply_update_section(action, "<p>actual</p>", change, cfg, "m")
-    assert draft.updated_content == ""
-    assert draft.error is not None
+    assert draft.error is None
+    assert draft.action == "update_section"
+    assert draft.updated_content == "<p>fixed</p>"
+    assert inst.run_completion.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_apply_update_section_falls_back_to_add_section():
+    """When neither attempt applies, fall back to an additive section (still ships)."""
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    change = Change("fix", "Widgets", "adds widgets", "y", [], [], "doc widgets")
+    action = DocAction(change=change, action="update_section", target_path="architecture/x.html")
+    bad = "<<<FIND\nNOT PRESENT\nFIND>>>\n<<<REPLACE\nx\nREPLACE>>>"
+    section = '<div class="card gc"><h2>Widgets</h2><p>new</p></div>'
+    with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+        inst = AsyncMock()
+        # initial bad, retry bad, then the add_section fallback's section block.
+        inst.run_completion = AsyncMock(side_effect=[bad, bad, section])
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        draft = await apply_update_section(action, _PAGE, change, cfg, "m")
+    assert draft.error is None
+    assert draft.action == "add_section"  # downgraded from update_section
+    assert "Widgets" in draft.updated_content
+    assert inst.run_completion.call_count == 3
 
 
 @pytest.mark.asyncio
