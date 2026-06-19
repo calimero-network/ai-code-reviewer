@@ -48,7 +48,7 @@ _PAGE = (
 
 
 @pytest.mark.asyncio
-async def test_pr2792_summary_captures_behavior_not_just_rename():
+async def test_summary_captures_behavior_not_just_rename():
     cfg = AnthropicApiConfig(api_key="sk-test")
     realistic = json.dumps(
         {
@@ -92,7 +92,7 @@ async def test_pr2792_summary_captures_behavior_not_just_rename():
 
 
 @pytest.mark.asyncio
-async def test_pr2792_update_adds_invariant_and_preserves_page():
+async def test_update_adds_invariant_and_preserves_page():
     cfg = AnthropicApiConfig(api_key="sk-test")
     change = Change(
         "behavior_change",
@@ -138,7 +138,7 @@ async def test_pr2792_update_adds_invariant_and_preserves_page():
 
 
 @pytest.mark.asyncio
-async def test_pr2792_bare_rename_would_be_flagged():
+async def test_bare_rename_is_flagged():
     """A cosmetic rename-only edit that doesn't convey the invariant must be flagged."""
     cfg = AnthropicApiConfig(api_key="sk-test")
     change = Change(
