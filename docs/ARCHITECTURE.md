@@ -75,7 +75,14 @@ flowchart LR
 | `github/formatter.py` | `GitHubFormatter`: markdown bodies, compact/delta layouts, review actions, JSON export |
 | `github/webhook.py` | FastAPI app, HMAC verification, PR + `/ai-review` comment handlers |
 | `docs/__init__.py` | Package init for documentation review module |
-| `docs/analyzer.py` | `DocAnalyzer`, `DocSuggestion`, `is_architecture_impacting`, `format_doc_comment` — rule-based doc review |
+| `docs/analyzer.py` | `DocAnalyzer`, `is_architecture_impacting`, `_apply_html_patches` (whitespace-tolerant HTML patcher), `format_doc_comment` — rule-based doc review |
+| `docs/models.py` | Doc-update pipeline contracts: `Change`, `ChangeSummary`, `DocAction`, `DocDraft`, `FileWrite`, `Verdict`, `extract_json` |
+| `docs/understanding.py` | Stage 1 — `summarize_pr_changes` (full-PR → `ChangeSummary`; map-reduce for large diffs) |
+| `docs/router.py` | Stage 2 — `route_changes` (map each change to update_section / add_section / create_page) |
+| `docs/apply.py` | Stage 3 — `apply_update_section`, `apply_add_section` (FIND/REPLACE + card insertion) |
+| `docs/page_builder.py` | Stage 3 — `apply_create_page`, `wire_new_pages` (new page from sibling + nav/index wiring, orphan guard) |
+| `docs/verify.py` | Stage 4 — `verify_draft` (confidence gate: flag, don't ship) |
+| `docs/updater.py` | `run_doc_update` orchestrator: Understand → Route → Apply → Verify → open PR (or flag) |
 
 ---
 
@@ -394,7 +401,23 @@ Runs after agents complete and delta is computed:
 
 ## 7. Documentation Review
 
-A rule-based check that runs after the main AI review. It detects architecture-impacting changes and flags missing documentation updates. No LLM calls are consumed — the check is fast, free, and deterministic.
+There are **two distinct documentation features**:
+
+1. **Rule-based PR-comment review** (this section, below) — `DocAnalyzer`, no LLM calls; flags docs that *may* be stale as a PR comment.
+2. **AI Doc-Update Pipeline** (`ai-reviewer update-docs`, next) — actually *rewrites* stale docs and opens a PR.
+
+### AI Doc-Update Pipeline (`update-docs`)
+
+On merge, `run_doc_update` (`docs/updater.py`) runs four isolated, independently-testable stages:
+
+| Stage | Module | Responsibility |
+|-------|--------|----------------|
+| **Understand** | `understanding.py` | `summarize_pr_changes` reads the *full* PR (title + body + commits + diff) once into a structured `ChangeSummary`; map-reduces diffs above `max_understanding_diff_chars`. Replaces the old blind 4,000-char diff truncation that caused behavioral changes to be missed. |
+| **Route** | `router.py` | `route_changes` maps each change to `update_section` / `add_section` / `create_page` (deterministic `source_to_docs_mapping` first, an LLM tie-break otherwise); changes targeting the same page are coalesced into one edit. |
+| **Apply** | `apply.py`, `page_builder.py` | Surgical FIND/REPLACE for existing sections (reusing `_apply_html_patches`), additive `add_section`, or a whole new page cloned from a sibling and wired into `nav.js`/`index.html` with an **orphan guard** (a new page is never committed unless its nav entry is). |
+| **Verify** | `verify.py` | `verify_draft` is a confidence gate — a draft that does not reflect its change (or is below `verify_confidence_threshold`) is **flagged for a human, not shipped**. |
+
+The orchestrator bounds work to `max_files`, applies per-repo `doc_generation` overrides, builds the PR body (an *Updated* section plus a *Flagged for human review* section), and — when nothing ships confidently — posts a comment listing the flagged docs instead of opening an empty PR. Nothing is auto-merged. A regression test (`tests/test_regression_pr2792.py`) locks in that a behavioral change is captured rather than reduced to a bare rename.
 
 ### Two-Tier Design
 

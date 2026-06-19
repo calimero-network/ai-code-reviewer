@@ -146,6 +146,17 @@ class DocGenerationSettings:
     pr_labels: list[str] = field(default_factory=lambda: ["automated-docs", "documentation"])
     # Open doc update PRs as drafts so they don't appear ready to merge.
     pr_draft: bool = True
+    # Stage models for the Understand → Route → Apply → Verify pipeline.
+    understanding_model: str = "claude-sonnet-4-6"
+    apply_model: str = "claude-haiku-4-5-20251001"
+    verify_model: str = "claude-haiku-4-5-20251001"
+    # Full-PR read budget for stage 1; above this, map-reduce per file.
+    max_understanding_diff_chars: int = 250_000
+    # Capability gates.
+    allow_new_pages: bool = True
+    allow_new_sections: bool = True
+    # Below this verifier confidence, flag instead of ship: "low" | "medium" | "high".
+    verify_confidence_threshold: str = "medium"
 
 
 @dataclass
@@ -342,15 +353,23 @@ def _parse_config(raw: dict[str, Any]) -> Config:
 
     # Doc generation settings
     docgen_raw = raw.get("doc_generation", {})
+    _dg_model = docgen_raw.get("model", "claude-haiku-4-5-20251001")
     doc_generation = DocGenerationSettings(
         enabled=docgen_raw.get("enabled", False),
-        model=docgen_raw.get("model", "claude-haiku-4-5-20251001"),
+        model=_dg_model,
         max_files=docgen_raw.get("max_files", 15),
         static_docs_dirs=docgen_raw.get(
             "static_docs_dirs", ["architecture/", "docs/", "docs-static/"]
         ),
         pr_labels=docgen_raw.get("pr_labels", ["automated-docs", "documentation"]),
         pr_draft=docgen_raw.get("pr_draft", True),
+        understanding_model=docgen_raw.get("understanding_model", "claude-sonnet-4-6"),
+        apply_model=docgen_raw.get("apply_model", _dg_model),
+        verify_model=docgen_raw.get("verify_model", _dg_model),
+        max_understanding_diff_chars=int(docgen_raw.get("max_understanding_diff_chars", 250_000)),
+        allow_new_pages=bool(docgen_raw.get("allow_new_pages", True)),
+        allow_new_sections=bool(docgen_raw.get("allow_new_sections", True)),
+        verify_confidence_threshold=docgen_raw.get("verify_confidence_threshold", "medium"),
     )
 
     return Config(

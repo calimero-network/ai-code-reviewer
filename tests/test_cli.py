@@ -133,41 +133,29 @@ class TestUpdateDocsCLI:
         assert "REPO" in result.output
 
     def test_update_docs_dry_run_no_mapping(self):
-        """When repo has no source_to_docs_mapping, exits cleanly."""
+        """When run_doc_update returns skipped, CLI exits cleanly."""
         from ai_reviewer.cli import cli
+        from ai_reviewer.docs.updater import DocUpdateResult
 
         runner = CliRunner()
+        skipped_result = DocUpdateResult(
+            skipped=True, skip_reason="no doc-relevant changes detected"
+        )
         with (
             patch("ai_reviewer.cli.load_config") as mock_cfg,
             patch("ai_reviewer.cli.validate_config", return_value=[]),
-            patch("ai_reviewer.cli.GitHubClient") as MockGH,
+            patch("ai_reviewer.cli.GitHubClient"),
+            patch("ai_reviewer.cli.run_doc_update", new=AsyncMock(return_value=skipped_result)),
         ):
             mock_cfg.return_value.anthropic.api_key = "sk-test"
             mock_cfg.return_value.anthropic = MagicMock(api_key="sk-test")
             mock_cfg.return_value.github.token = "ghp_test"
-            mock_cfg.return_value.doc_generation = MagicMock(
-                model="claude-sonnet-4-6",
-                max_files=15,
-                static_docs_dirs=["docs/", "docs-static/"],
-                pr_labels=["automated-docs"],
-                pr_draft=True,
-            )
-
-            mock_pr = MagicMock()
-            mock_pr.base.ref = "main"
-            mock_pr.merge_commit_sha = "abc123"
-            mock_pr.get_files.return_value = []
-
-            gh_instance = MockGH.return_value
-            gh_instance.get_pull_request.return_value = mock_pr
-            gh_instance.load_repo_config.return_value = {}  # no doc_generation config
-            gh_instance.has_open_doc_update_pr.return_value = False
-            gh_instance.get_html_files_in_dirs.return_value = []  # no HTML files found
+            mock_cfg.return_value.doc_generation = MagicMock()
 
             result = runner.invoke(cli, ["update-docs", "org/repo", "42", "--dry-run"])
 
         assert result.exit_code == 0
-        assert "no stale documentation detected" in result.output
+        assert "no doc-relevant changes detected" in result.output
 
 
 class TestDocGenerationSettings:

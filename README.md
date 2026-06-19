@@ -248,14 +248,13 @@ The `review-pr` command includes a built-in documentation review that runs along
 
 When stale documentation is detected, the reviewer can automatically generate updated file content and open a PR with the real changes — not just a comment telling you to update them.
 
-**Flow:**
-1. Feature PR merges to `main`
-2. CI triggers `ai-reviewer update-docs` on the merge
-3. `update-docs` runs `DocAnalyzer`, finds stale docs via `source_to_docs_mapping`
-4. Calls **Claude Sonnet** to rewrite each stale file in full
-5. Commits the updated files to a new branch `docs/auto-<sha>`
-6. Opens a PR against `main`, assigned to the original PR author
-7. Author reviews the diff and merges — **nothing auto-merges**
+**Flow** — a four-stage pipeline (`Understand → Route → Apply → Verify`):
+1. Feature PR merges to `main`; CI triggers `ai-reviewer update-docs` on the merge
+2. **Understand** — reads the *full* merged PR (title, body, commits, diff) once into a structured change summary (no blind diff truncation)
+3. **Route** — maps each change to a doc action: update an existing section, add a new section, or create a new page (honouring `source_to_docs_mapping`)
+4. **Apply** — drafts the edits: surgical FIND/REPLACE for HTML, additive sections, or whole new pages wired into `nav.js`/`index.html`
+5. **Verify** — a confidence gate; edits that don't reflect the change are **flagged for a human, not shipped**
+6. Commits confident updates to a new branch `docs/auto-<sha>` and opens a PR against `main`, assigned to the original PR author; flagged docs are listed in the PR body. **Nothing auto-merges.**
 
 **Setup: two steps**
 
@@ -269,7 +268,10 @@ documentation:
 
 doc_generation:
   enabled: true
-  model: claude-sonnet-4-6
+  understanding_model: claude-sonnet-4-6   # stage 1: full-PR comprehension
+  apply_model: claude-haiku-4-5-20251001   # stage 3: drafting edits/pages
+  allow_new_pages: true                    # may create + wire new pages
+  verify_confidence_threshold: medium      # below this, flag for a human
   max_files: 5
 ```
 

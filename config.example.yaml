@@ -179,11 +179,21 @@ doc_review:
 # Disabled by default. Enable per-repo in .ai-reviewer.yaml.
 doc_generation:
   enabled: false
-  model: claude-haiku-4-5-20251001   # Haiku is sufficient for prose/HTML drafting
-  max_files: 15              # max Claude calls per run (HTML pages + Markdown)
 
-  # Directories containing static HTML GitHub Pages docs.
-  # update-docs will scan these for .html files and update stale pages on merge.
+  # update-docs pipeline: Understand -> Route -> Apply -> Verify.
+  understanding_model: claude-sonnet-4-6        # stage 1: reads the full PR
+  apply_model: claude-haiku-4-5-20251001        # stage 3: drafts edits/pages
+  verify_model: claude-haiku-4-5-20251001       # stage 4: confidence gate
+  model: claude-haiku-4-5-20251001              # legacy fallback for apply/verify
+
+  max_files: 15                          # max doc targets per run
+  max_understanding_diff_chars: 250000   # stage-1 read budget
+
+  allow_new_sections: true              # add sections to existing pages
+  allow_new_pages: true                 # create new pages (wired into nav.js + index.html)
+  verify_confidence_threshold: medium   # below this -> flag for a human (low|medium|high)
+
+  # Static HTML doc dirs scanned for stale pages on merge.
   static_docs_dirs:
     - "docs/"
     - "docs-static/"
