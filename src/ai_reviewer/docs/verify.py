@@ -56,8 +56,8 @@ async def verify_draft(
     notes = str(v.get("notes", ""))
     if reflects and meets_threshold(confidence, threshold):
         return draft
-    return replace(
-        draft,
-        updated_content="",
-        flagged_reason=f"low-confidence doc update ({confidence}): {notes}",
-    )
+    if not reflects:
+        reason = f"does not reflect the change ({confidence} confidence): {notes}"
+    else:
+        reason = f"low-confidence doc update ({confidence}): {notes}"
+    return replace(draft, updated_content="", flagged_reason=reason)

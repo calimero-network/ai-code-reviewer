@@ -156,11 +156,13 @@ async def run_doc_update(
         return DocUpdateResult(skipped=True, skip_reason="doc_generation not enabled")
 
     doc_config = repo_config.get("documentation") or {}
-    static_dirs = (
-        repo_docgen.get("static_docs_dirs")
-        or doc_config.get("static_docs_dirs")
-        or doc_generation.static_docs_dirs
-    )
+    # Explicit None-checks (not `or`) so an empty-list override (`[]`, "no HTML scan")
+    # is honored instead of falling through to defaults.
+    static_dirs = repo_docgen.get("static_docs_dirs")
+    if static_dirs is None:
+        static_dirs = doc_config.get("static_docs_dirs")
+    if static_dirs is None:
+        static_dirs = doc_generation.static_docs_dirs
     doc_dir = static_dirs[0] if static_dirs else "architecture/"
     mapping = doc_config.get("source_to_docs_mapping", {})
 

@@ -541,3 +541,24 @@ async def test_pr_body_excludes_orphan_skipped_page():
     assert "auto-follow.html" in body
     assert "widgets.html" not in body  # orphan-skipped -> not listed as updated
     assert all(d.target_path != "architecture/widgets.html" for d in result.successful)
+
+
+@pytest.mark.asyncio
+async def test_empty_static_docs_dirs_override_honored():
+    """An explicit static_docs_dirs: [] disables the HTML scan (not overridden by defaults)."""
+    gh, _ = _gh_for("diff", [])
+    gh.load_repo_config.return_value = {
+        "doc_generation": {"enabled": True},
+        "documentation": {"static_docs_dirs": []},
+    }
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    dg = DocGenerationSettings(enabled=True)
+    change = Change("fix", "t", "w", "y", [], ["crates/gov/a.rs"], "i")
+    summary = ChangeSummary(pr_intent="i", changes=[change])
+    with (
+        patch("ai_reviewer.docs.updater.summarize_pr_changes", AsyncMock(return_value=summary)),
+        patch("ai_reviewer.docs.updater.route_changes", AsyncMock(return_value=[])),
+    ):
+        await run_doc_update(repo="o/r", pr_number=1, gh=gh, anthropic_cfg=cfg, doc_generation=dg)
+    # The HTML scan used the empty override, not the server defaults.
+    assert any(call.args[2] == [] for call in gh.get_html_files_in_dirs.call_args_list)
