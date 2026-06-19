@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,8 @@ from ai_reviewer.docs.models import Change, DocAction, DocDraft
 
 if TYPE_CHECKING:
     from ai_reviewer.config import AnthropicApiConfig
+
+logger = logging.getLogger(__name__)
 
 _CARD_CYCLE = ["ga", "gb", "gc", "gd"]
 
@@ -28,6 +31,13 @@ FIND>>>
 replacement text
 REPLACE>>>
 If no change is needed, output exactly: NO_UPDATE_NEEDED"""
+
+_REPAIR_NOTE = (
+    "\n\n## RETRY — your previous FIND/REPLACE did not apply\n"
+    "At least one FIND block was not found in the page. Each FIND must be copied "
+    "CHARACTER-FOR-CHARACTER from the page above (exact whitespace, tags, punctuation). "
+    "Re-emit corrected FIND/REPLACE blocks, or NO_UPDATE_NEEDED if nothing applies."
+)
 
 _ADD_SECTION_SYSTEM = """\
 You are adding ONE new section to an existing HTML documentation page.
@@ -60,6 +70,7 @@ async def apply_update_section(
     change: Change,
     anthropic_cfg: AnthropicApiConfig,
     model: str,
+    allow_new_sections: bool = True,
 ) -> DocDraft:
     from ai_reviewer.agents.anthropic_client import AnthropicClient
 
@@ -85,31 +96,64 @@ async def apply_update_section(
                 error=str(exc),
             )
 
-    if _is_no_update_response(raw):
-        return DocDraft(
-            action="update_section",
-            target_path=action.target_path,
-            updated_content="",
-            before_content=current_content,
-            change=change,
-        )
+        if _is_no_update_response(raw):
+            return DocDraft(
+                action="update_section",
+                target_path=action.target_path,
+                updated_content="",
+                before_content=current_content,
+                change=change,
+            )
 
-    patched = _apply_html_patches(current_content, raw)
-    if patched is None:
+        patched = _apply_html_patches(current_content, raw)
+        if patched is None:
+            # Most common apply failure: the FIND text wasn't copied verbatim.
+            # Retry once, insisting on character-for-character FIND blocks.
+            try:
+                retry = (
+                    await client.run_completion(
+                        model=model,
+                        system=_UPDATE_SYSTEM,
+                        user=user + _REPAIR_NOTE,
+                        max_tokens=8192,
+                    )
+                ).strip()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Repair retry failed for %s: %s", action.target_path, exc)
+                retry = ""
+            if _is_no_update_response(retry):
+                # Model now says nothing applies — respect it as a no-op rather
+                # than forcing the add_section fallback below.
+                return DocDraft(
+                    action="update_section",
+                    target_path=action.target_path,
+                    updated_content="",
+                    before_content=current_content,
+                    change=change,
+                )
+            if retry:
+                patched = _apply_html_patches(current_content, retry)
+
+    if patched is not None:
         return DocDraft(
             action="update_section",
             target_path=action.target_path,
-            updated_content="",
-            change=change,
+            updated_content=patched,
             before_content=current_content,
-            error="could not apply HTML patches (FIND not found or malformed)",
+            change=change,
         )
+    # Still unpatched after the retry. Rather than silently drop the page, fall
+    # back to an additive section so the change is still documented (draft PR;
+    # the verify stage still gates it).
+    if allow_new_sections:
+        return await apply_add_section(action, current_content, change, anthropic_cfg, model)
     return DocDraft(
         action="update_section",
         target_path=action.target_path,
-        updated_content=patched,
-        before_content=current_content,
+        updated_content="",
         change=change,
+        before_content=current_content,
+        error="could not apply HTML patches (FIND not found or malformed)",
     )
 
 

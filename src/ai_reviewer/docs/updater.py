@@ -88,7 +88,7 @@ async def _apply_one(
     current = _read_file(gh, repo, action.target_path, ref) or ""
     if action.action == "update_section":
         return await apply_update_section(
-            action, current, action.change, anthropic_cfg, apply_model
+            action, current, action.change, anthropic_cfg, apply_model, allow_new_sections
         )
     if action.action == "add_section":
         return await apply_add_section(action, current, action.change, anthropic_cfg, apply_model)
