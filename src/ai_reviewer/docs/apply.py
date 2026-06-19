@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import re
 from typing import TYPE_CHECKING
 
@@ -10,6 +11,8 @@ from ai_reviewer.docs.models import Change, DocAction, DocDraft
 
 if TYPE_CHECKING:
     from ai_reviewer.config import AnthropicApiConfig
+
+logger = logging.getLogger(__name__)
 
 _CARD_CYCLE = ["ga", "gb", "gc", "gd"]
 
@@ -115,9 +118,20 @@ async def apply_update_section(
                         max_tokens=8192,
                     )
                 ).strip()
-            except Exception:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("Repair retry failed for %s: %s", action.target_path, exc)
                 retry = ""
-            if retry and not _is_no_update_response(retry):
+            if _is_no_update_response(retry):
+                # Model now says nothing applies — respect it as a no-op rather
+                # than forcing the add_section fallback below.
+                return DocDraft(
+                    action="update_section",
+                    target_path=action.target_path,
+                    updated_content="",
+                    before_content=current_content,
+                    change=change,
+                )
+            if retry:
                 patched = _apply_html_patches(current_content, retry)
 
     if patched is not None:

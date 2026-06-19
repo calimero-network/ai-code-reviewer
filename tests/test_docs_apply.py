@@ -128,6 +128,49 @@ async def test_apply_update_section_falls_back_to_add_section():
 
 
 @pytest.mark.asyncio
+async def test_apply_update_section_retry_no_update_is_noop_not_fallback():
+    """If the repair retry returns NO_UPDATE_NEEDED, treat it as a no-op — do NOT
+    force the add_section fallback (the model said nothing applies)."""
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    change = Change("fix", "t", "w", "y", [], [], "i")
+    action = DocAction(change=change, action="update_section", target_path="architecture/x.html")
+    bad = "<<<FIND\nNOT PRESENT\nFIND>>>\n<<<REPLACE\nx\nREPLACE>>>"
+    with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+        inst = AsyncMock()
+        inst.run_completion = AsyncMock(side_effect=[bad, "NO_UPDATE_NEEDED"])
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        draft = await apply_update_section(action, _PAGE, change, cfg, "m")
+    assert draft.error is None
+    assert draft.action == "update_section"  # NOT downgraded to add_section
+    assert draft.updated_content == ""  # no-op
+    assert inst.run_completion.call_count == 2  # initial + retry, no fallback call
+
+
+@pytest.mark.asyncio
+async def test_apply_update_section_fallback_errors_when_no_anchor():
+    """Both attempts miss AND the page has no content anchor → add_section fallback
+    also fails, so the error draft propagates (not a silent empty success)."""
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    change = Change("fix", "t", "w", "y", [], [], "i")
+    action = DocAction(change=change, action="update_section", target_path="architecture/x.html")
+    bad = "<<<FIND\nNOT PRESENT\nFIND>>>\n<<<REPLACE\nx\nREPLACE>>>"
+    section = '<div class="card gc"><h2>X</h2></div>'
+    with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+        inst = AsyncMock()
+        inst.run_completion = AsyncMock(side_effect=[bad, bad, section])
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+
+        # "<p>no anchor</p>" lacks the .content-wrapper anchor insert_section needs.
+        draft = await apply_update_section(action, "<p>no anchor</p>", change, cfg, "m")
+    assert draft.updated_content == ""
+    assert draft.error is not None
+    assert inst.run_completion.call_count == 3  # initial + retry + fallback attempt
+
+
+@pytest.mark.asyncio
 async def test_apply_add_section_inserts_card():
     cfg = AnthropicApiConfig(api_key="sk-test")
     change = Change("new_feature", "Widgets", "adds widgets", "y", [], [], "document widgets")
