@@ -81,6 +81,19 @@ def _split_diff_by_file(diff: str) -> list[str]:
     return [c for c in chunks if c.strip()]
 
 
+# Summary length scales with the diff (more changes → more JSON), so the output
+# cap scales too: ~1 token per 16 diff chars, clamped to [_MIN, _MAX]. max_tokens
+# is a ceiling not a target, so small PRs still bill only their actual output.
+_MIN_SUMMARY_TOKENS = 2048
+_MAX_SUMMARY_TOKENS = 16384
+_DIFF_CHARS_PER_SUMMARY_TOKEN = 16
+
+
+def _summary_max_tokens(diff_chars: int) -> int:
+    est = diff_chars // _DIFF_CHARS_PER_SUMMARY_TOKEN
+    return max(_MIN_SUMMARY_TOKENS, min(_MAX_SUMMARY_TOKENS, est))
+
+
 def _safe_summary(raw: str, pr_intent_fallback: str) -> ChangeSummary:
     """Parse a model summary; an unparseable response yields an empty summary
     (the run skips) rather than aborting with an unhandled error."""
@@ -110,7 +123,7 @@ async def summarize_pr_changes(
                 model=model,
                 system=_SYSTEM,
                 user=_user_prompt(pr_title, pr_body, commit_messages, diff),
-                max_tokens=4096,
+                max_tokens=_summary_max_tokens(len(diff)),
             )
             return _safe_summary(raw, pr_title)
 
@@ -122,7 +135,7 @@ async def summarize_pr_changes(
                 model=model,
                 system=_SYSTEM,
                 user=_user_prompt(pr_title, pr_body, commit_messages, chunk[:max_diff_chars]),
-                max_tokens=2048,
+                max_tokens=_summary_max_tokens(len(chunk)),
             )
             try:
                 partials.append(extract_json(raw))
@@ -135,6 +148,9 @@ async def summarize_pr_changes(
             json.dumps(p) for p in partials
         )
         raw = await client.run_completion(
-            model=model, system=_MERGE_SYSTEM, user=merged_input, max_tokens=4096
+            model=model,
+            system=_MERGE_SYSTEM,
+            user=merged_input,
+            max_tokens=_summary_max_tokens(len(diff)),
         )
         return _safe_summary(raw, pr_title)

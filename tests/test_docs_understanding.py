@@ -6,7 +6,12 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from ai_reviewer.config import AnthropicApiConfig
-from ai_reviewer.docs.understanding import summarize_pr_changes
+from ai_reviewer.docs.understanding import (
+    _MAX_SUMMARY_TOKENS,
+    _MIN_SUMMARY_TOKENS,
+    _summary_max_tokens,
+    summarize_pr_changes,
+)
 
 _SUMMARY_JSON = json.dumps(
     {
@@ -25,6 +30,46 @@ _SUMMARY_JSON = json.dumps(
         ],
     }
 )
+
+
+def test_summary_max_tokens_scales_with_diff_size():
+    """The output cap scales with the diff: small PRs sit at the floor, large PRs
+    get headroom, and everything clamps to [_MIN, _MAX]."""
+    # Tiny PR → floor (it's a ceiling, so the PR still bills only its real output).
+    assert _summary_max_tokens(0) == _MIN_SUMMARY_TOKENS
+    assert _summary_max_tokens(1_000) == _MIN_SUMMARY_TOKENS
+    # PR #2790's real diff (133,147 chars) truncated at the old hard 4096 cap;
+    # the scaled budget must now comfortably clear it.
+    assert _summary_max_tokens(133_147) > 4096
+    # Monotonic: a bigger diff never gets a smaller budget.
+    assert _summary_max_tokens(60_000) <= _summary_max_tokens(120_000)
+    # A very large diff (e.g. the merge path over a >250K-char PR like #2821's
+    # 488K) clamps to the ceiling, staying well within Sonnet's 64K output limit.
+    assert _summary_max_tokens(488_577) == _MAX_SUMMARY_TOKENS
+    assert _summary_max_tokens(10_000_000) == _MAX_SUMMARY_TOKENS
+
+
+@pytest.mark.asyncio
+async def test_summary_max_tokens_passed_through_to_model_call():
+    """A large under-cap diff sends a scaled (not the legacy 4096) max_tokens."""
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    diff = "diff --git a/x b/x\n" + ("+line\n" * 30_000)  # ~180K chars
+    with patch("ai_reviewer.agents.anthropic_client.AnthropicClient") as MockClient:
+        inst = AsyncMock()
+        inst.run_completion = AsyncMock(return_value=_SUMMARY_JSON)
+        MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
+        MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
+        await summarize_pr_changes(
+            pr_title="t",
+            pr_body="",
+            commit_messages=[],
+            diff=diff,
+            anthropic_cfg=cfg,
+            model="m",
+            max_diff_chars=250_000,
+        )
+    assert inst.run_completion.call_args.kwargs["max_tokens"] == _summary_max_tokens(len(diff))
+    assert inst.run_completion.call_args.kwargs["max_tokens"] > 4096
 
 
 @pytest.mark.asyncio
