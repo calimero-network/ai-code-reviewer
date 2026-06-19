@@ -107,7 +107,3 @@ dmypy.json
 
 # pre-commit
 .pre-commit-cache/
-
-# Internal working spec/plan for the doc-update pipeline (kept local, not shipped in the PR)
-docs/superpowers/plans/2026-06-18-doc-update-pipeline.md
-docs/superpowers/specs/2026-06-18-doc-update-pipeline-design.md
