@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -50,17 +52,71 @@ def _read_file(gh: GitHubClient, repo: str, path: str, ref: str) -> str | None:
         return None
 
 
+_TAG_RE = re.compile(r"<[^>]+>")
+_SCRIPT_STYLE_RE = re.compile(r"(?is)<(script|style)\b.*?</\1>")
+_WS_RE = re.compile(r"[ \t]+")
+_HEADING_RE = re.compile(r"(?is)<h([1-6])[^>]*>(.*?)</h\1>")
+_PREVIEW_MAX_LINES = 14
+_PREVIEW_MAX_CHARS = 1400
+
+
+def _strip_html(s: str) -> list[str]:
+    """HTML → plain-text lines: drop script/style, turn tags into line breaks,
+    decode entities, collapse whitespace."""
+    s = _SCRIPT_STYLE_RE.sub(" ", s)
+    s = _TAG_RE.sub("\n", s)
+    s = html.unescape(s)
+    return [ln for ln in (_WS_RE.sub(" ", x).strip() for x in s.splitlines()) if ln]
+
+
+def _as_blockquote(lines: list[str]) -> str:
+    """Render lines as a Markdown blockquote, capped by line/char budget."""
+    out: list[str] = []
+    total = 0
+    for ln in lines:
+        if len(out) >= _PREVIEW_MAX_LINES or total + len(ln) > _PREVIEW_MAX_CHARS:
+            out.append("> …")
+            break
+        out.append(f"> {ln}")
+        total += len(ln)
+    return "\n".join(out)
+
+
+def _rendered_change(draft: DocDraft) -> str:
+    """Reviewer-facing preview of what the DOCS now say — the added prose with
+    HTML stripped (a heading outline for a brand-new page)."""
+    if draft.action == "create_page":
+        items = []
+        for lvl, raw in _HEADING_RE.findall(draft.updated_content):
+            txt = _WS_RE.sub(" ", html.unescape(_TAG_RE.sub("", raw))).strip()
+            if txt:
+                items.append(f"{'  ' * (int(lvl) - 1)}- {txt}")
+        return _as_blockquote(items or _strip_html(draft.updated_content))
+    before = set(_strip_html(draft.before_content or ""))
+    added = [ln for ln in _strip_html(draft.updated_content) if ln not in before]
+    return _as_blockquote(added) if added else "> _(no rendered-text delta — see file diff)_"
+
+
 def _build_pr_body(
     pr_number: int, pr_html_url: str, successful: list[DocDraft], flagged: list[DocDraft]
 ) -> str:
-    updated = "\n".join(
-        f"- `{d.target_path}` — {getattr(d.change, 'what_changed', '') or 'updated'}"
-        for d in successful
-    )
+    blocks = []
+    for d in successful:
+        title = (getattr(d.change, "title", "") or d.action).strip()
+        block = f"#### `{d.target_path}` — {title}\n\n{_rendered_change(d)}\n"
+        rationale = (getattr(d.change, "what_changed", "") or "").strip()
+        if rationale:
+            block += (
+                f"\n<details><summary>Why this changed (source: PR #{pr_number})"
+                f"</summary>\n\n{rationale}\n\n</details>\n"
+            )
+        blocks.append(block)
     body = (
         f"## Automatic Documentation Update\n\n"
         f"Opened automatically after [PR #{pr_number}]({pr_html_url}) merged.\n\n"
-        f"### Updated\n\n{updated}\n"
+        f"Each block shows the rendered documentation text (HTML stripped); expand "
+        f'"Why this changed" for the source rationale.\n\n'
+        f"### Documentation changes\n\n" + "\n".join(blocks)
     )
     if flagged:
         flags = "\n".join(f"- `{d.target_path}` — {d.flagged_reason}" for d in flagged)

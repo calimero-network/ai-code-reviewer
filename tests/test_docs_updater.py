@@ -6,7 +6,60 @@ import pytest
 
 from ai_reviewer.config import AnthropicApiConfig, DocGenerationSettings
 from ai_reviewer.docs.models import Change, ChangeSummary, DocAction, DocDraft
-from ai_reviewer.docs.updater import run_doc_update
+from ai_reviewer.docs.updater import _build_pr_body, _rendered_change, _strip_html, run_doc_update
+
+
+def test_strip_html_drops_tags_and_scripts():
+    out = _strip_html(
+        '<div class="card"><h2>Title</h2><script>var x=1;</script><p>Hello &amp; welcome</p></div>'
+    )
+    assert "Title" in out
+    assert "Hello & welcome" in out
+    assert all("var x" not in ln for ln in out)  # script body dropped
+    assert all("<" not in ln and ">" not in ln for ln in out)  # no tags
+
+
+def test_rendered_change_shows_only_added_doc_text():
+    """update_section preview = the NEW rendered prose (added lines), HTML stripped."""
+    draft = DocDraft(
+        action="update_section",
+        target_path="architecture/x.html",
+        before_content="<p>Old behavior: drop the delta.</p>",
+        updated_content="<p>Old behavior: drop the delta.</p><p>New: re-check the projection.</p>",
+        change=Change("fix", "t", "w", "y", [], [], "i"),
+    )
+    out = _rendered_change(draft)
+    assert "> New: re-check the projection." in out
+    assert "Old behavior" not in out  # unchanged line is not repeated
+    assert "<p>" not in out
+
+
+def test_rendered_change_create_page_is_heading_outline():
+    draft = DocDraft(
+        action="create_page",
+        target_path="architecture/widgets.html",
+        updated_content="<h1>Widgets</h1><p>intro</p><h2>Overview</h2><h2>API</h2>",
+        change=Change("new_feature", "t", "w", "y", [], [], "i"),
+    )
+    out = _rendered_change(draft)
+    assert "- Widgets" in out
+    assert "  - Overview" in out  # h2 indented under h1
+    assert "  - API" in out
+
+
+def test_build_pr_body_renders_text_and_collapses_rationale():
+    d = DocDraft(
+        action="update_section",
+        target_path="architecture/x.html",
+        before_content="<p>old</p>",
+        updated_content="<p>old</p><p>added doc sentence</p>",
+        change=Change("fix", "Grant on projection", "LONG SOURCE RATIONALE", "y", [], [], "i"),
+    )
+    body = _build_pr_body(1, "https://example/pr/1", [d], [])
+    assert "#### `architecture/x.html` — Grant on projection" in body
+    assert "> added doc sentence" in body  # rendered doc text inline
+    assert "<details><summary>Why this changed (source: PR #1)" in body
+    assert "LONG SOURCE RATIONALE" in body  # rationale present but collapsed
 
 
 def _gh_for(diff: str, html_files: list[str]):
