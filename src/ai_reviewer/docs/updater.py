@@ -237,8 +237,7 @@ async def run_doc_update(
         )
         return draft
 
-    # return_exceptions so one failing action (e.g. a create_page model error)
-    # is isolated to that target instead of aborting the whole doc-update run.
+    # return_exceptions isolates one failing action instead of aborting the batch.
     results = await asyncio.gather(*[_pipeline(a) for a in actions], return_exceptions=True)
     drafts: list[DocDraft] = []
     for action, res in zip(actions, results, strict=True):
@@ -287,9 +286,8 @@ async def run_doc_update(
         file_writes.append(FileWrite(path=d.target_path, content=d.updated_content))
         file_writes.extend(d.aux_edits)
 
-    # Wire new pages per-directory: each directory's nav.js/index.html accumulates ALL
-    # of that directory's new-page entries into one file (so multiple new pages never
-    # clobber each other), and pages in different dirs wire into their own nav.
+    # Wire new pages per-directory so multiple new pages share one nav.js/index.html
+    # (no clobber); pages in other dirs wire into their own nav.
     create_by_dir: dict[str, list[DocDraft]] = {}
     for d in successful:
         if d.action == "create_page" and d.aux_meta:

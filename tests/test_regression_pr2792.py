@@ -4,13 +4,17 @@
 re-emits on replay) — a real behavioral change. The doc bot's PR #2794 changed
 only the function name in auto-follow.html and missed the new invariant. These
 tests lock in that the pipeline understands the behavior change (not just the
-rename) and that an update *adds* the invariant rather than producing a bare rename.
+rename), that an update *adds* the invariant rather than producing a bare rename,
+and that a bare rename is flagged.
+
+The Anthropic client is mocked, so small representative inputs are sufficient —
+the full ~90 KB PR diff and the real architecture page are intentionally NOT
+vendored as fixtures (they would add bytes, not test coverage).
 """
 
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -21,12 +25,30 @@ from ai_reviewer.docs.models import Change, DocAction, DocDraft
 from ai_reviewer.docs.understanding import summarize_pr_changes
 from ai_reviewer.docs.verify import verify_draft
 
-FIX = Path(__file__).parent / "fixtures"
+# A small representative slice of the #2792 diff. Content is irrelevant to the
+# assertions (the client is mocked); it only needs to be a diff string under the
+# stage-1 cap so the cost-guard "one call" assertion holds.
+_DIFF = (
+    "diff --git a/crates/governance-store/src/lib.rs b/crates/governance-store/src/lib.rs\n"
+    "-pub(crate) fn emit_auto_follow_set_if_enabled(...) -> EyreResult<()> {\n"
+    "+pub(crate) fn build_auto_follow_set_if_enabled(...) -> EyreResult<Option<OpEvent>> {\n"
+    "+    for event in pending_events { crate::op_events::notify(event); }  // after op-log persists\n"
+)
+
+# Compact stand-in for architecture/auto-follow.html: the Propagation paragraph
+# (the FIND anchor) plus two sections that must survive the targeted edit untouched.
+_PAGE = (
+    '<div class="card gb"><h2>Design</h2><h3>Propagation</h3><p>'
+    "When a relevant op is applied to local state, an "
+    "<code>OpEvent</code> is broadcast and the handler emits the corresponding join op."
+    " Every emitted op is itself a DAG op.</p></div>\n"
+    '<div class="card ga"><h2>Rate Limit</h2><p>token bucket</p></div>\n'
+    '<div class="card gb"><h2>TEE Fleet Integration</h2><p>fleet-join</p></div>'
+)
 
 
 @pytest.mark.asyncio
 async def test_pr2792_summary_captures_behavior_not_just_rename():
-    diff = (FIX / "pr2792.diff").read_text()
     cfg = AnthropicApiConfig(api_key="sk-test")
     realistic = json.dumps(
         {
@@ -56,7 +78,7 @@ async def test_pr2792_summary_captures_behavior_not_just_rename():
             pr_title="fix(governance-store): emit op-events after the op-log persists",
             pr_body="Closes #2770",
             commit_messages=["emit after persist"],
-            diff=diff,
+            diff=_DIFF,
             anthropic_cfg=cfg,
             model="claude-sonnet-4-6",
             max_diff_chars=500_000,
@@ -65,13 +87,12 @@ async def test_pr2792_summary_captures_behavior_not_just_rename():
     blob = " ".join(c.what_changed.lower() for c in summary.changes)
     assert "after" in blob and "persist" in blob
     assert "drop" in blob or "replay" in blob
-    # Cost guard: full diff read in exactly one call.
+    # Cost guard: the diff is read in exactly one call.
     assert inst.run_completion.call_count == 1
 
 
 @pytest.mark.asyncio
 async def test_pr2792_update_adds_invariant_and_preserves_page():
-    page = (FIX / "auto-follow.html").read_text()
     cfg = AnthropicApiConfig(api_key="sk-test")
     change = Change(
         "behavior_change",
@@ -85,11 +106,11 @@ async def test_pr2792_update_adds_invariant_and_preserves_page():
     action = DocAction(
         change=change, action="update_section", target_path="architecture/auto-follow.html"
     )
-    # Anchor is a single-line substring of the Propagation paragraph.
+    # Single-line substring of the Propagation paragraph.
     find_anchor = (
         "<code>OpEvent</code> is broadcast and the handler emits the corresponding join op."
     )
-    assert find_anchor in page  # guard: fixture is the pre-#2794 page
+    assert find_anchor in _PAGE  # guard
     patch_resp = (
         "<<<FIND\n" + find_anchor + "\nFIND>>>\n"
         "<<<REPLACE\n"
@@ -104,16 +125,16 @@ async def test_pr2792_update_adds_invariant_and_preserves_page():
         MockClient.return_value.__aenter__ = AsyncMock(return_value=inst)
         MockClient.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        draft = await apply_update_section(action, page, change, cfg, "m")
+        draft = await apply_update_section(action, _PAGE, change, cfg, "m")
 
     assert draft.error is None
     assert "flushed via op_events::notify only after the op-log" in draft.updated_content
     assert "drop" in draft.updated_content.lower()
-    # Rest of the page preserved.
+    # Rest of the page preserved (untouched sections survive the targeted edit).
     assert "<h2>Rate Limit" in draft.updated_content
     assert "TEE Fleet Integration" in draft.updated_content
-    # Not a bare-rename: the added clause is substantial.
-    assert len(draft.updated_content) > len(page) + 50
+    # Not a bare rename: the added clause is substantial.
+    assert len(draft.updated_content) > len(_PAGE) + 50
 
 
 @pytest.mark.asyncio

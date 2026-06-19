@@ -30,9 +30,8 @@ def _merge_changes(a: Change, b: Change) -> Change:
 
 
 def _coalesce_actions(actions: list[DocAction]) -> list[DocAction]:
-    """One action per existing-page target (create_page stays distinct), merging the
-    changes of same-target actions so a single combined edit is produced per page —
-    otherwise multiple FileWrites for one path clobber each other at commit time."""
+    """One action per existing-page target (create_page stays distinct); merges
+    same-target changes so a single combined edit ships per page (no clobber)."""
     by_path: dict[str, DocAction] = {}
     ordered: list[DocAction] = []
     for a in actions:
@@ -72,11 +71,8 @@ def _mapping_target(
     mapping: dict[str, list[str]],
     changed_paths: list[str],
 ) -> str | None:
-    # Match the change's own files; fall back to PR-level paths when the model
-    # attributed none. An explicit mapping target is returned as-is REGARDLESS of
-    # extension (Markdown, HTML, …) — it is operator-configured, and its existence
-    # is verified later at apply time. (The HTML-only `doc_index` is used only for
-    # the LLM routing of UNMAPPED changes, never to gate explicit mappings.)
+    # Match the change's own files (fall back to PR-level when none). Explicit
+    # mapping targets return as-is — any extension; existence checked at apply time.
     paths = change.files or changed_paths
     for glob_pattern, targets in mapping.items():
         if any(fnmatch.fnmatch(p, glob_pattern) for p in paths):

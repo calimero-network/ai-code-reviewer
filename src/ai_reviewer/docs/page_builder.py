@@ -1,4 +1,3 @@
-# src/ai_reviewer/docs/page_builder.py
 """Stage 3 (new pages) — build a new page and wire it into nav.js (+ best-effort index.html)."""
 
 from __future__ import annotations
@@ -26,11 +25,8 @@ Output ONLY the page HTML, nothing else."""
 
 
 def _js_str(value: str) -> str:
-    """A single-quoted JS string literal with quotes/backslashes/newlines escaped.
-
-    Guards against a model-generated label (e.g. ``Owner's Role``) breaking the
-    NAV array's JavaScript.
-    """
+    """Single-quoted JS string literal, escaped so a label like ``Owner's Role``
+    can't break the NAV array."""
     escaped = value.replace("\\", "\\\\").replace("'", "\\'").replace("\n", " ").replace("\r", " ")
     return f"'{escaped}'"
 
