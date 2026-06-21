@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import difflib
 import html
 import logging
 import os
 import re
+import textwrap
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -55,125 +57,63 @@ def _read_file(gh: GitHubClient, repo: str, path: str, ref: str) -> str | None:
 _TAG_RE = re.compile(r"<[^>]+>")
 _SCRIPT_STYLE_RE = re.compile(r"(?is)<(script|style)\b.*?</\1>")
 _WS_RE = re.compile(r"[ \t]+")
-_HEADING_RE = re.compile(r"(?is)<h([1-6])[^>]*>(.*?)</h\1>")
-_CODE_RE = re.compile(r"(?is)<code[^>]*>(.*?)</code>")
-# These docs write inline code as <span class="code">…</span> (see page_builder),
-# not <code>; match it too or symbols render as bare, run-together text.
-_SPAN_CODE_RE = re.compile(r'(?is)<span[^>]*class="[^"]*\bcode\b[^"]*"[^>]*>(.*?)</span>')
-_STRONG_RE = re.compile(r"(?is)<(strong|b)[^>]*>(.*?)</\1>")
-_EM_RE = re.compile(r"(?is)<(em|i)[^>]*>(.*?)</\1>")
-_LI_RE = re.compile(r"(?is)<li[^>]*>(.*?)</li>")
-# Multi-line code blocks: <pre> and the doc template's <div class="typedef">.
-_CODEBLOCK_RE = re.compile(
-    r"(?is)<pre[^>]*>(.*?)</pre>"
-    r'|<div[^>]*class="[^"]*\btypedef\b[^"]*"[^>]*>(.*?)</div>'
-)
+_PRE_RE = re.compile(r"(?is)<pre[^>]*>(.*?)</pre>")
 _BR_RE = re.compile(r"(?is)<br\s*/?>")
-_BLOCK_RE = re.compile(r"(?is)</?(?:p|div|ul|ol|section|tr)[^>]*>|<br\s*/?>")
-_PREVIEW_MAX_LINES = 16
-_PREVIEW_MAX_CHARS = 1600
-
-# A code block is carried through the line pipeline (and the added-only diff) as a
-# single atomic token line — payload is its code lines joined by \x01 — so it dedupes
-# as one unit and never has its fence split by the line-level diff. Expanded to a
-# fenced block only at render time.
-_CB_MARK = "\x00CB\x00"
+# Block-level elements (plus headings, list items, pre) are logical line breaks.
+_BLOCK_RE = re.compile(r"(?is)</?(?:p|div|ul|ol|section|tr|li|h[1-6]|pre)[^>]*>|<br\s*/?>")
+_DIFF_WRAP = 80  # GitHub diff blocks don't wrap; pre-wrap long prose to this width
+_DIFF_MAX_LINES = 40  # cap the preview; full content is always in the file diff
 
 
-def _norm(s: str) -> str:
-    """Strip leftover tags, decode entities, collapse intra-line whitespace."""
-    return _WS_RE.sub(" ", html.unescape(_TAG_RE.sub("", s))).strip()
-
-
-def _code_block_lines(inner: str) -> list[str]:
-    """Flatten a code-block fragment to verbatim text lines: <br> → newline,
-    syntax-highlight spans dropped, entities decoded, &nbsp; → space. Unlike
-    _norm, leading indentation and angle brackets (e.g. Option<bool>) are kept."""
-    text = html.unescape(_TAG_RE.sub("", _BR_RE.sub("\n", inner))).replace("\xa0", " ")
-    # Drop blank lines: the template emits <br> *and* source-formatting newlines, so
-    # a real break and a pretty-print newline would otherwise yield a blank line each.
-    return [ln.rstrip() for ln in text.splitlines() if ln.strip()]
-
-
-def _stash_codeblock(m: re.Match[str]) -> str:
-    """Replace a matched code block with a single atomic token line."""
-    lines = _code_block_lines(m.group(1) if m.group(1) is not None else m.group(2))
-    if not lines:
-        return " "
-    return "\n" + _CB_MARK + "\x01".join(lines) + "\n"
-
-
-def _html_to_md_lines(fragment: str) -> list[str]:
-    """Convert an HTML fragment to Markdown lines: inline <code>/<span class=code>/
-    <strong>/<em> become `code`/**bold**/*italics* (kept inline so prose stays
-    whole), headings become bold lines, <li> become bullets, <pre>/typedef become
-    atomic code-block tokens, other block elements become line breaks."""
+def _plain_lines(fragment: str) -> list[str]:
+    """Flatten an HTML fragment to plain-text logical lines — one per paragraph,
+    list item, heading, or code line. Source-formatting newlines are collapsed so a
+    hard-wrapped paragraph stays a single line (and re-wraps cleanly); <br> and block
+    elements are the real breaks. <pre> line breaks are preserved, and angle brackets
+    (e.g. Option<bool>) survive because entities are decoded after tags are stripped."""
     s = _SCRIPT_STYLE_RE.sub(" ", fragment)
-    s = _CODEBLOCK_RE.sub(_stash_codeblock, s)
-    s = _SPAN_CODE_RE.sub(lambda m: f" `{_norm(m.group(1))}` ", s)
-    s = _CODE_RE.sub(lambda m: f" `{_norm(m.group(1))}` ", s)
-    s = _STRONG_RE.sub(lambda m: f" **{_norm(m.group(2))}** ", s)
-    s = _EM_RE.sub(lambda m: f" *{_norm(m.group(2))}* ", s)
-    s = _HEADING_RE.sub(lambda m: f"\n**{_norm(m.group(2))}**\n", s)
-    s = _LI_RE.sub(lambda m: f"\n- {_norm(m.group(1))}\n", s)
+    s = _PRE_RE.sub(lambda m: "<pre>" + m.group(1).replace("\n", "<br>") + "</pre>", s)
+    s = s.replace("\r", " ").replace("\n", " ")
+    s = _BR_RE.sub("\n", s)
     s = _BLOCK_RE.sub("\n", s)
-    out: list[str] = []
-    for x in s.splitlines():
-        if x.startswith(_CB_MARK):  # atomic code block — keep verbatim, never _norm
-            out.append(x)
-        elif n := _norm(x):
-            out.append(n)
-    return out
-
-
-def _expand_codeblock(token: str) -> list[str]:
-    """Expand a code-block token into fenced-block lines (``` … ```)."""
-    return ["```", *token[len(_CB_MARK) :].split("\x01"), "```"]
-
-
-def _as_blockquote(lines: list[str]) -> str:
-    """Render lines as a Markdown blockquote, capped by line/char budget. Code-block
-    tokens expand to fenced blocks and are included whole-or-not so fences stay paired."""
-    if not lines:  # never emit an empty block — callers splice this into the PR body
-        return "> _(no rendered-text preview available — see file diff)_"
-    out: list[str] = []
-    used = 0
-    total = 0
-    for ln in lines:
-        display = _expand_codeblock(ln) if ln.startswith(_CB_MARK) else [ln]
-        cost = sum(len(d) for d in display)
-        if out and (used >= _PREVIEW_MAX_LINES or total + cost > _PREVIEW_MAX_CHARS):
-            out.append("> …")
-            break
-        out.extend(f"> {d}" for d in display)
-        used += len(display)
-        total += cost
-    return "\n".join(out)
-
-
-def _strip_html(s: str) -> list[str]:
-    """Plain-text lines (no Markdown) — used for the new-page heading fallback."""
     return [
-        _norm(x) for x in _TAG_RE.sub("\n", _SCRIPT_STYLE_RE.sub(" ", s)).splitlines() if x.strip()
+        n
+        for x in s.splitlines()
+        if (n := _WS_RE.sub(" ", html.unescape(_TAG_RE.sub("", x)).replace("\xa0", " ")).strip())
     ]
 
 
+def _wrap(prefix: str, line: str) -> list[str]:
+    """Word-wrap a logical line for a non-wrapping diff block, keeping its prefix."""
+    return [f"{prefix}{piece}" for piece in (textwrap.wrap(line, _DIFF_WRAP) or [""])]
+
+
 def _rendered_change(draft: DocDraft) -> str:
-    """Reviewer-facing preview of what the DOCS now say, as GitHub-rendered
-    Markdown — the added prose (a heading outline for a brand-new page)."""
-    if draft.action == "create_page":
-        items = []
-        for lvl, raw in _HEADING_RE.findall(draft.updated_content):
-            txt = _norm(raw)
-            if txt:
-                items.append(f"{'  ' * (int(lvl) - 1)}- {txt}")
-        return _as_blockquote(items or _strip_html(draft.updated_content))
-    # Added-only diff by set membership. Known trade-off for a PR preview: an added
-    # line whose text is identical to an existing line (e.g. a repeated warning) is
-    # treated as unchanged and omitted; the full content is always in the file diff.
-    before = set(_html_to_md_lines(draft.before_content or ""))
-    added = [ln for ln in _html_to_md_lines(draft.updated_content) if ln not in before]
-    return _as_blockquote(added) if added else "> _(no rendered-text delta — see file diff)_"
+    """Reviewer-facing preview of the documentation change as a GitHub-style diff
+    (a ```diff block): added lines render green, removed red, with a little context.
+    A brand-new page (no before-content) shows entirely as additions."""
+    before = _plain_lines(draft.before_content or "")
+    after = _plain_lines(draft.updated_content)
+    out: list[str] = []
+    for ln in difflib.unified_diff(before, after, n=2, lineterm=""):
+        if ln.startswith(("---", "+++")):
+            continue
+        if ln.startswith("@@"):
+            if out:
+                out.append("")  # blank separator between hunks
+            continue
+        text = ln[1:].strip()
+        if ln[:1] in ("+", "-"):
+            out += _wrap(ln[0], text)  # changed lines shown in full (wrapped)
+        else:  # context: trim to one row so long prose paragraphs don't dominate
+            out.append(" " + (text if len(text) <= _DIFF_WRAP else text[: _DIFF_WRAP - 1] + "…"))
+    while out and not out[-1].strip():
+        out.pop()
+    if not out:
+        return "_(no rendered-text change — see file diff)_"
+    if len(out) > _DIFF_MAX_LINES:
+        out = out[:_DIFF_MAX_LINES] + ["…"]
+    return "```diff\n" + "\n".join(out) + "\n```"
 
 
 def _build_pr_body(
@@ -194,8 +134,8 @@ def _build_pr_body(
     body = (
         f"## Automatic Documentation Update\n\n"
         f"Opened automatically after [PR #{pr_number}]({pr_html_url}) merged.\n\n"
-        f"Each block shows the rendered documentation text (HTML stripped); expand "
-        f'"Why this changed" for the source rationale.\n\n'
+        f"Each block shows the documentation change as a diff (added lines in green, "
+        f'removed in red); expand "Why this changed" for the source rationale.\n\n'
         f"### Documentation changes\n\n{blocks_str}"
     )
     if flagged:

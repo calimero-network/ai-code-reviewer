@@ -8,48 +8,59 @@ from ai_reviewer.config import AnthropicApiConfig, DocGenerationSettings
 from ai_reviewer.docs.models import Change, ChangeSummary, DocAction, DocDraft
 from ai_reviewer.docs.updater import (
     _build_pr_body,
-    _html_to_md_lines,
+    _plain_lines,
     _rendered_change,
-    _strip_html,
     run_doc_update,
 )
 
 
-def test_rendered_change_create_page_with_no_text_has_fallback_not_empty():
-    """A create_page with no headings and no extractable text must still produce a
-    non-empty preview, not a blank block that yields a malformed PR body."""
+def test_rendered_change_is_github_style_diff():
+    """update_section preview is a ```diff block: added prose on + lines, with the
+    surrounding unchanged line kept as context."""
     draft = DocDraft(
-        action="create_page",
-        target_path="architecture/empty.html",
-        updated_content="<style>.x{color:red}</style><script>var y=1;</script>",
-        change=Change("new_feature", "t", "w", "y", [], [], "i"),
+        action="update_section",
+        target_path="architecture/x.html",
+        before_content="<p>Old behavior: drop the delta.</p>",
+        updated_content="<p>Old behavior: drop the delta.</p><p>New: re-check the projection.</p>",
+        change=Change("fix", "t", "w", "y", [], [], "i"),
     )
     out = _rendered_change(draft)
-    assert out.strip()  # not empty / whitespace-only
-    assert out.startswith(">")  # still a blockquote line
+    assert out.startswith("```diff")
+    assert out.rstrip().endswith("```")
+    assert "+New: re-check the projection." in out  # added line, + prefix
+    assert "Old behavior: drop the delta." in out  # unchanged context shown
 
 
-def test_html_to_md_lines_converts_span_code_to_backticks():
-    """These docs use <span class="code">…</span> as the inline-code construct,
-    not <code>; it must render as `code`, not bare text."""
-    lines = _html_to_md_lines('<p>It calls <span class="code">handle_state_delta</span> now.</p>')
-    assert "`handle_state_delta`" in " ".join(lines)
-
-
-def test_html_to_md_lines_separates_adjacent_span_code():
-    """Two back-to-back code spans must not fuse into one token."""
-    lines = _html_to_md_lines(
-        '<div class="fp">mod.rs</div><div class="fd">'
-        '<span class="code">handle_state_delta</span> entry</div>'
+def test_rendered_change_diff_shows_removed_lines():
+    """A deletion is visible as a - line (the old added-only preview hid removals)."""
+    draft = DocDraft(
+        action="update_section",
+        target_path="architecture/x.html",
+        before_content="<p>Keep this.</p><p>Delete this stale note.</p>",
+        updated_content="<p>Keep this.</p>",
+        change=Change("removal", "t", "w", "y", [], [], "i"),
     )
-    text = " ".join(lines)
-    assert "mod.rshandle_state_delta" not in text  # not fused
-    assert "`handle_state_delta`" in text
+    out = _rendered_change(draft)
+    assert "-Delete this stale note." in out
 
 
-def test_rendered_change_renders_code_block_as_fence():
-    """A <div class="typedef"> / <pre> code block becomes a fenced block with
-    line breaks and angle brackets preserved (not collapsed / tag-stripped)."""
+def test_rendered_change_diff_wraps_long_lines():
+    """Diff blocks don't wrap on GitHub, so long paragraphs are pre-wrapped."""
+    long = "word " * 60  # ~300 chars on one logical line
+    draft = DocDraft(
+        action="update_section",
+        target_path="architecture/x.html",
+        before_content="<p>x</p>",
+        updated_content=f"<p>x</p><p>{long.strip()}</p>",
+        change=Change("fix", "t", "w", "y", [], [], "i"),
+    )
+    out = _rendered_change(draft)
+    assert all(len(ln) <= 84 for ln in out.splitlines())  # wrapped to ~80 + prefix
+
+
+def test_rendered_change_diff_keeps_code_lines():
+    """A <div class="typedef">/<pre> code block shows as + lines with line breaks
+    and angle brackets preserved (Option<bool> not stripped as a tag)."""
     draft = DocDraft(
         action="update_section",
         target_path="architecture/sync.html",
@@ -65,72 +76,46 @@ def test_rendered_change_renders_code_block_as_fence():
         change=Change("fix", "t", "w", "y", [], [], "i"),
     )
     out = _rendered_change(draft)
-    assert "```" in out  # fenced, not run-on prose
-    assert "pub fn foo(" in out  # syntax spans flattened to text
+    assert "+pub fn foo(" in out  # syntax spans flattened to text on its own + line
     assert "Option<bool>" in out  # angle brackets preserved, not stripped as a tag
-    assert "ctx: &Ctx," in out  # entity decoded, indentation kept on its own line
 
 
-def test_code_block_drops_pretty_print_blank_lines():
-    """<br> plus source-formatting newlines must not leave a blank line between
-    every code line (the typedef template emits both)."""
-    draft = DocDraft(
-        action="update_section",
-        target_path="architecture/sync.html",
-        before_content="<p>old</p>",
-        updated_content=(
-            "<p>old</p>"
-            '<div class="typedef">\n'
-            '<span class="kw">pub fn</span> foo(<br>\n'
-            "&nbsp;&nbsp;ctx: &amp;Ctx,<br>\n"
-            ")</div>"
-        ),
-        change=Change("fix", "t", "w", "y", [], [], "i"),
-    )
-    out = _rendered_change(draft)
-    assert "> \n" not in out and not out.endswith("> ")  # no empty quoted lines
-    assert "pub fn foo(" in out
-
-
-def test_strip_html_drops_tags_and_scripts():
-    out = _strip_html(
-        '<div class="card"><h2>Title</h2><script>var x=1;</script><p>Hello &amp; welcome</p></div>'
-    )
-    assert any("Title" in ln for ln in out)  # substring, robust to line grouping
-    assert any("Hello & welcome" in ln for ln in out)
-    assert all("var x" not in ln for ln in out)  # script body dropped
-    assert all("<" not in ln and ">" not in ln for ln in out)  # no tags
-
-
-def test_rendered_change_shows_only_added_doc_text():
-    """update_section preview = the NEW rendered prose (added lines), HTML stripped."""
-    draft = DocDraft(
-        action="update_section",
-        target_path="architecture/x.html",
-        before_content="<p>Old behavior: drop the delta.</p>",
-        updated_content="<p>Old behavior: drop the delta.</p><p>New: re-check the projection.</p>",
-        change=Change("fix", "t", "w", "y", [], [], "i"),
-    )
-    out = _rendered_change(draft)
-    assert "> New: re-check the projection." in out
-    assert "Old behavior" not in out  # unchanged line is not repeated
-    assert "<p>" not in out
-
-
-def test_rendered_change_create_page_is_heading_outline():
+def test_rendered_change_create_page_is_all_additions():
+    """A brand-new page shows entirely as + lines."""
     draft = DocDraft(
         action="create_page",
         target_path="architecture/widgets.html",
-        updated_content="<h1>Widgets</h1><p>intro</p><h2>Overview</h2><h2>API</h2>",
+        updated_content="<h1>Widgets</h1><p>intro</p><h2>Overview</h2>",
         change=Change("new_feature", "t", "w", "y", [], [], "i"),
     )
     out = _rendered_change(draft)
-    assert "- Widgets" in out
-    assert "  - Overview" in out  # h2 indented under h1
-    assert "  - API" in out
+    assert out.startswith("```diff")
+    assert "+Widgets" in out
+    assert "+intro" in out
 
 
-def test_build_pr_body_renders_text_and_collapses_rationale():
+def test_rendered_change_no_change_has_fallback():
+    """Identical before/after yields a fallback line, never an empty diff block."""
+    draft = DocDraft(
+        action="update_section",
+        target_path="architecture/x.html",
+        before_content="<p>same</p>",
+        updated_content="<p>same</p>",
+        change=Change("fix", "t", "w", "y", [], [], "i"),
+    )
+    out = _rendered_change(draft)
+    assert "```diff" not in out
+    assert out.strip()  # non-empty fallback
+
+
+def test_plain_lines_collapses_source_formatting_newlines():
+    """A paragraph hard-wrapped across source lines is one logical line, so it
+    re-wraps cleanly instead of fragmenting."""
+    lines = _plain_lines("<p>This sentence is\nsplit across\nsource lines.</p>")
+    assert lines == ["This sentence is split across source lines."]
+
+
+def test_build_pr_body_diff_and_collapses_rationale():
     d = DocDraft(
         action="update_section",
         target_path="architecture/x.html",
@@ -140,7 +125,8 @@ def test_build_pr_body_renders_text_and_collapses_rationale():
     )
     body = _build_pr_body(1, "https://example/pr/1", [d], [])
     assert "#### `architecture/x.html` — Grant on projection" in body
-    assert "> added doc sentence" in body  # rendered doc text inline
+    assert "```diff" in body  # rendered as a diff block
+    assert "+added doc sentence" in body  # added doc text on a + line
     assert "<details><summary>Why this changed (source: PR #1)" in body
     assert "LONG SOURCE RATIONALE" in body  # rationale present but collapsed
 
