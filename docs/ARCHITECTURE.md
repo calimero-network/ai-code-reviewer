@@ -417,7 +417,7 @@ On merge, `run_doc_update` (`docs/updater.py`) runs four isolated, independently
 | **Apply** | `apply.py`, `page_builder.py` | Surgical FIND/REPLACE for existing sections (reusing `_apply_html_patches`), additive `add_section`, or a whole new page cloned from a sibling and wired into `nav.js`/`index.html` with an **orphan guard** (a new page is never committed unless its nav entry is). |
 | **Verify** | `verify.py` | `verify_draft` is a confidence gate — a draft that does not reflect its change (or is below `verify_confidence_threshold`) is **flagged for a human, not shipped**. |
 
-The orchestrator bounds work to `max_files`, applies per-repo `doc_generation` overrides, builds the PR body (an *Updated* section plus a *Flagged for human review* section), and — when nothing ships confidently — posts a comment listing the flagged docs instead of opening an empty PR. Nothing is auto-merged. A regression test (`tests/test_regression_pr2792.py`) locks in that a behavioral change is captured rather than reduced to a bare rename.
+The orchestrator bounds work to `max_files`, applies per-repo `doc_generation` overrides, builds the PR body (a *Documentation changes* section that previews each edited page as a GitHub-style diff — added doc text in green, removed in red, source rationale collapsed into a `<details>` — plus a *Flagged for human review* section), and — when nothing ships confidently — posts a comment listing the flagged docs instead of opening an empty PR. Nothing is auto-merged. A regression test (`tests/test_doc_update_behavior_regression.py`) locks in that a behavioral change is captured rather than reduced to a bare rename.
 
 ### Two-Tier Design
 

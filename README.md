@@ -254,7 +254,7 @@ When stale documentation is detected, the reviewer can automatically generate up
 3. **Route** — maps each change to a doc action: update an existing section, add a new section, or create a new page (honouring `source_to_docs_mapping`)
 4. **Apply** — drafts the edits: surgical FIND/REPLACE for HTML, additive sections, or whole new pages wired into `nav.js`/`index.html`
 5. **Verify** — a confidence gate; edits that don't reflect the change are **flagged for a human, not shipped**
-6. Commits confident updates to a new branch `docs/auto-<sha>` and opens a PR against `main`, assigned to the original PR author; flagged docs are listed in the PR body. **Nothing auto-merges.**
+6. Commits confident updates to a new branch `docs/auto-<sha>` and opens a PR against `main`, assigned to the original PR author. The PR body previews each edited page as a **GitHub-style diff** (added doc text in green, removed in red) so a reviewer sees what changed without opening the raw HTML; flagged docs are listed in their own section. **Nothing auto-merges.**
 
 **Setup: two steps**
 
