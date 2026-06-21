@@ -6,7 +6,129 @@ import pytest
 
 from ai_reviewer.config import AnthropicApiConfig, DocGenerationSettings
 from ai_reviewer.docs.models import Change, ChangeSummary, DocAction, DocDraft
-from ai_reviewer.docs.updater import run_doc_update
+from ai_reviewer.docs.updater import (
+    _build_pr_body,
+    _plain_lines,
+    _rendered_change,
+    run_doc_update,
+)
+
+
+def test_rendered_change_is_github_style_diff():
+    """update_section preview is a ```diff block: added prose on + lines, with the
+    surrounding unchanged line kept as context."""
+    draft = DocDraft(
+        action="update_section",
+        target_path="architecture/x.html",
+        before_content="<p>Old behavior: drop the delta.</p>",
+        updated_content="<p>Old behavior: drop the delta.</p><p>New: re-check the projection.</p>",
+        change=Change("fix", "t", "w", "y", [], [], "i"),
+    )
+    out = _rendered_change(draft)
+    assert out.startswith("```diff")
+    assert out.rstrip().endswith("```")
+    assert "+New: re-check the projection." in out  # added line, + prefix
+    assert "Old behavior: drop the delta." in out  # unchanged context shown
+
+
+def test_rendered_change_diff_shows_removed_lines():
+    """A deletion is visible as a - line (the old added-only preview hid removals)."""
+    draft = DocDraft(
+        action="update_section",
+        target_path="architecture/x.html",
+        before_content="<p>Keep this.</p><p>Delete this stale note.</p>",
+        updated_content="<p>Keep this.</p>",
+        change=Change("removal", "t", "w", "y", [], [], "i"),
+    )
+    out = _rendered_change(draft)
+    assert "-Delete this stale note." in out
+
+
+def test_rendered_change_diff_wraps_long_lines():
+    """Diff blocks don't wrap on GitHub, so long paragraphs are pre-wrapped."""
+    long = "word " * 60  # ~300 chars on one logical line
+    draft = DocDraft(
+        action="update_section",
+        target_path="architecture/x.html",
+        before_content="<p>x</p>",
+        updated_content=f"<p>x</p><p>{long.strip()}</p>",
+        change=Change("fix", "t", "w", "y", [], [], "i"),
+    )
+    out = _rendered_change(draft)
+    assert all(len(ln) <= 84 for ln in out.splitlines())  # wrapped to ~80 + prefix
+
+
+def test_rendered_change_diff_keeps_code_lines():
+    """A <div class="typedef">/<pre> code block shows as + lines with line breaks
+    and angle brackets preserved (Option<bool> not stripped as a tag)."""
+    draft = DocDraft(
+        action="update_section",
+        target_path="architecture/sync.html",
+        before_content="<p>old</p>",
+        updated_content=(
+            "<p>old</p>"
+            '<div class="typedef">'
+            '<span class="kw">pub fn</span> foo(<br>'
+            "&nbsp;&nbsp;&nbsp;&nbsp;ctx: &amp;Ctx,<br>"
+            ") -&gt; Option&lt;bool&gt;"
+            "</div>"
+        ),
+        change=Change("fix", "t", "w", "y", [], [], "i"),
+    )
+    out = _rendered_change(draft)
+    assert "+pub fn foo(" in out  # syntax spans flattened to text on its own + line
+    assert "Option<bool>" in out  # angle brackets preserved, not stripped as a tag
+
+
+def test_rendered_change_create_page_is_all_additions():
+    """A brand-new page shows entirely as + lines."""
+    draft = DocDraft(
+        action="create_page",
+        target_path="architecture/widgets.html",
+        updated_content="<h1>Widgets</h1><p>intro</p><h2>Overview</h2>",
+        change=Change("new_feature", "t", "w", "y", [], [], "i"),
+    )
+    out = _rendered_change(draft)
+    assert out.startswith("```diff")
+    assert "+Widgets" in out
+    assert "+intro" in out
+
+
+def test_rendered_change_no_change_has_fallback():
+    """Identical before/after yields a fallback line, never an empty diff block."""
+    draft = DocDraft(
+        action="update_section",
+        target_path="architecture/x.html",
+        before_content="<p>same</p>",
+        updated_content="<p>same</p>",
+        change=Change("fix", "t", "w", "y", [], [], "i"),
+    )
+    out = _rendered_change(draft)
+    assert "```diff" not in out
+    assert out.strip()  # non-empty fallback
+
+
+def test_plain_lines_collapses_source_formatting_newlines():
+    """A paragraph hard-wrapped across source lines is one logical line, so it
+    re-wraps cleanly instead of fragmenting."""
+    lines = _plain_lines("<p>This sentence is\nsplit across\nsource lines.</p>")
+    assert lines == ["This sentence is split across source lines."]
+
+
+def test_build_pr_body_diff_and_collapses_rationale():
+    d = DocDraft(
+        action="update_section",
+        target_path="architecture/x.html",
+        before_content="<p>old</p>",
+        updated_content="<p>old</p><p>added doc sentence</p>",
+        change=Change("fix", "Grant on projection", "LONG SOURCE RATIONALE", "y", [], [], "i"),
+    )
+    body = _build_pr_body(1, "https://example/pr/1", [d], [])
+    assert "#### `architecture/x.html` — Grant on projection" in body
+    assert "```diff" in body  # rendered as a diff block
+    assert "+added doc sentence" in body  # added doc text on a + line
+    assert "<details><summary>Why this changed (source: PR #1)" in body
+    assert "LONG SOURCE RATIONALE" in body  # rationale present but collapsed
 
 
 def _gh_for(diff: str, html_files: list[str]):

@@ -4,8 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import difflib
+import html
 import logging
 import os
+import re
+import textwrap
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -50,17 +54,89 @@ def _read_file(gh: GitHubClient, repo: str, path: str, ref: str) -> str | None:
         return None
 
 
+_TAG_RE = re.compile(r"<[^>]+>")
+_SCRIPT_STYLE_RE = re.compile(r"(?is)<(script|style)\b.*?</\1>")
+_WS_RE = re.compile(r"[ \t]+")
+_PRE_RE = re.compile(r"(?is)<pre[^>]*>(.*?)</pre>")
+_BR_RE = re.compile(r"(?is)<br\s*/?>")
+# Block-level elements (plus headings, list items, pre) are logical line breaks.
+_BLOCK_RE = re.compile(r"(?is)</?(?:p|div|ul|ol|section|tr|li|h[1-6]|pre)[^>]*>|<br\s*/?>")
+_DIFF_WRAP = 80  # GitHub diff blocks don't wrap; pre-wrap long prose to this width
+_DIFF_MAX_LINES = 40  # cap the preview; full content is always in the file diff
+
+
+def _plain_lines(fragment: str) -> list[str]:
+    """Flatten an HTML fragment to plain-text logical lines — one per paragraph,
+    list item, heading, or code line. Source-formatting newlines are collapsed so a
+    hard-wrapped paragraph stays a single line (and re-wraps cleanly); <br> and block
+    elements are the real breaks. <pre> line breaks are preserved, and angle brackets
+    (e.g. Option<bool>) survive because entities are decoded after tags are stripped."""
+    s = _SCRIPT_STYLE_RE.sub(" ", fragment)
+    s = _PRE_RE.sub(lambda m: "<pre>" + m.group(1).replace("\n", "<br>") + "</pre>", s)
+    s = s.replace("\r", " ").replace("\n", " ")
+    s = _BR_RE.sub("\n", s)
+    s = _BLOCK_RE.sub("\n", s)
+    return [
+        n
+        for x in s.splitlines()
+        if (n := _WS_RE.sub(" ", html.unescape(_TAG_RE.sub("", x)).replace("\xa0", " ")).strip())
+    ]
+
+
+def _wrap(prefix: str, line: str) -> list[str]:
+    """Word-wrap a logical line for a non-wrapping diff block, keeping its prefix."""
+    return [f"{prefix}{piece}" for piece in (textwrap.wrap(line, _DIFF_WRAP) or [""])]
+
+
+def _rendered_change(draft: DocDraft) -> str:
+    """Reviewer-facing preview of the documentation change as a GitHub-style diff
+    (a ```diff block): added lines render green, removed red, with a little context.
+    A brand-new page (no before-content) shows entirely as additions."""
+    before = _plain_lines(draft.before_content or "")
+    after = _plain_lines(draft.updated_content)
+    out: list[str] = []
+    for ln in difflib.unified_diff(before, after, n=2, lineterm=""):
+        if ln.startswith(("---", "+++")):
+            continue
+        if ln.startswith("@@"):
+            if out:
+                out.append("")  # blank separator between hunks
+            continue
+        text = ln[1:].strip()
+        if ln[:1] in ("+", "-"):
+            out += _wrap(ln[0], text)  # changed lines shown in full (wrapped)
+        else:  # context: trim to one row so long prose paragraphs don't dominate
+            out.append(" " + (text if len(text) <= _DIFF_WRAP else text[: _DIFF_WRAP - 1] + "…"))
+    while out and not out[-1].strip():
+        out.pop()
+    if not out:
+        return "_(no rendered-text change — see file diff)_"
+    if len(out) > _DIFF_MAX_LINES:
+        out = out[:_DIFF_MAX_LINES] + ["…"]
+    return "```diff\n" + "\n".join(out) + "\n```"
+
+
 def _build_pr_body(
     pr_number: int, pr_html_url: str, successful: list[DocDraft], flagged: list[DocDraft]
 ) -> str:
-    updated = "\n".join(
-        f"- `{d.target_path}` — {getattr(d.change, 'what_changed', '') or 'updated'}"
-        for d in successful
-    )
+    blocks = []
+    for d in successful:
+        title = (getattr(d.change, "title", "") or d.action).strip()
+        block = f"#### `{d.target_path}` — {title}\n\n{_rendered_change(d)}\n"
+        rationale = (getattr(d.change, "what_changed", "") or "").strip()
+        if rationale:
+            block += (
+                f"\n<details><summary>Why this changed (source: PR #{pr_number})"
+                f"</summary>\n\n{rationale}\n\n</details>\n"
+            )
+        blocks.append(block)
+    blocks_str = "\n".join(blocks)
     body = (
         f"## Automatic Documentation Update\n\n"
         f"Opened automatically after [PR #{pr_number}]({pr_html_url}) merged.\n\n"
-        f"### Updated\n\n{updated}\n"
+        f"Each block shows the documentation change as a diff (added lines in green, "
+        f'removed in red); expand "Why this changed" for the source rationale.\n\n'
+        f"### Documentation changes\n\n{blocks_str}"
     )
     if flagged:
         flags = "\n".join(f"- `{d.target_path}` — {d.flagged_reason}" for d in flagged)
