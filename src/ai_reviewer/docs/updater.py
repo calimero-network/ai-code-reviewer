@@ -57,13 +57,27 @@ _SCRIPT_STYLE_RE = re.compile(r"(?is)<(script|style)\b.*?</\1>")
 _WS_RE = re.compile(r"[ \t]+")
 _HEADING_RE = re.compile(r"(?is)<h([1-6])[^>]*>(.*?)</h\1>")
 _CODE_RE = re.compile(r"(?is)<code[^>]*>(.*?)</code>")
+# These docs write inline code as <span class="code">…</span> (see page_builder),
+# not <code>; match it too or symbols render as bare, run-together text.
+_SPAN_CODE_RE = re.compile(r'(?is)<span[^>]*class="[^"]*\bcode\b[^"]*"[^>]*>(.*?)</span>')
 _STRONG_RE = re.compile(r"(?is)<(strong|b)[^>]*>(.*?)</\1>")
 _EM_RE = re.compile(r"(?is)<(em|i)[^>]*>(.*?)</\1>")
 _LI_RE = re.compile(r"(?is)<li[^>]*>(.*?)</li>")
-_PRE_RE = re.compile(r"(?is)<pre[^>]*>(.*?)</pre>")
+# Multi-line code blocks: <pre> and the doc template's <div class="typedef">.
+_CODEBLOCK_RE = re.compile(
+    r"(?is)<pre[^>]*>(.*?)</pre>"
+    r'|<div[^>]*class="[^"]*\btypedef\b[^"]*"[^>]*>(.*?)</div>'
+)
+_BR_RE = re.compile(r"(?is)<br\s*/?>")
 _BLOCK_RE = re.compile(r"(?is)</?(?:p|div|ul|ol|section|tr)[^>]*>|<br\s*/?>")
 _PREVIEW_MAX_LINES = 16
 _PREVIEW_MAX_CHARS = 1600
+
+# A code block is carried through the line pipeline (and the added-only diff) as a
+# single atomic token line — payload is its code lines joined by \x01 — so it dedupes
+# as one unit and never has its fence split by the line-level diff. Expanded to a
+# fenced block only at render time.
+_CB_MARK = "\x00CB\x00"
 
 
 def _norm(s: str) -> str:
@@ -71,31 +85,67 @@ def _norm(s: str) -> str:
     return _WS_RE.sub(" ", html.unescape(_TAG_RE.sub("", s))).strip()
 
 
+def _code_block_lines(inner: str) -> list[str]:
+    """Flatten a code-block fragment to verbatim text lines: <br> → newline,
+    syntax-highlight spans dropped, entities decoded, &nbsp; → space. Unlike
+    _norm, leading indentation and angle brackets (e.g. Option<bool>) are kept."""
+    text = html.unescape(_TAG_RE.sub("", _BR_RE.sub("\n", inner))).replace("\xa0", " ")
+    # Drop blank lines: the template emits <br> *and* source-formatting newlines, so
+    # a real break and a pretty-print newline would otherwise yield a blank line each.
+    return [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+
+
+def _stash_codeblock(m: re.Match[str]) -> str:
+    """Replace a matched code block with a single atomic token line."""
+    lines = _code_block_lines(m.group(1) if m.group(1) is not None else m.group(2))
+    if not lines:
+        return " "
+    return "\n" + _CB_MARK + "\x01".join(lines) + "\n"
+
+
 def _html_to_md_lines(fragment: str) -> list[str]:
-    """Convert an HTML fragment to Markdown lines: inline <code>/<strong>/<em>
-    become `code`/**bold**/*italics* (kept inline so prose stays whole), headings
-    become bold lines, <li> become bullets, block elements become line breaks."""
+    """Convert an HTML fragment to Markdown lines: inline <code>/<span class=code>/
+    <strong>/<em> become `code`/**bold**/*italics* (kept inline so prose stays
+    whole), headings become bold lines, <li> become bullets, <pre>/typedef become
+    atomic code-block tokens, other block elements become line breaks."""
     s = _SCRIPT_STYLE_RE.sub(" ", fragment)
+    s = _CODEBLOCK_RE.sub(_stash_codeblock, s)
+    s = _SPAN_CODE_RE.sub(lambda m: f" `{_norm(m.group(1))}` ", s)
     s = _CODE_RE.sub(lambda m: f" `{_norm(m.group(1))}` ", s)
     s = _STRONG_RE.sub(lambda m: f" **{_norm(m.group(2))}** ", s)
     s = _EM_RE.sub(lambda m: f" *{_norm(m.group(2))}* ", s)
-    s = _PRE_RE.sub(lambda m: f"\n{_norm(m.group(1))}\n", s)
     s = _HEADING_RE.sub(lambda m: f"\n**{_norm(m.group(2))}**\n", s)
     s = _LI_RE.sub(lambda m: f"\n- {_norm(m.group(1))}\n", s)
     s = _BLOCK_RE.sub("\n", s)
-    return [ln for ln in (_norm(x) for x in s.splitlines()) if ln]
+    out: list[str] = []
+    for x in s.splitlines():
+        if x.startswith(_CB_MARK):  # atomic code block — keep verbatim, never _norm
+            out.append(x)
+        elif n := _norm(x):
+            out.append(n)
+    return out
+
+
+def _expand_codeblock(token: str) -> list[str]:
+    """Expand a code-block token into fenced-block lines (``` … ```)."""
+    return ["```", *token[len(_CB_MARK) :].split("\x01"), "```"]
 
 
 def _as_blockquote(lines: list[str]) -> str:
-    """Render lines as a Markdown blockquote, capped by line/char budget."""
+    """Render lines as a Markdown blockquote, capped by line/char budget. Code-block
+    tokens expand to fenced blocks and are included whole-or-not so fences stay paired."""
     out: list[str] = []
+    used = 0
     total = 0
     for ln in lines:
-        if len(out) >= _PREVIEW_MAX_LINES or total + len(ln) > _PREVIEW_MAX_CHARS:
+        display = _expand_codeblock(ln) if ln.startswith(_CB_MARK) else [ln]
+        cost = sum(len(d) for d in display)
+        if out and (used >= _PREVIEW_MAX_LINES or total + cost > _PREVIEW_MAX_CHARS):
             out.append("> …")
             break
-        out.append(f"> {ln}")
-        total += len(ln)
+        out.extend(f"> {d}" for d in display)
+        used += len(display)
+        total += cost
     return "\n".join(out)
 
 

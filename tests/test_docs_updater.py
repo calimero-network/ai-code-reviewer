@@ -6,7 +6,76 @@ import pytest
 
 from ai_reviewer.config import AnthropicApiConfig, DocGenerationSettings
 from ai_reviewer.docs.models import Change, ChangeSummary, DocAction, DocDraft
-from ai_reviewer.docs.updater import _build_pr_body, _rendered_change, _strip_html, run_doc_update
+from ai_reviewer.docs.updater import (
+    _build_pr_body,
+    _html_to_md_lines,
+    _rendered_change,
+    _strip_html,
+    run_doc_update,
+)
+
+
+def test_html_to_md_lines_converts_span_code_to_backticks():
+    """These docs use <span class="code">…</span> as the inline-code construct,
+    not <code>; it must render as `code`, not bare text."""
+    lines = _html_to_md_lines('<p>It calls <span class="code">handle_state_delta</span> now.</p>')
+    assert "`handle_state_delta`" in " ".join(lines)
+
+
+def test_html_to_md_lines_separates_adjacent_span_code():
+    """Two back-to-back code spans must not fuse into one token."""
+    lines = _html_to_md_lines(
+        '<div class="fp">mod.rs</div><div class="fd">'
+        '<span class="code">handle_state_delta</span> entry</div>'
+    )
+    text = " ".join(lines)
+    assert "mod.rshandle_state_delta" not in text  # not fused
+    assert "`handle_state_delta`" in text
+
+
+def test_rendered_change_renders_code_block_as_fence():
+    """A <div class="typedef"> / <pre> code block becomes a fenced block with
+    line breaks and angle brackets preserved (not collapsed / tag-stripped)."""
+    draft = DocDraft(
+        action="update_section",
+        target_path="architecture/sync.html",
+        before_content="<p>old</p>",
+        updated_content=(
+            "<p>old</p>"
+            '<div class="typedef">'
+            '<span class="kw">pub fn</span> foo(<br>'
+            "&nbsp;&nbsp;&nbsp;&nbsp;ctx: &amp;Ctx,<br>"
+            ") -&gt; Option&lt;bool&gt;"
+            "</div>"
+        ),
+        change=Change("fix", "t", "w", "y", [], [], "i"),
+    )
+    out = _rendered_change(draft)
+    assert "```" in out  # fenced, not run-on prose
+    assert "pub fn foo(" in out  # syntax spans flattened to text
+    assert "Option<bool>" in out  # angle brackets preserved, not stripped as a tag
+    assert "ctx: &Ctx," in out  # entity decoded, indentation kept on its own line
+
+
+def test_code_block_drops_pretty_print_blank_lines():
+    """<br> plus source-formatting newlines must not leave a blank line between
+    every code line (the typedef template emits both)."""
+    draft = DocDraft(
+        action="update_section",
+        target_path="architecture/sync.html",
+        before_content="<p>old</p>",
+        updated_content=(
+            "<p>old</p>"
+            '<div class="typedef">\n'
+            '<span class="kw">pub fn</span> foo(<br>\n'
+            "&nbsp;&nbsp;ctx: &amp;Ctx,<br>\n"
+            ")</div>"
+        ),
+        change=Change("fix", "t", "w", "y", [], [], "i"),
+    )
+    out = _rendered_change(draft)
+    assert "> \n" not in out and not out.endswith("> ")  # no empty quoted lines
+    assert "pub fn foo(" in out
 
 
 def test_strip_html_drops_tags_and_scripts():
