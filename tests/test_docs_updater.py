@@ -15,6 +15,20 @@ from ai_reviewer.docs.updater import (
 )
 
 
+def test_rendered_change_create_page_with_no_text_has_fallback_not_empty():
+    """A create_page with no headings and no extractable text must still produce a
+    non-empty preview, not a blank block that yields a malformed PR body."""
+    draft = DocDraft(
+        action="create_page",
+        target_path="architecture/empty.html",
+        updated_content="<style>.x{color:red}</style><script>var y=1;</script>",
+        change=Change("new_feature", "t", "w", "y", [], [], "i"),
+    )
+    out = _rendered_change(draft)
+    assert out.strip()  # not empty / whitespace-only
+    assert out.startswith(">")  # still a blockquote line
+
+
 def test_html_to_md_lines_converts_span_code_to_backticks():
     """These docs use <span class="code">…</span> as the inline-code construct,
     not <code>; it must render as `code`, not bare text."""
@@ -82,8 +96,8 @@ def test_strip_html_drops_tags_and_scripts():
     out = _strip_html(
         '<div class="card"><h2>Title</h2><script>var x=1;</script><p>Hello &amp; welcome</p></div>'
     )
-    assert "Title" in out
-    assert "Hello & welcome" in out
+    assert any("Title" in ln for ln in out)  # substring, robust to line grouping
+    assert any("Hello & welcome" in ln for ln in out)
     assert all("var x" not in ln for ln in out)  # script body dropped
     assert all("<" not in ln and ">" not in ln for ln in out)  # no tags
 

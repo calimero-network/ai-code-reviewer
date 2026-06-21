@@ -134,6 +134,8 @@ def _expand_codeblock(token: str) -> list[str]:
 def _as_blockquote(lines: list[str]) -> str:
     """Render lines as a Markdown blockquote, capped by line/char budget. Code-block
     tokens expand to fenced blocks and are included whole-or-not so fences stay paired."""
+    if not lines:  # never emit an empty block — callers splice this into the PR body
+        return "> _(no rendered-text preview available — see file diff)_"
     out: list[str] = []
     used = 0
     total = 0
@@ -166,6 +168,9 @@ def _rendered_change(draft: DocDraft) -> str:
             if txt:
                 items.append(f"{'  ' * (int(lvl) - 1)}- {txt}")
         return _as_blockquote(items or _strip_html(draft.updated_content))
+    # Added-only diff by set membership. Known trade-off for a PR preview: an added
+    # line whose text is identical to an existing line (e.g. a repeated warning) is
+    # treated as unchanged and omitted; the full content is always in the file diff.
     before = set(_html_to_md_lines(draft.before_content or ""))
     added = [ln for ln in _html_to_md_lines(draft.updated_content) if ln not in before]
     return _as_blockquote(added) if added else "> _(no rendered-text delta — see file diff)_"
@@ -185,12 +190,13 @@ def _build_pr_body(
                 f"</summary>\n\n{rationale}\n\n</details>\n"
             )
         blocks.append(block)
+    blocks_str = "\n".join(blocks)
     body = (
         f"## Automatic Documentation Update\n\n"
         f"Opened automatically after [PR #{pr_number}]({pr_html_url}) merged.\n\n"
         f"Each block shows the rendered documentation text (HTML stripped); expand "
         f'"Why this changed" for the source rationale.\n\n'
-        f"### Documentation changes\n\n" + "\n".join(blocks)
+        f"### Documentation changes\n\n{blocks_str}"
     )
     if flagged:
         flags = "\n".join(f"- `{d.target_path}` — {d.flagged_reason}" for d in flagged)
