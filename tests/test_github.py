@@ -2674,3 +2674,42 @@ class TestCreateDocUpdatePR:
                     pr_title="docs: update",
                     pr_body="body",
                 )
+
+
+class TestHasOpenDocUpdatePR:
+    """Tests for the per-source-PR doc-update idempotency guard."""
+
+    def _client_with_open_doc_prs(self, head_refs):
+        """Build a GitHubClient whose repo.get_pulls returns PRs with *head_refs*."""
+        from ai_reviewer.github.client import GitHubClient
+
+        open_prs = []
+        for i, ref in enumerate(head_refs):
+            pr = MagicMock()
+            pr.head.ref = ref
+            pr.number = 9000 + i
+            open_prs.append(pr)
+        mock_repo = MagicMock()
+        mock_repo.get_pulls.return_value = open_prs
+        with patch("ai_reviewer.github.client.Github") as MockGithub:
+            MockGithub.return_value.get_repo.return_value = mock_repo
+            return GitHubClient(token="test-token")
+
+    def test_open_doc_pr_guard_ignores_other_source_prs(self):
+        """A doc-PR open for a DIFFERENT source PR must not block the current PR.
+
+        Branch convention is docs/auto-pr{N}-{sha}. An open doc-PR for #2841
+        should not stop doc generation for #2853.
+        """
+        client = self._client_with_open_doc_prs(["docs/auto-pr2841-ed00a67"])
+        assert client.has_open_doc_update_pr("org/repo", "master", pr_number=2853) is False
+
+    def test_open_doc_pr_guard_matches_same_source_pr(self):
+        """A doc-PR open for THIS source PR blocks (idempotency on re-runs)."""
+        client = self._client_with_open_doc_prs(["docs/auto-pr2853-ed00a67"])
+        assert client.has_open_doc_update_pr("org/repo", "master", pr_number=2853) is True
+
+    def test_open_doc_pr_guard_no_prefix_collision(self):
+        """pr285 must not prefix-match pr2853 (the trailing dash anchors the number)."""
+        client = self._client_with_open_doc_prs(["docs/auto-pr285-ed00a67"])
+        assert client.has_open_doc_update_pr("org/repo", "master", pr_number=2853) is False
