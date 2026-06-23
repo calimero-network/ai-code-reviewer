@@ -2675,6 +2675,10 @@ class TestCreateDocUpdatePR:
                     pr_body="body",
                 )
 
+
+class TestHasOpenDocUpdatePR:
+    """Tests for the per-source-PR doc-update idempotency guard."""
+
     def _client_with_open_doc_prs(self, head_refs):
         """Build a GitHubClient whose repo.get_pulls returns PRs with *head_refs*."""
         from ai_reviewer.github.client import GitHubClient
