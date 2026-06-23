@@ -1515,23 +1515,31 @@ class GitHubClient:
                         found.add(item.path)
         return sorted(found)
 
-    def has_open_doc_update_pr(self, repo_name: str, base_branch: str) -> bool:
-        """Return True if an open doc-update PR already exists for *base_branch*.
+    def has_open_doc_update_pr(self, repo_name: str, base_branch: str, pr_number: int) -> bool:
+        """Return True if a doc-update PR for *pr_number* is already open.
 
-        Checks for any open PR whose head branch starts with ``docs/auto-`` and
-        targets *base_branch*.  Used as an idempotency guard in ``update-docs``
-        so that two rapid merges don't produce duplicate PRs.
+        Doc-update branches follow the ``docs/auto-pr{N}-{sha}`` convention
+        (see :meth:`create_doc_update_pr`), so we match the
+        ``docs/auto-pr{pr_number}-`` prefix — the trailing dash anchors the
+        number so ``pr285`` can't match ``pr2853``.
+
+        This scopes the guard to the *specific* source PR: it's an idempotency
+        check for re-runs of the same merged PR (GitHub rejects a second PR for
+        an identical head branch with a 422). It deliberately does NOT match
+        doc-PRs for *other* source PRs — otherwise one forgotten, unmerged
+        auto-doc PR would silently block doc generation for every later merge.
         """
+        prefix = f"docs/auto-pr{pr_number}-"
         repo = self._gh.get_repo(repo_name)
         try:
             open_prs = repo.get_pulls(state="open", base=base_branch)
             for pr in open_prs:
-                if pr.head.ref.startswith("docs/auto-"):
+                if pr.head.ref.startswith(prefix):
                     logger.info(
-                        "Idempotency: found existing doc-update PR #%d (%s) for %s",
+                        "Idempotency: found existing doc-update PR #%d (%s) for source PR #%d",
                         pr.number,
                         pr.head.ref,
-                        base_branch,
+                        pr_number,
                     )
                     return True
         except Exception as e:

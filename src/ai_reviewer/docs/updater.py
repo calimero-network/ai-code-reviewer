@@ -217,10 +217,10 @@ async def run_doc_update(
     pr = gh.get_pull_request(repo, pr_number)
     base_branch = base or pr.base.ref
 
-    if not dry_run and gh.has_open_doc_update_pr(repo, base_branch):
+    if not dry_run and gh.has_open_doc_update_pr(repo, base_branch, pr_number):
         return DocUpdateResult(
             skipped=True,
-            skip_reason=f"open doc-update PR already exists for {base_branch}",
+            skip_reason=f"open doc-update PR already exists for PR #{pr_number}",
         )
 
     ref = pr.merge_commit_sha or pr.head.sha
