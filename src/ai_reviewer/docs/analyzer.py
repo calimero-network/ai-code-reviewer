@@ -16,6 +16,8 @@ import re as _re
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ai_reviewer.config import DEFAULT_HAIKU_MODEL
+
 if TYPE_CHECKING:
     from ai_reviewer.config import AnthropicApiConfig
     from ai_reviewer.github.client import GitHubClient
@@ -489,7 +491,7 @@ async def generate_doc_drafts(
     ref: str,
     anthropic_cfg: AnthropicApiConfig,
     gh: GitHubClient,
-    model: str = "claude-haiku-4-5-20251001",
+    model: str = DEFAULT_HAIKU_MODEL,
     max_files: int = 15,
 ) -> list[DocDraft]:
     """Generate AI-drafted full-file updates for stale documentation files.

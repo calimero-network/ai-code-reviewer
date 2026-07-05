@@ -5,7 +5,7 @@ from ai_reviewer.config import DocGenerationSettings
 
 def test_new_defaults():
     s = DocGenerationSettings()
-    assert s.understanding_model == "claude-sonnet-4-6"
+    assert s.understanding_model == "claude-sonnet-5"
     assert s.apply_model == "claude-haiku-4-5-20251001"
     assert s.verify_model == "claude-haiku-4-5-20251001"
     assert s.max_understanding_diff_chars == 250_000

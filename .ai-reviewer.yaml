@@ -9,7 +9,7 @@ inherit_from: default
 # Anthropic Messages API — unified LLM gateway
 anthropic:
   api_key: ${ANTHROPIC_API_KEY}
-  default_model: claude-sonnet-4-6
+  default_model: claude-sonnet-5
   timeout_seconds: 300
   max_retries: 1
   enable_prompt_caching: true
@@ -20,7 +20,7 @@ anthropic:
 # Agent customization for self-review
 agents:
   - name: security-reviewer
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5
     focus_areas: [security, authentication]
     thinking_enabled: false
     allow_tool_use: true
@@ -34,7 +34,7 @@ agents:
       - Rate limiting and abuse prevention
 
   - name: patterns-reviewer
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5
     focus_areas: [architecture, patterns]
     thinking_enabled: false
     allow_tool_use: true
@@ -51,7 +51,7 @@ agents:
       Reference .ai/rules/ for detailed module conventions.
 
   - name: logic-reviewer
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5
     focus_areas: [logic, edge_cases, error_handling]
     thinking_enabled: false
     allow_tool_use: true
@@ -59,7 +59,7 @@ agents:
     temperature: 0.2
 
   - name: performance-reviewer
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5
     focus_areas: [performance, complexity, resource_management]
     thinking_enabled: false
     allow_tool_use: true

@@ -1,12 +1,13 @@
 """Performance-focused review agent."""
 
 from ai_reviewer.agents.base import ReviewAgent
+from ai_reviewer.config import DEFAULT_SONNET_MODEL
 
 
 class PerformanceAgent(ReviewAgent):
     """Agent specialized in performance and efficiency issues."""
 
-    MODEL = "claude-sonnet-4-6"
+    MODEL = DEFAULT_SONNET_MODEL
     AGENT_TYPE = "performance-reviewer"
     FOCUS_AREAS = ["performance", "complexity", "resource_management", "efficiency"]
     THINKING_ENABLED = False
@@ -53,7 +54,7 @@ Suggest concrete optimizations with example code when possible.
 class LogicAgent(ReviewAgent):
     """Agent specialized in logic errors and edge cases."""
 
-    MODEL = "claude-sonnet-4-6"
+    MODEL = DEFAULT_SONNET_MODEL
     AGENT_TYPE = "logic-reviewer"
     FOCUS_AREAS = ["logic", "edge_cases", "error_handling", "correctness"]
     THINKING_ENABLED = False

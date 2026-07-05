@@ -14,6 +14,20 @@ from ai_reviewer.config import AnthropicApiConfig
 
 logger = logging.getLogger(__name__)
 
+# Models that reject temperature/top_p/top_k outright (400 invalid_request_error).
+# ponytail: hardcoded set, add the next rejecting model here when it ships.
+_NO_SAMPLING_PARAMS_MODELS = {
+    "claude-sonnet-5",
+    "claude-opus-4-7",
+    "claude-opus-4-8",
+    "claude-fable-5",
+    "claude-mythos-5",
+}
+
+
+def _accepts_temperature(model: str) -> bool:
+    return model not in _NO_SAMPLING_PARAMS_MODELS
+
 
 class ToolRegistryProtocol(Protocol):
     """Structural interface the tool-use loop needs from a tool registry."""
@@ -105,8 +119,9 @@ class AnthropicClient:
             "system": system_to_send,
             "messages": [{"role": "user", "content": user}],
             "max_tokens": max_tokens,
-            "temperature": temperature,
         }
+        if _accepts_temperature(model):
+            kwargs["temperature"] = temperature
         response = await self._sdk.messages.create(**kwargs)
         usage = UsageStats()
         _accumulate_usage(usage, response)
@@ -175,16 +190,16 @@ class AnthropicClient:
                 "system": system_to_send,
                 "messages": messages,
                 "max_tokens": max_tokens,
-                "temperature": temperature,
                 "output_config": {
                     "format": {"type": "json_schema", "schema": output_schema},
                 },
             }
+            if _accepts_temperature(model):
+                kwargs["temperature"] = 1.0 if enable_thinking else temperature
             if tools:
                 kwargs["tools"] = tools
             if enable_thinking:
                 kwargs["thinking"] = {"type": "adaptive"}
-                kwargs["temperature"] = 1.0
 
             response = await self._sdk.messages.create(**kwargs)
             _accumulate_usage(usage, response)

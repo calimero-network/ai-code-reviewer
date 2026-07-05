@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from ai_reviewer.agents.anthropic_client import AnthropicClient, ToolRegistryProtocol
+from ai_reviewer.config import DEFAULT_SONNET_MODEL
 from ai_reviewer.context.builder import FINDINGS_SCHEMA
 from ai_reviewer.models.context import ReviewContext
 from ai_reviewer.models.findings import Category, ReviewFinding, Severity
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 class ReviewAgent:
     """Base class for all review agents."""
 
-    MODEL: str = "claude-sonnet-4-6"
+    MODEL: str = DEFAULT_SONNET_MODEL
     AGENT_TYPE: str = "base"
     FOCUS_AREAS: list[str] = []
     SYSTEM_PROMPT: str = "You are a code reviewer."

@@ -9,7 +9,7 @@ version: 1
 anthropic:
   api_key: ${ANTHROPIC_API_KEY}
   # base_url: https://api.anthropic.com   # default
-  default_model: claude-sonnet-4-6
+  default_model: claude-sonnet-5
   timeout_seconds: 300
   max_retries: 1
   enable_prompt_caching: true
@@ -34,7 +34,7 @@ github:
 # ============================================================================
 agents:
   - name: security-reviewer
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5
     focus_areas:
       - security
       - authentication
@@ -47,7 +47,7 @@ agents:
     max_tool_calls: 8
 
   - name: patterns-reviewer
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5
     focus_areas:
       - consistency
       - patterns
@@ -61,7 +61,7 @@ agents:
     max_tool_calls: 8
 
   - name: logic-reviewer
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5
     focus_areas:
       - logic
       - edge_cases
@@ -74,7 +74,7 @@ agents:
     max_tool_calls: 8
 
   - name: performance-reviewer
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5
     focus_areas:
       - performance
       - complexity
@@ -181,7 +181,7 @@ doc_generation:
   enabled: false
 
   # update-docs pipeline: Understand -> Route -> Apply -> Verify.
-  understanding_model: claude-sonnet-4-6        # stage 1: reads the full PR
+  understanding_model: claude-sonnet-5        # stage 1: reads the full PR
   apply_model: claude-haiku-4-5-20251001        # stage 3: drafts edits/pages
   verify_model: claude-haiku-4-5-20251001       # stage 4: confidence gate
   model: claude-haiku-4-5-20251001              # legacy fallback for apply/verify
