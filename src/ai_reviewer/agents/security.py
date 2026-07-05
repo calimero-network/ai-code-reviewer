@@ -1,12 +1,13 @@
 """Security-focused review agent."""
 
 from ai_reviewer.agents.base import ReviewAgent
+from ai_reviewer.config import DEFAULT_SONNET_MODEL
 
 
 class SecurityAgent(ReviewAgent):
     """Agent specialized in security vulnerability detection."""
 
-    MODEL = "claude-sonnet-4-6"
+    MODEL = DEFAULT_SONNET_MODEL
     AGENT_TYPE = "security-reviewer"
     FOCUS_AREAS = ["security", "authentication", "data_validation", "cryptography"]
     THINKING_ENABLED = False
@@ -57,7 +58,7 @@ Provide specific line numbers and concrete evidence for each finding.
 class AuthenticationAgent(ReviewAgent):
     """Agent specialized in authentication and authorization issues."""
 
-    MODEL = "claude-sonnet-4-6"
+    MODEL = DEFAULT_SONNET_MODEL
     AGENT_TYPE = "authentication-reviewer"
     FOCUS_AREAS = ["authentication", "authorization", "session_management"]
     THINKING_ENABLED = False

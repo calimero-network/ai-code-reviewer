@@ -7,6 +7,11 @@ from typing import Any
 
 import yaml
 
+# Single source of truth for the current Anthropic model generation.
+# Bump these two when a new model ships; every default below inherits from them.
+DEFAULT_SONNET_MODEL = "claude-sonnet-5"
+DEFAULT_HAIKU_MODEL = "claude-haiku-4-5-20251001"
+
 
 @dataclass
 class AgentConfig:
@@ -32,7 +37,7 @@ class AnthropicApiConfig:
     base_url: str = "https://api.anthropic.com"
     timeout_seconds: int = 300
     max_retries: int = 1
-    default_model: str = "claude-sonnet-4-6"
+    default_model: str = DEFAULT_SONNET_MODEL
     enable_prompt_caching: bool = True
     max_combined_context_tokens: int = 80_000
     per_file_max_bytes: int = 512 * 1024
@@ -135,7 +140,7 @@ class DocGenerationSettings:
     """
 
     enabled: bool = False
-    model: str = "claude-haiku-4-5-20251001"
+    model: str = DEFAULT_HAIKU_MODEL
     max_files: int = 15
     # Directories containing static HTML docs (GitHub Pages sites).
     # When set, update-docs scans these dirs for HTML pages to update on merge.
@@ -147,9 +152,9 @@ class DocGenerationSettings:
     # Open doc update PRs as drafts so they don't appear ready to merge.
     pr_draft: bool = True
     # Stage models for the Understand → Route → Apply → Verify pipeline.
-    understanding_model: str = "claude-sonnet-4-6"
-    apply_model: str = "claude-haiku-4-5-20251001"
-    verify_model: str = "claude-haiku-4-5-20251001"
+    understanding_model: str = DEFAULT_SONNET_MODEL
+    apply_model: str = DEFAULT_HAIKU_MODEL
+    verify_model: str = DEFAULT_HAIKU_MODEL
     # Full-PR read budget for stage 1; above this, map-reduce per file.
     max_understanding_diff_chars: int = 250_000
     # Capability gates.
@@ -226,7 +231,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         base_url=anthropic_raw.get("base_url", "https://api.anthropic.com"),
         timeout_seconds=anthropic_raw.get("timeout_seconds", 300),
         max_retries=anthropic_raw.get("max_retries", 1),
-        default_model=anthropic_raw.get("default_model", "claude-sonnet-4-6"),
+        default_model=anthropic_raw.get("default_model", DEFAULT_SONNET_MODEL),
         enable_prompt_caching=anthropic_raw.get("enable_prompt_caching", True),
         max_combined_context_tokens=anthropic_raw.get("max_combined_context_tokens", 80_000),
         per_file_max_bytes=anthropic_raw.get("per_file_max_bytes", 512 * 1024),
@@ -272,17 +277,17 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         agents = [
             AgentConfig(
                 name="security-reviewer",
-                model="claude-sonnet-4-6",
+                model=DEFAULT_SONNET_MODEL,
                 focus_areas=["security", "authentication"],
             ),
             AgentConfig(
                 name="performance-reviewer",
-                model="claude-sonnet-4-6",
+                model=DEFAULT_SONNET_MODEL,
                 focus_areas=["performance", "complexity"],
             ),
             AgentConfig(
                 name="patterns-reviewer",
-                model="claude-sonnet-4-6",
+                model=DEFAULT_SONNET_MODEL,
                 focus_areas=["consistency", "patterns"],
             ),
         ]
@@ -353,7 +358,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
 
     # Doc generation settings
     docgen_raw = raw.get("doc_generation", {})
-    _dg_model = docgen_raw.get("model", "claude-haiku-4-5-20251001")
+    _dg_model = docgen_raw.get("model", DEFAULT_HAIKU_MODEL)
     doc_generation = DocGenerationSettings(
         enabled=docgen_raw.get("enabled", False),
         model=_dg_model,
@@ -363,7 +368,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         ),
         pr_labels=docgen_raw.get("pr_labels", ["automated-docs", "documentation"]),
         pr_draft=docgen_raw.get("pr_draft", True),
-        understanding_model=docgen_raw.get("understanding_model", "claude-sonnet-4-6"),
+        understanding_model=docgen_raw.get("understanding_model", DEFAULT_SONNET_MODEL),
         apply_model=docgen_raw.get("apply_model", _dg_model),
         verify_model=docgen_raw.get("verify_model", _dg_model),
         max_understanding_diff_chars=int(docgen_raw.get("max_understanding_diff_chars", 250_000)),

@@ -1,12 +1,13 @@
 """Pattern and consistency focused review agent."""
 
 from ai_reviewer.agents.base import ReviewAgent
+from ai_reviewer.config import DEFAULT_HAIKU_MODEL, DEFAULT_SONNET_MODEL
 
 
 class PatternsAgent(ReviewAgent):
     """Agent specialized in code patterns and consistency."""
 
-    MODEL = "claude-sonnet-4-6"
+    MODEL = DEFAULT_SONNET_MODEL
     AGENT_TYPE = "patterns-reviewer"
     FOCUS_AREAS = ["consistency", "patterns", "architecture", "maintainability"]
     THINKING_ENABLED = False
@@ -53,7 +54,7 @@ Suggest patterns and refactoring when appropriate.
 class StyleAgent(ReviewAgent):
     """Agent focused on code style and documentation."""
 
-    MODEL = "claude-haiku-4-5-20251001"
+    MODEL = DEFAULT_HAIKU_MODEL
     AGENT_TYPE = "style-reviewer"
     FOCUS_AREAS = ["style", "documentation", "readability"]
     THINKING_ENABLED = False
