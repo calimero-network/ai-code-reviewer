@@ -87,13 +87,16 @@ jobs:
         id: pr
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          PR_NUM_INPUT: ${{ github.event.inputs.pr_number }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
           # Prefer explicit input (workflow_dispatch), then commit message, then gh CLI
-          PR_NUM="${{ github.event.inputs.pr_number }}"
+          # Commit message and input are passed via env (not interpolated into the
+          # script body) so quotes/backticks in either can't break bash parsing.
+          PR_NUM="$PR_NUM_INPUT"
 
           if [ -z "$PR_NUM" ]; then
-            MSG="${{ github.event.head_commit.message }}"
-            PR_NUM=$(echo "$MSG" | grep -oP '(?<=pull request #)\d+' | head -1 || true)
+            PR_NUM=$(printf '%s' "$COMMIT_MSG" | grep -oP '(?<=pull request #)\d+' | head -1 || true)
           fi
 
           if [ -z "$PR_NUM" ]; then
