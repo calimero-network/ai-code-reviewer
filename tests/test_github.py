@@ -2802,3 +2802,14 @@ class TestPartialReviewHonesty:
         assert "No Issues Found" not in comment
         assert "Review Incomplete" in comment
         assert "security-reviewer-0" in comment
+
+    def test_delta_empty_with_failed_agent_banner_not_ready_to_merge(self):
+        from ai_reviewer.github.client import ReviewDelta
+        from ai_reviewer.github.formatter import GitHubFormatter
+
+        formatter = GitHubFormatter(reviewer_name="MeroReviewer")
+        review = self._minimal_review(failed_agents=["security-reviewer-0"])
+        comment = formatter.format_review_with_delta(review, ReviewDelta())
+
+        assert "Ready to Merge" not in comment
+        assert "Review Incomplete" in comment
