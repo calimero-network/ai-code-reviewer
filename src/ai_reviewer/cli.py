@@ -225,7 +225,11 @@ async def review_pr_async(
                         "[yellow]Falling back to normal review flow after re-check failure[/yellow]"
                     )
 
-                if recheck_review is not None and not recheck_review.findings:
+                if (
+                    recheck_review is not None
+                    and not recheck_review.findings
+                    and not recheck_review.all_agents_failed
+                ):
                     formatter = GitHubFormatter(reviewer_name)
                     lgtm_review_count = meta.review_count + 1
                     new_meta = ReviewMeta.build(

@@ -1555,6 +1555,103 @@ class TestLgtmLightweightRecheck:
             assert mock_agent.await_count == 2
             mock_gh.post_review.assert_called_once()
 
+    def test_cli_lgtm_recheck_all_agents_failed_falls_back_to_normal(self):
+        """A silently-failed re-check (empty findings, all agents failed) must NOT
+        take the LGTM fast path — it falls through to the honest full review."""
+        import asyncio
+
+        from ai_reviewer.cli import review_pr_async
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        meta = ReviewMeta(
+            commit_sha="old_sha",
+            review_count=3,
+            timestamp="2020-01-01T00:00:00Z",
+            findings_hash="ff",
+        )
+
+        lgtm_delta = ReviewDelta(
+            new_findings=[],
+            fixed_findings=[_prev_comment()],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+        )
+
+        # Re-check gave up: no findings, but the only agent failed.
+        failed_recheck = ConsolidatedReview(
+            id="recheck",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[],
+            summary="Agent gave up",
+            agent_count=1,
+            review_quality_score=0.0,
+            total_review_time_ms=500,
+            failed_agents=["logic-reviewer-0"],
+        )
+        assert failed_recheck.all_agents_failed
+
+        full_finding = _finding(title="Full review bug")
+        full_review = ConsolidatedReview(
+            id="full",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[full_finding],
+            summary="One issue (full)",
+            agent_count=3,
+            review_quality_score=0.9,
+            total_review_time_ms=2000,
+        )
+
+        normal_delta = ReviewDelta(
+            new_findings=[full_finding],
+            fixed_findings=[],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+        )
+
+        mock_file = MagicMock()
+        mock_file.filename = "src/foo.py"
+        mock_pr = MagicMock()
+        mock_pr.head.sha = "new_sha"
+        mock_pr.get_files.return_value = [mock_file]
+
+        mock_gh = MagicMock()
+        mock_gh.get_pull_request.return_value = mock_pr
+        mock_gh.get_review_metadata.return_value = meta
+        mock_gh.check_lgtm_fast_path.return_value = lgtm_delta
+        mock_gh.compute_review_delta.return_value = normal_delta
+        mock_gh.get_previous_review_comments.return_value = [_prev_comment()]
+
+        with (
+            patch("ai_reviewer.cli.load_config") as mock_load,
+            patch("ai_reviewer.cli.validate_config", return_value=[]),
+            patch("ai_reviewer.cli.GitHubClient", return_value=mock_gh),
+            patch(
+                "ai_reviewer.cli.run_review",
+                new_callable=AsyncMock,
+                side_effect=[failed_recheck, full_review],
+            ) as mock_agent,
+        ):
+            mock_config = MagicMock()
+            mock_load.return_value = mock_config
+
+            asyncio.run(
+                review_pr_async(
+                    repo="test/repo",
+                    pr_number=42,
+                    output="github",
+                    force_review=False,
+                )
+            )
+
+            # Fell through to the full review instead of posting LGTM.
+            assert mock_agent.await_count == 2
+            mock_gh.post_review.assert_called_once()
+            mock_gh.resolve_fixed_comments.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_webhook_lgtm_candidate_triggers_recheck(self):
         """Webhook runs a 1-agent re-check when LGTM candidate is detected."""
@@ -1720,6 +1817,99 @@ class TestLgtmLightweightRecheck:
 
             assert mock_agent.await_count == 2
             mock_gh.post_review.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_webhook_lgtm_recheck_all_agents_failed_falls_back(self):
+        """A silently-failed re-check (empty findings, all agents failed) must NOT
+        take the LGTM fast path in the webhook — it falls through to full review."""
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        meta = ReviewMeta(
+            commit_sha="old_sha",
+            review_count=3,
+            timestamp="2020-01-01T00:00:00Z",
+            findings_hash="ff",
+        )
+
+        lgtm_delta = ReviewDelta(
+            new_findings=[],
+            fixed_findings=[_prev_comment()],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+        )
+
+        failed_recheck = ConsolidatedReview(
+            id="recheck",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[],
+            summary="Agent gave up",
+            agent_count=1,
+            review_quality_score=0.0,
+            total_review_time_ms=500,
+            failed_agents=["logic-reviewer-0"],
+        )
+        assert failed_recheck.all_agents_failed
+
+        full_finding = _finding(title="Full review bug")
+        full_review = ConsolidatedReview(
+            id="full",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[full_finding],
+            summary="One issue (full)",
+            agent_count=3,
+            review_quality_score=0.9,
+            total_review_time_ms=2000,
+        )
+
+        normal_delta = ReviewDelta(
+            new_findings=[full_finding],
+            fixed_findings=[],
+            open_findings=[],
+            previous_comments=[_prev_comment()],
+        )
+
+        mock_file = MagicMock()
+        mock_file.filename = "src/foo.py"
+        mock_pr = MagicMock()
+        mock_pr.head.sha = "new_sha"
+        mock_pr.get_labels.return_value = []
+        mock_pr.get_files.return_value = [mock_file]
+
+        mock_gh = MagicMock()
+        mock_gh.get_pull_request.return_value = mock_pr
+        mock_gh.get_review_metadata.return_value = meta
+        mock_gh.check_lgtm_fast_path.return_value = lgtm_delta
+        mock_gh.compute_review_delta.return_value = normal_delta
+        mock_gh.get_previous_review_comments.return_value = [_prev_comment()]
+
+        with (
+            patch.dict(
+                "os.environ",
+                {"ANTHROPIC_API_KEY": "test", "GITHUB_TOKEN": "test"},
+            ),
+            patch("ai_reviewer.config.load_config"),
+            patch(
+                "ai_reviewer.review.review_pr",
+                new_callable=AsyncMock,
+                side_effect=[failed_recheck, full_review],
+            ) as mock_agent,
+            patch("ai_reviewer.github.client.GitHubClient", return_value=mock_gh),
+            patch("ai_reviewer.github.formatter.GitHubFormatter"),
+        ):
+            from ai_reviewer.github.webhook import _setup_default_review_handler
+
+            handler = _setup_default_review_handler()
+
+            assert handler is not None
+            await handler(repo="test/repo", pr_number=42)
+
+            assert mock_agent.await_count == 2
+            mock_gh.post_review.assert_called_once()
+            mock_gh.resolve_fixed_comments.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_webhook_lgtm_recheck_error_falls_back(self):
