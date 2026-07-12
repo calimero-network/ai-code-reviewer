@@ -29,6 +29,21 @@ _NO_SAMPLING_PARAMS_MODELS = {
 _ALWAYS_THINKING_MODELS = {"claude-fable-5", "claude-mythos-5"}
 
 
+# Summary markers for reviews that did NOT complete. aggregate_findings() treats
+# any summary containing one of these as a failed agent — a give-up must never
+# be indistinguishable from a genuinely clean review.
+TOOL_LOOP_CAP_MARKER = "[tool loop cap]"
+PARSE_ERROR_MARKER = "[parse error]"
+CIRCUIT_BREAKER_MARKER = "[circuit breaker: context limit exceeded]"
+TRUNCATED_MARKER = "[truncated at max_tokens]"
+INCOMPLETE_SUMMARY_MARKERS: tuple[str, ...] = (
+    TOOL_LOOP_CAP_MARKER,
+    PARSE_ERROR_MARKER,
+    "[circuit breaker",
+    TRUNCATED_MARKER,
+)
+
+
 def _accepts_temperature(model: str) -> bool:
     return model not in _NO_SAMPLING_PARAMS_MODELS
 
@@ -208,7 +223,7 @@ class AnthropicClient:
                     self.config.max_combined_context_tokens,
                 )
                 return AnthropicReviewResult(
-                    parsed={"findings": [], "summary": "[circuit breaker: context limit exceeded]"},
+                    parsed={"findings": [], "summary": CIRCUIT_BREAKER_MARKER},
                     raw_text="",
                     usage=usage,
                     tool_calls=tool_calls,
@@ -252,8 +267,15 @@ class AnthropicClient:
                     usage.cache_creation_input_tokens,
                 )
                 raw_text = _extract_text(response)
+                parsed = _parse_json(raw_text)
+                if stop == "max_tokens":
+                    logger.warning(
+                        "Response truncated at max_tokens=%d — marking review incomplete",
+                        max_tokens,
+                    )
+                    parsed["summary"] = f"{TRUNCATED_MARKER} {parsed.get('summary', '')}".strip()
                 return AnthropicReviewResult(
-                    parsed=_parse_json(raw_text),
+                    parsed=parsed,
                     raw_text=raw_text,
                     usage=usage,
                     tool_calls=tool_calls,
@@ -302,7 +324,7 @@ class AnthropicClient:
 
         logger.warning("Tool-use loop exceeded max_tool_rounds=%d", max_tool_rounds)
         return AnthropicReviewResult(
-            parsed={"findings": [], "summary": "[tool loop cap]"},
+            parsed={"findings": [], "summary": TOOL_LOOP_CAP_MARKER},
             raw_text="",
             usage=usage,
             tool_calls=tool_calls,
@@ -371,4 +393,4 @@ def _parse_json(text: str) -> dict[str, Any]:
         return json.loads(text)
     except json.JSONDecodeError:
         logger.warning("Failed to parse JSON: %r", text[:200])
-        return {"findings": [], "summary": "[parse error]"}
+        return {"findings": [], "summary": PARSE_ERROR_MARKER}

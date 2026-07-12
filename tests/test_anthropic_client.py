@@ -141,11 +141,12 @@ async def test_run_review_without_thinking_sends_disabled():
     assert kwargs["thinking"] == {"type": "disabled"}
 
 
-def _client_with_mocked_sdk():
+def _client_with_mocked_sdk(stop_reason: str = "end_turn", text: str | None = None):
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    mock_create = AsyncMock(return_value=_fake_response('{"findings": [], "summary": "ok"}'))
+    body = '{"findings": [], "summary": "ok"}' if text is None else text
+    mock_create = AsyncMock(return_value=_fake_response(body, stop_reason=stop_reason))
     client._sdk.messages.create = mock_create
     return client, mock_create
 
@@ -629,3 +630,29 @@ async def test_run_review_logs_cache_usage(caplog):
     assert result.usage.cache_read_input_tokens == 70
     assert "cache_read=70" in caplog.text
     assert "cache_creation=120" in caplog.text
+
+
+def test_incomplete_markers_cover_all_giveup_paths():
+    from ai_reviewer.agents import anthropic_client as ac
+
+    assert ac.TOOL_LOOP_CAP_MARKER in ac.INCOMPLETE_SUMMARY_MARKERS
+    assert ac.PARSE_ERROR_MARKER in ac.INCOMPLETE_SUMMARY_MARKERS
+    assert ac.TRUNCATED_MARKER in ac.INCOMPLETE_SUMMARY_MARKERS
+    assert any(m.startswith("[circuit breaker") for m in ac.INCOMPLETE_SUMMARY_MARKERS)
+
+
+@pytest.mark.asyncio
+async def test_run_review_truncated_response_is_marked_incomplete():
+    """stop_reason=max_tokens must not read as a clean zero-finding review."""
+    client, mock_create = _client_with_mocked_sdk(stop_reason="max_tokens", text="")
+    result = await client.run_review(
+        model="claude-sonnet-5",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=None,
+        enable_thinking=False,
+    )
+    from ai_reviewer.agents.anthropic_client import TRUNCATED_MARKER
+
+    assert TRUNCATED_MARKER in result.parsed["summary"]
