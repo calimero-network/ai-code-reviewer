@@ -1164,3 +1164,21 @@ class TestCrossAgentRoutesThroughClient:
         # attribute auto-creates), so it's intentionally omitted. A reintroduced
         # _sdk bypass would call _sdk instead of complete_simple, failing
         # assert_awaited_once() above.
+
+
+def test_aggregate_findings_marks_incomplete_agent_as_failed():
+    from ai_reviewer.agents.anthropic_client import PARSE_ERROR_MARKER, TOOL_LOOP_CAP_MARKER
+    from ai_reviewer.review import aggregate_findings
+
+    review = aggregate_findings(
+        [
+            ("security-reviewer", [], TOOL_LOOP_CAP_MARKER),
+            ("logic-reviewer", [], PARSE_ERROR_MARKER),
+            ("patterns-reviewer", [], "Reviewed thoroughly, code looks good."),
+        ],
+        "o/r",
+        1,
+    )
+    assert "security-reviewer" in review.failed_agents
+    assert "logic-reviewer" in review.failed_agents
+    assert "patterns-reviewer" not in review.failed_agents
