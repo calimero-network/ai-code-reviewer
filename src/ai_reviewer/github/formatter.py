@@ -53,16 +53,7 @@ class GitHubFormatter:
 
         if not review.findings:
             if review.failed_agents:
-                lines.extend(
-                    [
-                        "### ⚠️ Review Incomplete",
-                        "",
-                        f"{len(review.failed_agents)} of {review.agent_count} agent(s) did not "
-                        f"finish ({', '.join(review.failed_agents)}) and no findings were "
-                        "produced. Treat this PR as **not yet reviewed**, not as approved.",
-                        "",
-                    ]
-                )
+                lines.extend(self._format_incomplete_block(review))
             else:
                 lines.extend(
                     [
@@ -90,13 +81,7 @@ class GitHubFormatter:
                     lines.append("")
 
         if review.findings and review.failed_agents:
-            lines.extend(
-                [
-                    f"> ⚠️ Partial review: {', '.join(review.failed_agents)} did not finish — "
-                    "findings above may be incomplete.",
-                    "",
-                ]
-            )
+            lines.extend(self._format_partial_trailer(review))
 
         lines.extend(
             [
@@ -349,16 +334,7 @@ class GitHubFormatter:
         # If nothing to show
         if not delta.new_findings and not delta.open_findings and not delta.fixed_findings:
             if review.failed_agents:
-                lines.extend(
-                    [
-                        "### ⚠️ Review Incomplete",
-                        "",
-                        f"{len(review.failed_agents)} of {review.agent_count} agent(s) did not "
-                        f"finish ({', '.join(review.failed_agents)}) and no findings were "
-                        "produced. Treat this PR as **not yet reviewed**, not as approved.",
-                        "",
-                    ]
-                )
+                lines.extend(self._format_incomplete_block(review))
             else:
                 lines.extend(
                     [
@@ -368,6 +344,10 @@ class GitHubFormatter:
                         "",
                     ]
                 )
+
+        # Partial-review note when real findings coexist with failed agents.
+        if (delta.new_findings or delta.open_findings) and review.failed_agents:
+            lines.extend(self._format_partial_trailer(review))
 
         suppressed_line = self._format_suppressed_line(delta)
         if suppressed_line:
@@ -383,6 +363,27 @@ class GitHubFormatter:
         )
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_incomplete_block(review: ConsolidatedReview) -> list[str]:
+        """Render the "Review Incomplete" body used when no findings were produced."""
+        return [
+            "### ⚠️ Review Incomplete",
+            "",
+            f"{len(review.failed_agents)} of {review.agent_count} agent(s) did not "
+            f"finish ({', '.join(review.failed_agents)}) and no findings were "
+            "produced. Treat this PR as **not yet reviewed**, not as approved.",
+            "",
+        ]
+
+    @staticmethod
+    def _format_partial_trailer(review: ConsolidatedReview) -> list[str]:
+        """Render the trailer warning findings may be incomplete due to failed agents."""
+        return [
+            f"> ⚠️ Partial review: {', '.join(review.failed_agents)} did not finish — "
+            "findings above may be incomplete.",
+            "",
+        ]
 
     @staticmethod
     def _format_suppressed_line(delta: ReviewDelta) -> str:

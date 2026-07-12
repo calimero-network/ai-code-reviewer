@@ -2879,3 +2879,18 @@ class TestPartialReviewHonesty:
         assert "Review Incomplete" in comment
         assert "security-reviewer-0" in comment
         assert "Fixed Issues" in comment  # fixed section still rendered
+
+    def test_delta_new_findings_with_failed_agent_adds_partial_note(self):
+        from ai_reviewer.github.client import ReviewDelta
+        from ai_reviewer.github.formatter import GitHubFormatter
+
+        formatter = GitHubFormatter(reviewer_name="MeroReviewer")
+        review = self._minimal_review(
+            findings=[self._finding()], failed_agents=["security-reviewer-0"]
+        )
+        delta = ReviewDelta(new_findings=[self._finding()])
+        comment = formatter.format_review_with_delta(review, delta)
+
+        assert "Partial review" in comment
+        assert "security-reviewer-0" in comment
+        assert "Issue" in comment  # findings still rendered
