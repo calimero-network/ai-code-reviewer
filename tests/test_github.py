@@ -2854,3 +2854,28 @@ class TestPartialReviewHonesty:
         assert "Ready to merge" not in comment
         assert "Review incomplete" in comment
         assert "security-reviewer-0" in comment
+
+    def test_delta_fixed_only_with_failed_agent_not_ready_to_merge(self):
+        from ai_reviewer.github.client import PreviousComment, ReviewDelta
+        from ai_reviewer.github.formatter import GitHubFormatter
+
+        formatter = GitHubFormatter(reviewer_name="MeroReviewer")
+        review = self._minimal_review(failed_agents=["security-reviewer-0"])
+        delta = ReviewDelta(
+            fixed_findings=[
+                PreviousComment(
+                    id=1,
+                    file_path="a.py",
+                    line=3,
+                    title="Old bug",
+                    severity="warning",
+                    body="🟡 **Old bug**",
+                )
+            ]
+        )
+        comment = formatter.format_review_with_delta(review, delta)
+
+        assert "Ready to Merge" not in comment
+        assert "Review Incomplete" in comment
+        assert "security-reviewer-0" in comment
+        assert "Fixed Issues" in comment  # fixed section still rendered

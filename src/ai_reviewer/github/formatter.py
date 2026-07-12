@@ -307,15 +307,27 @@ class GitHubFormatter:
             "",
         ]
 
-        # Add status summary banner — unless the delta is empty because agents
-        # failed, in which case the "Review Incomplete" block below is the status
-        # and a "Ready to Merge" banner would be a lie.
-        review_incomplete = review.failed_agents and not (
-            delta.new_findings or delta.open_findings or delta.fixed_findings
-        )
+        # Add status summary banner — but never "Ready to Merge" when agents
+        # failed: an all-resolved delta from a partial run proves nothing.
+        review_incomplete = review.failed_agents and delta.all_issues_resolved
         if not review_incomplete:
             lines.extend(self._format_status_banner(delta))
             lines.extend(["", "---", ""])
+        elif delta.fixed_findings:
+            # Fixed issues below are real, but the empty-delta "Review
+            # Incomplete" body block won't render here, so the banner carries it.
+            lines.extend(
+                [
+                    "### ⚠️ Review Incomplete",
+                    "",
+                    f"{', '.join(review.failed_agents)} did not finish — previously reported "
+                    "issues were fixed, but this run may have missed new ones. Treat this PR "
+                    "as **not yet fully reviewed**.",
+                    "",
+                    "---",
+                    "",
+                ]
+            )
 
         # Show FIXED issues first (good news!)
         if delta.fixed_findings:
