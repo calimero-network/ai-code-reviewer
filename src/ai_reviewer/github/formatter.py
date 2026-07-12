@@ -122,7 +122,13 @@ class GitHubFormatter:
         header = self._format_header(review)
         findings_for_inline = review.findings if inline_findings is None else inline_findings
         if not findings_for_inline:
-            body = "✅ No issues found. LGTM!"
+            if review.failed_agents:
+                body = (
+                    f"⚠️ Review incomplete: {', '.join(review.failed_agents)} did not finish "
+                    "and no findings were produced. Treat this PR as **not yet reviewed**."
+                )
+            else:
+                body = "✅ No issues found. LGTM!"
         else:
             by_sev = self._count_findings_by_severity(findings_for_inline)
             parts = []
@@ -161,7 +167,13 @@ class GitHubFormatter:
         """Format a minimal top-level body when inline comments are posted (with delta)."""
         header = self._format_header(review)
         if delta.all_issues_resolved:
-            body = "✅ All issues resolved. Ready to merge!"
+            if review.failed_agents:
+                body = (
+                    f"⚠️ Review incomplete: {', '.join(review.failed_agents)} did not finish — "
+                    "treat this PR as **not yet reviewed**, not as approved."
+                )
+            else:
+                body = "✅ All issues resolved. Ready to merge!"
         else:
             new_findings = (
                 delta.new_findings if inline_new_findings is None else inline_new_findings
@@ -513,7 +525,8 @@ class GitHubFormatter:
         Returns:
             GitHub review action
         """
-        if delta.all_issues_resolved and allow_approve:
+        # Never APPROVE off an empty delta caused by agents not finishing.
+        if delta.all_issues_resolved and allow_approve and not review.failed_agents:
             return "APPROVE"
 
         # Block merge only when there are critical findings (not warnings/suggestions/nitpicks)
@@ -540,7 +553,8 @@ class GitHubFormatter:
         Returns:
             GitHub review action: "APPROVE", "REQUEST_CHANGES", or "COMMENT"
         """
-        if not review.findings and allow_approve:
+        # Never APPROVE when no findings exist only because agents failed.
+        if not review.findings and allow_approve and not review.failed_agents:
             return "APPROVE"
         # Block merge only on critical; warnings/suggestions/nitpicks → COMMENT
         if review.has_critical_issues and allow_approve:

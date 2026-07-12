@@ -2813,3 +2813,44 @@ class TestPartialReviewHonesty:
 
         assert "Ready to Merge" not in comment
         assert "Review Incomplete" in comment
+
+    def test_action_with_delta_empty_and_failed_agent_is_not_approve(self):
+        from ai_reviewer.github.client import ReviewDelta
+        from ai_reviewer.github.formatter import GitHubFormatter
+
+        formatter = GitHubFormatter()
+        review = self._minimal_review(failed_agents=["security-reviewer-0"])
+        action = formatter.get_review_action_with_delta(review, ReviewDelta(), allow_approve=True)
+
+        assert action == "COMMENT"
+
+    def test_action_no_findings_with_failed_agent_is_not_approve(self):
+        from ai_reviewer.github.formatter import GitHubFormatter
+
+        formatter = GitHubFormatter()
+        review = self._minimal_review(failed_agents=["security-reviewer-0"])
+
+        assert formatter.get_review_action(review, allow_approve=True) == "COMMENT"
+
+    def test_compact_no_findings_with_failed_agent_not_lgtm(self):
+        from ai_reviewer.github.formatter import GitHubFormatter
+
+        formatter = GitHubFormatter(reviewer_name="MeroReviewer")
+        review = self._minimal_review(failed_agents=["security-reviewer-0"])
+        comment = formatter.format_review_compact(review)
+
+        assert "LGTM" not in comment
+        assert "Review incomplete" in comment
+        assert "security-reviewer-0" in comment
+
+    def test_delta_compact_empty_with_failed_agent_not_ready_to_merge(self):
+        from ai_reviewer.github.client import ReviewDelta
+        from ai_reviewer.github.formatter import GitHubFormatter
+
+        formatter = GitHubFormatter(reviewer_name="MeroReviewer")
+        review = self._minimal_review(failed_agents=["security-reviewer-0"])
+        comment = formatter.format_review_with_delta_compact(review, ReviewDelta())
+
+        assert "Ready to merge" not in comment
+        assert "Review incomplete" in comment
+        assert "security-reviewer-0" in comment
