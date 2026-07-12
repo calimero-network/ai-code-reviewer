@@ -2713,3 +2713,92 @@ class TestHasOpenDocUpdatePR:
         """pr285 must not prefix-match pr2853 (the trailing dash anchors the number)."""
         client = self._client_with_open_doc_prs(["docs/auto-pr285-ed00a67"])
         assert client.has_open_doc_update_pr("org/repo", "master", pr_number=2853) is False
+
+
+class TestPartialReviewHonesty:
+    """Formatter must not claim a clean review when an agent failed mid-run."""
+
+    @staticmethod
+    def _minimal_review(findings=None, failed_agents=None, agent_count=2):
+        from datetime import datetime
+
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        return ConsolidatedReview(
+            id="review-test1234",
+            created_at=datetime.now(),
+            repo="o/r",
+            pr_number=1,
+            findings=findings or [],
+            summary="s",
+            agent_count=agent_count,
+            review_quality_score=0.9,
+            total_review_time_ms=1000,
+            failed_agents=failed_agents or [],
+        )
+
+    @staticmethod
+    def _finding():
+        from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
+
+        return ConsolidatedFinding(
+            id="f1",
+            file_path="a.py",
+            line_start=1,
+            line_end=2,
+            severity=Severity.WARNING,
+            category=Category.SECURITY,
+            title="Issue",
+            description="d",
+            suggested_fix="fix",
+            consensus_score=1.0,
+            agreeing_agents=["agent-1"],
+            confidence=0.9,
+        )
+
+    def test_no_findings_with_failed_agent_does_not_say_lgtm(self):
+        from ai_reviewer.github.formatter import GitHubFormatter
+
+        formatter = GitHubFormatter(reviewer_name="MeroReviewer")
+        review = self._minimal_review(failed_agents=["security-reviewer-0"])
+        comment = formatter.format_review(review)
+
+        assert "LGTM" not in comment
+        assert "No Issues Found" not in comment
+        assert "Review Incomplete" in comment
+        assert "security-reviewer-0" in comment
+
+    def test_no_findings_no_failures_still_says_lgtm(self):
+        from ai_reviewer.github.formatter import GitHubFormatter
+
+        formatter = GitHubFormatter(reviewer_name="MeroReviewer")
+        review = self._minimal_review()
+        comment = formatter.format_review(review)
+
+        assert "No Issues Found" in comment
+
+    def test_findings_with_failed_agent_adds_partial_note(self):
+        from ai_reviewer.github.formatter import GitHubFormatter
+
+        formatter = GitHubFormatter(reviewer_name="MeroReviewer")
+        review = self._minimal_review(
+            findings=[self._finding()], failed_agents=["security-reviewer-0"]
+        )
+        comment = formatter.format_review(review)
+
+        assert "Partial review" in comment
+        assert "security-reviewer-0" in comment
+        assert "Issue" in comment  # findings still rendered
+
+    def test_delta_no_findings_with_failed_agent_does_not_say_lgtm(self):
+        from ai_reviewer.github.client import ReviewDelta
+        from ai_reviewer.github.formatter import GitHubFormatter
+
+        formatter = GitHubFormatter(reviewer_name="MeroReviewer")
+        review = self._minimal_review(failed_agents=["security-reviewer-0"])
+        comment = formatter.format_review_with_delta(review, ReviewDelta())
+
+        assert "LGTM" not in comment
+        assert "No Issues Found" not in comment
+        assert "Review Incomplete" in comment
+        assert "security-reviewer-0" in comment

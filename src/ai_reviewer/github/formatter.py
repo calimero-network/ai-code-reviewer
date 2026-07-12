@@ -52,14 +52,26 @@ class GitHubFormatter:
         ]
 
         if not review.findings:
-            lines.extend(
-                [
-                    "### ✅ No Issues Found",
-                    "",
-                    "All agents reviewed the code and found no issues. LGTM! 🎉",
-                    "",
-                ]
-            )
+            if review.failed_agents:
+                lines.extend(
+                    [
+                        "### ⚠️ Review Incomplete",
+                        "",
+                        f"{len(review.failed_agents)} of {review.agent_count} agent(s) did not "
+                        f"finish ({', '.join(review.failed_agents)}) and no findings were "
+                        "produced. Treat this PR as **not yet reviewed**, not as approved.",
+                        "",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        "### ✅ No Issues Found",
+                        "",
+                        "All agents reviewed the code and found no issues. LGTM! 🎉",
+                        "",
+                    ]
+                )
         else:
             # Group by severity
             by_severity = self._group_findings_by_severity(review.findings)
@@ -76,6 +88,15 @@ class GitHubFormatter:
                         self._format_severity_section(severity, findings, review.agent_count)
                     )
                     lines.append("")
+
+        if review.findings and review.failed_agents:
+            lines.extend(
+                [
+                    f"> ⚠️ Partial review: {', '.join(review.failed_agents)} did not finish — "
+                    "findings above may be incomplete.",
+                    "",
+                ]
+            )
 
         lines.extend(
             [
@@ -297,14 +318,26 @@ class GitHubFormatter:
 
         # If nothing to show
         if not delta.new_findings and not delta.open_findings and not delta.fixed_findings:
-            lines.extend(
-                [
-                    "### ✅ No Issues Found",
-                    "",
-                    "All agents reviewed the code and found no issues. LGTM! 🎉",
-                    "",
-                ]
-            )
+            if review.failed_agents:
+                lines.extend(
+                    [
+                        "### ⚠️ Review Incomplete",
+                        "",
+                        f"{len(review.failed_agents)} of {review.agent_count} agent(s) did not "
+                        f"finish ({', '.join(review.failed_agents)}) and no findings were "
+                        "produced. Treat this PR as **not yet reviewed**, not as approved.",
+                        "",
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        "### ✅ No Issues Found",
+                        "",
+                        "All agents reviewed the code and found no issues. LGTM! 🎉",
+                        "",
+                    ]
+                )
 
         suppressed_line = self._format_suppressed_line(delta)
         if suppressed_line:
