@@ -35,3 +35,10 @@ def test_load_anthropic_config(tmp_path: Path, monkeypatch):
     assert cfg.agents[0].thinking_enabled is True
     assert cfg.agents[0].allow_tool_use is True
     assert cfg.agents[0].max_tool_calls == 20
+
+
+def test_agent_defaults_sized_for_sonnet5():
+    from ai_reviewer.config import AgentConfig
+
+    cfg = AgentConfig(name="a", model="m", focus_areas=[])
+    assert cfg.max_tokens == 8192

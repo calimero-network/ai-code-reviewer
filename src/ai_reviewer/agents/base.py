@@ -32,7 +32,7 @@ class ReviewAgent:
         system_blocks: list[dict[str, Any]],
         user_blocks: list[dict[str, Any]],
         tool_registry: ToolRegistryProtocol | None,
-        max_tokens: int = 4096,
+        max_tokens: int = 8192,
         temperature: float = 0.3,
         thinking_enabled: bool | None = None,
         model: str | None = None,

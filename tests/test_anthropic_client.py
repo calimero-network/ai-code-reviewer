@@ -656,3 +656,12 @@ async def test_run_review_truncated_response_is_marked_incomplete():
     from ai_reviewer.agents.anthropic_client import TRUNCATED_MARKER
 
     assert TRUNCATED_MARKER in result.parsed["summary"]
+
+
+def test_run_review_default_tool_rounds_matches_tool_call_budget():
+    import inspect
+
+    from ai_reviewer.agents.anthropic_client import AnthropicClient
+
+    sig = inspect.signature(AnthropicClient.run_review)
+    assert sig.parameters["max_tool_rounds"].default == 20

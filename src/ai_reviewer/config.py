@@ -20,7 +20,7 @@ class AgentConfig:
     name: str
     model: str
     focus_areas: list[str]
-    max_tokens: int = 4096
+    max_tokens: int = 8192
     temperature: float = 0.3
     custom_prompt_append: str | None = None
     include_codebase_context: bool = False
@@ -262,7 +262,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
                 name=name,
                 model=model,
                 focus_areas=agent_raw.get("focus_areas", []),
-                max_tokens=agent_raw.get("max_tokens", 4096),
+                max_tokens=agent_raw.get("max_tokens", 8192),
                 temperature=agent_raw.get("temperature", 0.3),
                 custom_prompt_append=agent_raw.get("custom_prompt_append"),
                 include_codebase_context=agent_raw.get("include_codebase_context", False),

@@ -196,7 +196,10 @@ class AnthropicClient:
         enable_thinking: bool = False,
         max_tokens: int = 8192,
         temperature: float = 0.3,
-        max_tool_rounds: int = 8,
+        # 20 matches AgentConfig.max_tool_calls — the registry's per-review call
+        # budget is the binding cap; an 8-round loop cap below it made the last
+        # 12 calls unreachable and silently truncated agentic reviews on Sonnet 5.
+        max_tool_rounds: int = 20,
     ) -> AnthropicReviewResult:
         messages: list[dict[str, Any]] = [{"role": "user", "content": user_blocks}]
         usage = UsageStats()
