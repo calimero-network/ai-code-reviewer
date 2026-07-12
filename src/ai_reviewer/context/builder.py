@@ -57,6 +57,11 @@ FINDINGS_SCHEMA: dict[str, Any] = {
 
 # Shared review standard + severity rubric — every agent sees this so severity
 # is calibrated consistently rather than decided per agent.
+#
+# Coverage-first by design: the pipeline has downstream filters (per-severity
+# confidence thresholds + a cross-review validation round), so the finder's job
+# is coverage, not self-censorship. Telling Sonnet-5-era models "omit unless
+# confident" measurably suppresses recall — they obey it literally.
 REVIEW_STANDARD_BLOCK: dict[str, Any] = {
     "type": "text",
     "text": (
@@ -66,18 +71,28 @@ REVIEW_STANDARD_BLOCK: dict[str, Any] = {
         "minor polish. Technical facts and engineering principles outweigh personal "
         "preference: if the author's approach is a valid alternative, defer to it. "
         "Comment on the code, not the author, and explain *why* you ask for a change.\n\n"
-        "Precision over volume: if you are not confident a finding is real, omit it. "
-        "Every finding must point to a specific changed line AND give a concrete fix "
-        "or the precise reason the code is wrong. Never raise the same issue twice. "
-        "Do not flag mechanical formatting or import ordering that an "
+        "Report every issue you find, including ones you are uncertain about — do "
+        "not self-filter for importance or confidence. A separate validation step "
+        "filters and ranks findings; your job at this stage is coverage. Signal "
+        "certainty honestly through the `confidence` field (0.0-1.0) instead of "
+        "omitting doubtful findings: a real-but-unproven concern belongs in the "
+        "report at low confidence. Report each distinct issue exactly once, and do "
+        "not flag mechanical formatting or import ordering that an "
         "autoformatter/linter already handles.\n\n"
+        "Every finding must point to a specific changed line AND give a concrete fix "
+        "or the precise reason the code is wrong. When a finding depends on code you "
+        "cannot see in the diff (callers, definitions, configuration), use the "
+        "provided repository tools (read_file / grep / glob) to check the actual "
+        "code rather than guessing.\n\n"
         "**Severity:**\n"
         "- `critical` — must fix: security vulnerabilities or data-corruption/loss risks only.\n"
         "- `warning` — should fix: other correctness, concurrency, or serious maintainability issues.\n"
         "- `suggestion` — consider; an optional improvement.\n"
         '- `nitpick` — optional polish; prefix the title with "Nit: " (never blocking).\n\n'
         "**Grounding:** Only report issues on lines changed in this PR. Cite the "
-        "file and line. Do not speculate about — or report issues in — code outside the diff."
+        "file and line. Do not report issues in code outside the diff — but do use "
+        "the tools to read surrounding code when it determines whether a changed "
+        "line is correct."
     ),
 }
 
@@ -119,13 +134,15 @@ def _pr_tuning_block(pr_type: str | None, pr_size: str | None) -> dict[str, Any]
         )
     if pr_size in ("trivial", "small"):
         parts.append(
-            "Small change — prioritize precision: report only findings you are "
-            "confident about, and do not pad the review with low-value suggestions."
+            "Small change — the full diff fits comfortably in context, so verify it "
+            "exhaustively. Do not pad the review with generic advice; every finding "
+            "must still cite a specific changed line."
         )
     elif pr_size == "large":
         parts.append(
-            "Large change — prioritize high-severity issues (architecture, "
-            "correctness, security) over minor style or nitpicks."
+            "Large change — lead with high-severity issues (architecture, "
+            "correctness, security), but still report lower-severity issues you "
+            "notice with honest severity and confidence rather than omitting them."
         )
     if not parts:
         return None

@@ -37,12 +37,29 @@ def test_build_system_blocks_includes_review_standard_and_few_shot():
     assert "Favor approving" in combined
     assert "Nit: " in combined
     assert "critical" in combined
-    # Calibration additions from the research pass
-    assert "Precision over volume" in combined
+    # Coverage-first calibration (Sonnet-5 retune)
+    assert "do not self-filter" in combined
     assert "defer to it" in combined
     # Few-shot quality anchors
     assert "SQL injection via string interpolation" in combined
     assert "DO NOT produce these" in combined
+
+
+def test_review_standard_is_coverage_first():
+    from ai_reviewer.context.builder import REVIEW_STANDARD_BLOCK
+
+    text = REVIEW_STANDARD_BLOCK["text"]
+    assert "omit it" not in text  # the old self-filter instruction is gone
+    assert "confidence" in text.lower()
+    assert "changed line" in text  # grounding rule preserved
+
+
+def test_small_pr_tuning_no_longer_self_filters():
+    from ai_reviewer.context.builder import _pr_tuning_block
+
+    block = _pr_tuning_block(None, "small")
+    assert block is not None
+    assert "only findings you are confident about" not in block["text"]
 
 
 def test_build_system_blocks_includes_language_block_only_when_provided():
@@ -71,7 +88,7 @@ def test_pr_tuning_block_docs_and_ci():
 
 def test_pr_tuning_block_size_guidance():
     small = _pr_tuning_block("code", "small")
-    assert small is not None and "precision" in small["text"].lower()
+    assert small is not None and "exhaustively" in small["text"].lower()
     large = _pr_tuning_block("code", "large")
     assert large is not None and "high-severity" in large["text"].lower()
 
