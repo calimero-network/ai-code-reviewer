@@ -88,6 +88,7 @@ jobs:
           ai-reviewer review-pr \
             ${{ github.repository }} \
             ${{ steps.pr.outputs.number }} \
+            --config .ai-reviewer.yaml \
             --agents ${{ steps.pr.outputs.agents }} \
             --reviewer-name "MeroReviewer" \
             --output github

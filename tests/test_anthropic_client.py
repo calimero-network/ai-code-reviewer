@@ -242,6 +242,53 @@ async def test_tool_use_loop_dispatches_and_feeds_result_back():
 
 
 @pytest.mark.asyncio
+async def test_tool_budget_exhausted_drops_tools_and_finishes():
+    """A registry that hits its tool-call budget must finish with real findings,
+    not thrash on failing tool calls until the round cap marks it incomplete."""
+    from ai_reviewer.tools.repo_tools import ToolBudgetExhausted
+
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    client._sdk.messages.create = AsyncMock(
+        side_effect=[
+            _tool_use_response("t1", "read_file", {"path": "x.py"}),
+            _fake_response('{"findings": [{"title": "bug"}], "summary": "real review"}'),
+        ]
+    )
+
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(side_effect=ToolBudgetExhausted("exceeded max_tool_calls=8"))
+
+    result = await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        enable_thinking=False,
+        max_tokens=4096,
+        temperature=0.3,
+    )
+
+    # Round 2 must omit tools entirely so the model produces its final JSON.
+    second_kwargs = client._sdk.messages.create.await_args_list[1].kwargs
+    assert "tools" not in second_kwargs
+
+    # The exhaustion message was fed back for the round-1 tool_use.
+    first_tool_result = second_kwargs["messages"][-1]["content"][0]
+    assert first_tool_result["tool_use_id"] == "t1"
+    assert "tool budget exhausted" in first_tool_result["content"]
+
+    # Final review parses real findings with no incomplete marker.
+    from ai_reviewer.agents.anthropic_client import INCOMPLETE_SUMMARY_MARKERS
+
+    assert result.parsed["findings"] == [{"title": "bug"}]
+    assert not any(m in result.parsed["summary"] for m in INCOMPLETE_SUMMARY_MARKERS)
+
+
+@pytest.mark.asyncio
 async def test_caching_marks_last_system_block_when_enabled():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=True)
     client = AnthropicClient(cfg)

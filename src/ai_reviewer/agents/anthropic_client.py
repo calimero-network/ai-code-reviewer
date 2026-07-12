@@ -11,8 +11,17 @@ from typing import Any, Protocol
 import anthropic  # noqa: TID251 — the single allowed SDK importer (architecture invariant I1)
 
 from ai_reviewer.config import AnthropicApiConfig
+from ai_reviewer.tools.repo_tools import ToolBudgetExhausted
 
 logger = logging.getLogger(__name__)
+
+# Fed back to the model when the tool-call budget is exhausted mid-turn. Tells it
+# to stop requesting tools and emit its final JSON review from evidence gathered.
+_TOOL_BUDGET_EXHAUSTED_MSG = (
+    "[tool budget exhausted — no more tool calls are available. Produce your "
+    "final JSON review now from the evidence you have already gathered. Do not "
+    "request more tools.]"
+)
 
 # Models that reject temperature/top_p/top_k outright (400 invalid_request_error).
 # ponytail: hardcoded set, add the next rejecting model here when it ships.
@@ -206,6 +215,11 @@ class AnthropicClient:
         tool_calls: list[dict[str, Any]] = []
 
         tools = tool_registry.tool_specs() if tool_registry else None
+        # Once the registry's tool-call budget is exhausted, drop `tools` from
+        # every subsequent request so the model must produce its final JSON
+        # instead of thrashing on tool calls that can only fail (which used to
+        # burn the round cap and mark the review incomplete).
+        tool_budget_exhausted = False
 
         system_to_send = system_blocks
         if self.config.enable_prompt_caching and system_blocks:
@@ -242,7 +256,7 @@ class AnthropicClient:
                 },
             }
             kwargs.update(_sampling_params(model, enable_thinking, temperature))
-            if tools:
+            if tools and not tool_budget_exhausted:
                 kwargs["tools"] = tools
 
             response = await self._sdk.messages.create(**kwargs)
@@ -291,11 +305,19 @@ class AnthropicClient:
                 if getattr(block, "type", None) != "tool_use":
                     continue
                 tool_calls.append({"name": block.name, "input": block.input})
-                try:
-                    tool_output = await tool_registry.execute(block.name, block.input)
-                except Exception as e:  # noqa: BLE001
-                    tool_output = f"[tool error: {e}]"
-                    logger.warning("Tool %s failed: %s", block.name, e)
+                if tool_budget_exhausted:
+                    # Budget already blew earlier in this same turn — answer the
+                    # remaining tool_use blocks without attempting execution.
+                    tool_output = _TOOL_BUDGET_EXHAUSTED_MSG
+                else:
+                    try:
+                        tool_output = await tool_registry.execute(block.name, block.input)
+                    except ToolBudgetExhausted:
+                        tool_budget_exhausted = True
+                        tool_output = _TOOL_BUDGET_EXHAUSTED_MSG
+                    except Exception as e:  # noqa: BLE001
+                        tool_output = f"[tool error: {e}]"
+                        logger.warning("Tool %s failed: %s", block.name, e)
                 tool_result_blocks.append(
                     {
                         "type": "tool_result",

@@ -19,7 +19,7 @@ from ai_reviewer.session import ReviewSession
 logger = logging.getLogger(__name__)
 
 
-class ToolQuotaExceeded(RuntimeError):
+class ToolBudgetExhausted(RuntimeError):
     """Raised when an agent exceeds its tool-call budget."""
 
 
@@ -93,7 +93,7 @@ class ToolRegistry:
 
     async def execute(self, name: str, tool_input: dict[str, Any]) -> str:
         if self.session.tool_calls_for(self.agent_id) >= self.max_calls:
-            raise ToolQuotaExceeded(
+            raise ToolBudgetExhausted(
                 f"Agent {self.agent_id} exceeded max_tool_calls={self.max_calls}"
             )
         self.session.incr_tool_call(self.agent_id)
