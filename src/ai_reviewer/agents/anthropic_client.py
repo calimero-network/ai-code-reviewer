@@ -25,8 +25,36 @@ _NO_SAMPLING_PARAMS_MODELS = {
 }
 
 
+# Models that reject an explicit thinking={"type": "disabled"} (thinking is always on).
+_ALWAYS_THINKING_MODELS = {"claude-fable-5", "claude-mythos-5"}
+
+
 def _accepts_temperature(model: str) -> bool:
     return model not in _NO_SAMPLING_PARAMS_MODELS
+
+
+def _sampling_params(
+    model: str, enable_thinking: bool, temperature: float | None
+) -> dict[str, Any]:
+    """Thinking + temperature request params that are safe for the target model.
+
+    Sonnet 5 (and Opus 4.7+) treat an *omitted* `thinking` field as adaptive-ON,
+    so thinking-off agents must send an explicit {"type": "disabled"} or thinking
+    silently eats the max_tokens budget. Fable/Mythos reject explicit "disabled"
+    (thinking is always on there) — omit the field for those instead. Temperature
+    is only sent to models that still accept it.
+    """
+    params: dict[str, Any] = {}
+    if enable_thinking:
+        params["thinking"] = {"type": "adaptive"}
+        if _accepts_temperature(model):
+            params["temperature"] = 1.0  # API requires temp=1 alongside thinking
+    else:
+        if model not in _ALWAYS_THINKING_MODELS:
+            params["thinking"] = {"type": "disabled"}
+        if temperature is not None and _accepts_temperature(model):
+            params["temperature"] = temperature
+    return params
 
 
 class ToolRegistryProtocol(Protocol):
@@ -77,12 +105,14 @@ class AnthropicClient:
         Used for prose generation tasks (e.g. doc drafting) where structured
         output is not needed.
         """
-        response = await self._sdk.messages.create(
-            model=model,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            max_tokens=max_tokens,
-        )
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+            "max_tokens": max_tokens,
+        }
+        kwargs.update(_sampling_params(model, enable_thinking=False, temperature=None))
+        response = await self._sdk.messages.create(**kwargs)
         return _extract_text(response)
 
     async def complete_simple(
@@ -120,8 +150,7 @@ class AnthropicClient:
             "messages": [{"role": "user", "content": user}],
             "max_tokens": max_tokens,
         }
-        if _accepts_temperature(model):
-            kwargs["temperature"] = temperature
+        kwargs.update(_sampling_params(model, enable_thinking=False, temperature=temperature))
         response = await self._sdk.messages.create(**kwargs)
         usage = UsageStats()
         _accumulate_usage(usage, response)
@@ -194,12 +223,9 @@ class AnthropicClient:
                     "format": {"type": "json_schema", "schema": output_schema},
                 },
             }
-            if _accepts_temperature(model):
-                kwargs["temperature"] = 1.0 if enable_thinking else temperature
+            kwargs.update(_sampling_params(model, enable_thinking, temperature))
             if tools:
                 kwargs["tools"] = tools
-            if enable_thinking:
-                kwargs["thinking"] = {"type": "adaptive"}
 
             response = await self._sdk.messages.create(**kwargs)
             _accumulate_usage(usage, response)

@@ -119,7 +119,7 @@ async def test_run_review_with_thinking_enabled_sets_adaptive_config():
 
 
 @pytest.mark.asyncio
-async def test_run_review_without_thinking_omits_config():
+async def test_run_review_without_thinking_sends_disabled():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
@@ -138,7 +138,67 @@ async def test_run_review_without_thinking_omits_config():
         temperature=0.3,
     )
     kwargs = client._sdk.messages.create.call_args.kwargs
+    assert kwargs["thinking"] == {"type": "disabled"}
+
+
+def _client_with_mocked_sdk():
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    mock_create = AsyncMock(return_value=_fake_response('{"findings": [], "summary": "ok"}'))
+    client._sdk.messages.create = mock_create
+    return client, mock_create
+
+
+@pytest.mark.asyncio
+async def test_run_review_thinking_off_sends_explicit_disabled():
+    """Omitted `thinking` means adaptive-ON for Sonnet 5 — must send explicit disabled."""
+    client, mock_create = _client_with_mocked_sdk()
+    await client.run_review(
+        model="claude-sonnet-5",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=None,
+        enable_thinking=False,
+    )
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["thinking"] == {"type": "disabled"}
+    assert "temperature" not in kwargs  # sonnet-5 rejects it
+
+
+@pytest.mark.asyncio
+async def test_run_review_sonnet46_thinking_off_keeps_temperature():
+    client, mock_create = _client_with_mocked_sdk()
+    await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=None,
+        enable_thinking=False,
+        temperature=0.3,
+    )
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["thinking"] == {"type": "disabled"}
+    assert kwargs["temperature"] == 0.3
+
+
+@pytest.mark.asyncio
+async def test_run_review_fable_omits_thinking_entirely():
+    """Fable rejects explicit {"type": "disabled"} — the field must be absent."""
+    client, mock_create = _client_with_mocked_sdk()
+    await client.run_review(
+        model="claude-fable-5",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=None,
+        enable_thinking=False,
+    )
+    kwargs = mock_create.call_args.kwargs
     assert "thinking" not in kwargs
+    assert "temperature" not in kwargs
 
 
 @pytest.mark.asyncio
