@@ -128,6 +128,7 @@ class GitHubFormatter:
             body = (
                 (", ".join(parts) + ". See inline comments.") if parts else "See inline comments."
             )
+            body += self._compact_partial_suffix(review)
         return "\n".join(
             [
                 f"## 🤖 {self.reviewer_name}",
@@ -173,6 +174,7 @@ class GitHubFormatter:
             body = (
                 (" | ".join(parts) + ". See inline comments.") if parts else "See inline comments."
             )
+            body += self._compact_partial_suffix(review)
         suppressed_line = self._format_suppressed_line(delta)
         content = [
             f"## 🤖 {self.reviewer_name}",
@@ -384,6 +386,21 @@ class GitHubFormatter:
             "findings above may be incomplete.",
             "",
         ]
+
+    @staticmethod
+    def _compact_partial_suffix(review: ConsolidatedReview) -> str:
+        """One-line partial-review note appended to a compact body, or '' if complete.
+
+        The compact body is what posts whenever inline comments exist, so a
+        multi-agent run where one agent fails but others find issues must still
+        signal incompleteness here — not only in the full/no-findings paths.
+        """
+        if not review.failed_agents:
+            return ""
+        return (
+            f" ⚠️ Partial review: {', '.join(review.failed_agents)} did not finish — "
+            "coverage may be incomplete."
+        )
 
     @staticmethod
     def _format_suppressed_line(delta: ReviewDelta) -> str:

@@ -2790,6 +2790,44 @@ class TestPartialReviewHonesty:
         assert "security-reviewer-0" in comment
         assert "Issue" in comment  # findings still rendered
 
+    def test_compact_findings_with_failed_agent_notes_partial(self):
+        """Compact body (used whenever inline comments post) must flag a partial
+        review when some agents fail but others still produce findings."""
+        from ai_reviewer.github.formatter import GitHubFormatter
+
+        formatter = GitHubFormatter(reviewer_name="MeroReviewer")
+        review = self._minimal_review(
+            findings=[self._finding()], failed_agents=["security-reviewer-0"]
+        )
+        compact = formatter.format_review_compact(review)
+
+        assert "security-reviewer-0" in compact
+        assert "incomplete" in compact.lower() or "partial" in compact.lower()
+
+    def test_compact_findings_no_failures_has_no_partial_note(self):
+        from ai_reviewer.github.formatter import GitHubFormatter
+
+        formatter = GitHubFormatter(reviewer_name="MeroReviewer")
+        review = self._minimal_review(findings=[self._finding()])
+        compact = formatter.format_review_compact(review)
+
+        assert "incomplete" not in compact.lower()
+        assert "partial" not in compact.lower()
+
+    def test_compact_delta_findings_with_failed_agent_notes_partial(self):
+        from ai_reviewer.github.client import ReviewDelta
+        from ai_reviewer.github.formatter import GitHubFormatter
+
+        formatter = GitHubFormatter(reviewer_name="MeroReviewer")
+        review = self._minimal_review(
+            findings=[self._finding()], failed_agents=["security-reviewer-0"]
+        )
+        delta = ReviewDelta(new_findings=[self._finding()])
+        compact = formatter.format_review_with_delta_compact(review, delta)
+
+        assert "security-reviewer-0" in compact
+        assert "incomplete" in compact.lower() or "partial" in compact.lower()
+
     def test_delta_no_findings_with_failed_agent_does_not_say_lgtm(self):
         from ai_reviewer.github.client import ReviewDelta
         from ai_reviewer.github.formatter import GitHubFormatter
