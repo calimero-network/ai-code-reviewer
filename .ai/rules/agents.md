@@ -65,6 +65,37 @@ No mutable state between `review()` calls. Each review is independent. Agents re
 
 If `FOCUS_AREAS = ["security"]`, the system prompt must emphasize security.
 
+### A5: Incomplete Reviews Carry Machine-Readable Markers
+
+All give-up paths (tool loop exhaustion, parse error, circuit breaker timeout, truncation at max_tokens) must tag the summary with a marker from `INCOMPLETE_SUMMARY_MARKERS` so downstream aggregation can filter or highlight incomplete reviews.
+FIND>>>
+<<<REPLACE
+## Invariants
+
+### I1: LLM SDK Access is Centralized
+
+Only `agents/anthropic_client.py` may import the `anthropic` SDK directly. All other modules must access LLM functionality through `AnthropicClient`. This is enforced by `ruff` with the `flake8-tidy-imports` rule.
+
+### A1: All Agents Extend ReviewAgent
+
+Never create standalone agent functions. Always inherit from `ReviewAgent`.
+
+### A2: Agents Return JSON-Structured Findings
+
+Output is enforced via `output_config.format = json_schema` on the Anthropic API. The schema is defined in `context/builder.py:FINDINGS_SCHEMA`.
+
+### A3: Agents Are Stateless
+
+No mutable state between `review()` calls. Each review is independent. Agents receive pre-built `system_blocks` and `user_blocks` at construction time.
+
+### A4: Focus Areas Match System Prompt
+
+If `FOCUS_AREAS = ["security"]`, the system prompt must emphasize security.
+
+### A5: Incomplete Reviews Carry Machine-Readable Markers
+
+All give-up paths (tool loop exhaustion, parse error, circuit breaker timeout, truncation at max_tokens) must tag the summary with a marker from `INCOMPLETE_SUMMARY_MARKERS` so downstream aggregation can filter or highlight incomplete reviews.
+
 ## Creating a New Agent
 
 ```python
@@ -81,11 +112,12 @@ class NewFocusAgent(ReviewAgent):
     THINKING_ENABLED = False          # keep False — thinking adds quadratic cost in tool loops
 
     SYSTEM_PROMPT = """You are an expert in [area].
+    Report every finding (including uncertain ones) and signal certainty via the confidence field.
     Focus on:
     - Point 1
     - Point 2
 
-    Be thorough but avoid false positives."""
+    Use repository tools (read_file/grep/glob) when a finding depends on code outside the visible diff."""
 ```
 
 Then register in `review.py`:
@@ -118,6 +150,17 @@ agent = MyAgent(
 )
 review = await agent.review(diff="", file_contents={}, context=ctx)
 ```
+
+### Sampling Parameters (Thinking & Temperature)
+
+The `_sampling_params()` helper in `anthropic_client.py` sends explicit per-model thinking and temperature configuration:
+
+| Model Family       | Thinking Field   | Temperature Field |
+| ------------------ | ---------------- | ----------------- |
+| Sonnet 5 / Opus    | Explicit (if on) | Included          |
+| Fable / Mythos     | Omitted always   | Omitted always    |
+
+When `THINKING_ENABLED = False`, Sonnet/Opus models receive `thinking: {type: disabled}` explicitly (not omitted). Fable/Mythos models reject the explicit field and omit it entirely. Temperature is only sent to models that accept it. This ensures reliable API behavior across model variants.
 
 ### Simple Completions
 
@@ -166,3 +209,5 @@ Pass `None` for `tool_registry` if the agent does not use tools.
 4. **Don't hardcode temperatures** - Use configuration
 5. **Don't share state between reviews** - Create fresh state each call
 6. **Don't import `anthropic` SDK directly** - Only `anthropic_client.py` should import it (enforced by invariant I1)
+7. **Don't suppress uncertain findings** - Report all findings and use the `confidence` field; downstream thresholds and cross-review validation filter noise
+8. **Don't continue requesting tools after budget exhaustion** - `ToolBudgetExhausted` exception forces graceful finish; agent completes JSON from gathered evidence
