@@ -77,13 +77,10 @@ class AggregatorSettings:
     similarity_threshold: float = 0.85
     min_consensus_for_critical: float = 0.5
     use_embeddings: bool = False
-    # Noise floors, not precision gates (see CONFIDENCE_THRESHOLDS in review.py).
-    # Coverage-first prompts report at honest confidence; cross-review does precision.
-    # critical is near-zero so possible security/data-loss findings never auto-drop.
-    min_confidence_critical: float = 0.2
-    min_confidence_warning: float = 0.35
-    min_confidence_suggestion: float = 0.5
-    min_confidence_nitpick: float = 0.65
+    min_confidence_critical: float = 0.5
+    min_confidence_warning: float = 0.6
+    min_confidence_suggestion: float = 0.7
+    min_confidence_nitpick: float = 0.8
 
 
 @dataclass
@@ -315,10 +312,10 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         similarity_threshold=agg_raw.get("similarity_threshold", 0.85),
         min_consensus_for_critical=agg_raw.get("min_consensus_for_critical", 0.5),
         use_embeddings=agg_raw.get("use_embeddings", False),
-        min_confidence_critical=agg_raw.get("min_confidence_critical", 0.2),
-        min_confidence_warning=agg_raw.get("min_confidence_warning", 0.35),
-        min_confidence_suggestion=agg_raw.get("min_confidence_suggestion", 0.5),
-        min_confidence_nitpick=agg_raw.get("min_confidence_nitpick", 0.65),
+        min_confidence_critical=agg_raw.get("min_confidence_critical", 0.5),
+        min_confidence_warning=agg_raw.get("min_confidence_warning", 0.6),
+        min_confidence_suggestion=agg_raw.get("min_confidence_suggestion", 0.7),
+        min_confidence_nitpick=agg_raw.get("min_confidence_nitpick", 0.8),
     )
 
     # Output settings

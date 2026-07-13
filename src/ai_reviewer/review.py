@@ -522,18 +522,11 @@ def _cluster_raw_findings(
     return clusters
 
 
-# Confidence floors per severity. These are a NOISE floor, not a precision gate:
-# the coverage-first prompts tell the model to report findings at honest (often
-# low) confidence, and precision comes from the cross-review validation round.
-# High floors (the old 0.5/0.6/0.7/0.8) silently dropped real findings that
-# Sonnet-5-era models correctly report at moderate confidence. `critical` is set
-# very low so a possible security/data-loss finding is essentially never
-# auto-suppressed — surface it and let cross-review / a human judge.
 CONFIDENCE_THRESHOLDS: dict[Severity, float] = {
-    Severity.CRITICAL: 0.2,
-    Severity.WARNING: 0.35,
-    Severity.SUGGESTION: 0.5,
-    Severity.NITPICK: 0.65,
+    Severity.CRITICAL: 0.5,
+    Severity.WARNING: 0.6,
+    Severity.SUGGESTION: 0.7,
+    Severity.NITPICK: 0.8,
 }
 
 
@@ -743,11 +736,23 @@ def aggregate_findings(
     thresholds = (
         confidence_thresholds if confidence_thresholds is not None else CONFIDENCE_THRESHOLDS
     )
-    pre_filter_count = len(consolidated)
+    dropped = [f for f in consolidated if f.confidence < thresholds.get(f.severity, 0.0)]
     consolidated = [f for f in consolidated if f.confidence >= thresholds.get(f.severity, 0.0)]
-    filtered_count = pre_filter_count - len(consolidated)
-    if filtered_count > 0:
-        logger.info("Confidence filter dropped %d finding(s)", filtered_count)
+    if dropped:
+        # Log WHAT was dropped, not just the count, so we can judge from real
+        # reviews whether the floors are discarding genuine findings (and should
+        # be lowered) or correctly filtering noise. Decision stays evidence-based.
+        logger.info("Confidence filter dropped %d finding(s):", len(dropped))
+        for f in dropped:
+            logger.info(
+                "  dropped [%s conf=%.2f < %.2f] %s:%s %s",
+                f.severity.value,
+                f.confidence,
+                thresholds.get(f.severity, 0.0),
+                f.file_path,
+                f.line_start,
+                f.title,
+            )
 
     pre_dedup_count = len(consolidated)
     consolidated = dedup_cross_file(consolidated)

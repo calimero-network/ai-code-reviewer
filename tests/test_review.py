@@ -812,13 +812,10 @@ class TestConfidenceFiltering:
         assert Severity.NITPICK in CONFIDENCE_THRESHOLDS
 
     def test_default_threshold_values(self):
-        # Noise floors (not precision gates): coverage-first + cross-review.
-        assert CONFIDENCE_THRESHOLDS[Severity.CRITICAL] == 0.2
-        assert CONFIDENCE_THRESHOLDS[Severity.WARNING] == 0.35
-        assert CONFIDENCE_THRESHOLDS[Severity.SUGGESTION] == 0.5
-        assert CONFIDENCE_THRESHOLDS[Severity.NITPICK] == 0.65
-        # critical floor must stay low so possible criticals are never auto-dropped
-        assert CONFIDENCE_THRESHOLDS[Severity.CRITICAL] <= 0.25
+        assert CONFIDENCE_THRESHOLDS[Severity.CRITICAL] == 0.5
+        assert CONFIDENCE_THRESHOLDS[Severity.WARNING] == 0.6
+        assert CONFIDENCE_THRESHOLDS[Severity.SUGGESTION] == 0.7
+        assert CONFIDENCE_THRESHOLDS[Severity.NITPICK] == 0.8
 
     def test_high_confidence_findings_kept(self):
         """Findings at or above their severity threshold are kept."""
@@ -829,45 +826,36 @@ class TestConfidenceFiltering:
         assert len(result.findings) == 1
 
     def test_low_confidence_critical_dropped(self):
-        """Critical finding below the 0.2 floor is dropped (floor is deliberately low)."""
+        """Critical finding below 0.5 confidence is dropped."""
         all_findings = [
-            ("agent-1", [_make_raw_finding("critical", 0.1)], "summary"),
+            ("agent-1", [_make_raw_finding("critical", 0.4)], "summary"),
         ]
         result = aggregate_findings(all_findings, "test/repo", 1)
         assert len(result.findings) == 0
 
     def test_low_confidence_warning_dropped(self):
-        """Warning finding below the 0.35 floor is dropped."""
+        """Warning finding below 0.6 confidence is dropped."""
         all_findings = [
-            ("agent-1", [_make_raw_finding("warning", 0.3)], "summary"),
+            ("agent-1", [_make_raw_finding("warning", 0.5)], "summary"),
         ]
         result = aggregate_findings(all_findings, "test/repo", 1)
         assert len(result.findings) == 0
 
     def test_low_confidence_suggestion_dropped(self):
-        """Suggestion finding below the 0.5 floor is dropped."""
+        """Suggestion finding below 0.7 confidence is dropped."""
         all_findings = [
-            ("agent-1", [_make_raw_finding("suggestion", 0.4)], "summary"),
+            ("agent-1", [_make_raw_finding("suggestion", 0.6)], "summary"),
         ]
         result = aggregate_findings(all_findings, "test/repo", 1)
         assert len(result.findings) == 0
 
     def test_low_confidence_nitpick_dropped(self):
-        """Nitpick finding below the 0.65 floor is dropped."""
+        """Nitpick finding below 0.8 confidence is dropped."""
         all_findings = [
-            ("agent-1", [_make_raw_finding("nitpick", 0.6)], "summary"),
+            ("agent-1", [_make_raw_finding("nitpick", 0.7)], "summary"),
         ]
         result = aggregate_findings(all_findings, "test/repo", 1)
         assert len(result.findings) == 0
-
-    def test_moderate_confidence_now_kept(self):
-        """Regression guard for the Sonnet 5 recall fix: a moderate-confidence
-        warning (0.5) that the OLD 0.6 floor silently dropped must now survive."""
-        all_findings = [
-            ("agent-1", [_make_raw_finding("warning", 0.5)], "summary"),
-        ]
-        result = aggregate_findings(all_findings, "test/repo", 1)
-        assert len(result.findings) == 1
 
     def test_exact_threshold_kept(self):
         """Findings exactly at the threshold are kept (>= comparison)."""
