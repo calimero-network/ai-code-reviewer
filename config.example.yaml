@@ -10,8 +10,8 @@ anthropic:
   api_key: ${ANTHROPIC_API_KEY}
   # base_url: https://api.anthropic.com   # default
   default_model: claude-sonnet-5
-  timeout_seconds: 300
-  max_retries: 1
+  timeout_seconds: 600  # long review generations; below this the connection can be dropped
+  max_retries: 3  # transient APIConnectionError/ReadError on long calls are retryable
   enable_prompt_caching: true
   max_combined_context_tokens: 80000
   per_file_max_bytes: 524288

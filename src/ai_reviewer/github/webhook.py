@@ -188,7 +188,7 @@ def _setup_default_review_handler() -> Callable:
             logger.error("GITHUB_TOKEN not set")
             return
 
-        anthropic_timeout = _get_env_int("ANTHROPIC_TIMEOUT", 300)
+        anthropic_timeout = _get_env_int("ANTHROPIC_TIMEOUT", 600)
         num_agents = _get_env_int("NUM_AGENTS", 3)
         min_agreement = _get_env_float("MIN_VALIDATION_AGREEMENT", 2 / 3)
 

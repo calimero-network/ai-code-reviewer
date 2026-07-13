@@ -36,7 +36,11 @@ class AnthropicApiConfig:
     api_key: str
     base_url: str = "https://api.anthropic.com"
     timeout_seconds: int = 300
-    max_retries: int = 1
+    # Long non-streaming review calls occasionally have their connection dropped
+    # by the network (httpx.ReadError -> APIConnectionError). These are transient
+    # and retryable; 1 retry was too few (one of N parallel agents reliably
+    # failed and the whole review posted "incomplete"). 3 rescues the vast majority.
+    max_retries: int = 3
     default_model: str = DEFAULT_SONNET_MODEL
     enable_prompt_caching: bool = True
     max_combined_context_tokens: int = 80_000
@@ -230,7 +234,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         api_key=anthropic_raw.get("api_key") or os.environ.get("ANTHROPIC_API_KEY", ""),
         base_url=anthropic_raw.get("base_url", "https://api.anthropic.com"),
         timeout_seconds=anthropic_raw.get("timeout_seconds", 300),
-        max_retries=anthropic_raw.get("max_retries", 1),
+        max_retries=anthropic_raw.get("max_retries", 3),
         default_model=anthropic_raw.get("default_model", DEFAULT_SONNET_MODEL),
         enable_prompt_caching=anthropic_raw.get("enable_prompt_caching", True),
         max_combined_context_tokens=anthropic_raw.get("max_combined_context_tokens", 80_000),
