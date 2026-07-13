@@ -36,8 +36,8 @@ agents:
   - name: patterns-reviewer
     model: claude-sonnet-5
     focus_areas: [architecture, patterns]
-    thinking_enabled: true
-    max_tokens: 16000
+    thinking_enabled: false
+    max_tokens: 8192
     allow_tool_use: true
     temperature: 0.2
     custom_prompt_append: |
@@ -61,8 +61,8 @@ agents:
   - name: performance-reviewer
     model: claude-sonnet-5
     focus_areas: [performance, complexity, resource_management]
-    thinking_enabled: true
-    max_tokens: 16000
+    thinking_enabled: false
+    max_tokens: 8192
     allow_tool_use: true
     temperature: 0.3
 
