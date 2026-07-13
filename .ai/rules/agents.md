@@ -119,6 +119,10 @@ agent = MyAgent(
 review = await agent.review(diff="", file_contents={}, context=ctx)
 ```
 
+### Internal API Call Flow
+
+`AnthropicClient` routes all Messages API calls through a private `_create_message()` helper that uses `messages.stream()` + `get_final_message()` instead of `messages.create()` directly. This improves connection reliability on large prompts. All three public methods (`run_completion`, `complete_simple`, and the tool-use loop in `run_review`) use this helper, but return the same `Message` object, so downstream usage accounting, tool-use looping, and JSON parsing logic remain unchanged.
+
 ### Simple Completions
 
 For lightweight single-turn completions without tools or JSON schema (e.g., cross-review summarization), use `AnthropicClient.complete_simple()`:
