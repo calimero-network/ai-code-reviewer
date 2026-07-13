@@ -45,11 +45,39 @@ def _tool_use_response(tool_id: str, name: str, input_: dict):
 
 
 @pytest.mark.asyncio
+async def test_create_message_uses_streaming_not_blocking_create():
+    """The API call must go through messages.stream() + get_final_message(), not
+    the non-streaming messages.create(): long non-streaming calls on large prompts
+    drop the connection (APIConnectionError) and corrupt the response body."""
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+
+    final = _fake_response('{"findings": [], "summary": "ok"}')
+    stream_obj = MagicMock()
+    stream_obj.get_final_message = AsyncMock(return_value=final)
+    stream_cm = MagicMock()
+    stream_cm.__aenter__ = AsyncMock(return_value=stream_obj)
+    stream_cm.__aexit__ = AsyncMock(return_value=None)
+
+    client._sdk = MagicMock()
+    client._sdk.messages.stream = MagicMock(return_value=stream_cm)
+    client._sdk.messages.create = AsyncMock()  # must NOT be used
+
+    result = await client._create_message(model="claude-sonnet-5", max_tokens=8192)
+
+    client._sdk.messages.stream.assert_called_once()
+    assert client._sdk.messages.stream.call_args.kwargs["model"] == "claude-sonnet-5"
+    stream_obj.get_final_message.assert_awaited_once()
+    client._sdk.messages.create.assert_not_called()
+    assert result is final
+
+
+@pytest.mark.asyncio
 async def test_run_review_happy_path_parses_json():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(
+    client._create_message = AsyncMock(
         return_value=_fake_response('{"findings": [], "summary": "ok"}')
     )
 
@@ -74,7 +102,7 @@ async def test_run_review_passes_output_schema_as_json_schema():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(
+    client._create_message = AsyncMock(
         return_value=_fake_response('{"findings": [], "summary": "ok"}')
     )
 
@@ -90,7 +118,7 @@ async def test_run_review_passes_output_schema_as_json_schema():
         temperature=0.3,
     )
 
-    kwargs = client._sdk.messages.create.call_args.kwargs
+    kwargs = client._create_message.call_args.kwargs
     assert kwargs["output_config"]["format"]["type"] == "json_schema"
     assert kwargs["output_config"]["format"]["schema"] == schema
 
@@ -100,7 +128,7 @@ async def test_run_review_with_thinking_enabled_sets_adaptive_config():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(
+    client._create_message = AsyncMock(
         return_value=_fake_response('{"findings": [], "summary": "ok"}')
     )
 
@@ -114,7 +142,7 @@ async def test_run_review_with_thinking_enabled_sets_adaptive_config():
         max_tokens=16384,
         temperature=1.0,
     )
-    kwargs = client._sdk.messages.create.call_args.kwargs
+    kwargs = client._create_message.call_args.kwargs
     assert kwargs["thinking"] == {"type": "adaptive"}
 
 
@@ -123,7 +151,7 @@ async def test_run_review_without_thinking_sends_disabled():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(
+    client._create_message = AsyncMock(
         return_value=_fake_response('{"findings": [], "summary": "ok"}')
     )
 
@@ -137,7 +165,7 @@ async def test_run_review_without_thinking_sends_disabled():
         max_tokens=4096,
         temperature=0.3,
     )
-    kwargs = client._sdk.messages.create.call_args.kwargs
+    kwargs = client._create_message.call_args.kwargs
     assert kwargs["thinking"] == {"type": "disabled"}
 
 
@@ -147,7 +175,7 @@ def _client_with_mocked_sdk(stop_reason: str = "end_turn", text: str | None = No
     client._sdk = MagicMock()
     body = '{"findings": [], "summary": "ok"}' if text is None else text
     mock_create = AsyncMock(return_value=_fake_response(body, stop_reason=stop_reason))
-    client._sdk.messages.create = mock_create
+    client._create_message = mock_create
     return client, mock_create
 
 
@@ -207,7 +235,7 @@ async def test_tool_use_loop_dispatches_and_feeds_result_back():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(
+    client._create_message = AsyncMock(
         side_effect=[
             _tool_use_response("t1", "read_file", {"path": "x.py"}),
             _fake_response('{"findings": [], "summary": "done"}'),
@@ -231,9 +259,9 @@ async def test_tool_use_loop_dispatches_and_feeds_result_back():
 
     assert result.parsed == {"findings": [], "summary": "done"}
     registry.execute.assert_awaited_once_with("read_file", {"path": "x.py"})
-    assert client._sdk.messages.create.await_count == 2
+    assert client._create_message.await_count == 2
 
-    second_kwargs = client._sdk.messages.create.await_args_list[1].kwargs
+    second_kwargs = client._create_message.await_args_list[1].kwargs
     last_msg = second_kwargs["messages"][-1]
     assert last_msg["role"] == "user"
     assert last_msg["content"][0]["type"] == "tool_result"
@@ -250,7 +278,7 @@ async def test_tool_budget_exhausted_drops_tools_and_finishes():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(
+    client._create_message = AsyncMock(
         side_effect=[
             _tool_use_response("t1", "read_file", {"path": "x.py"}),
             _fake_response('{"findings": [{"title": "bug"}], "summary": "real review"}'),
@@ -273,7 +301,7 @@ async def test_tool_budget_exhausted_drops_tools_and_finishes():
     )
 
     # Round 2 must omit tools entirely so the model produces its final JSON.
-    second_kwargs = client._sdk.messages.create.await_args_list[1].kwargs
+    second_kwargs = client._create_message.await_args_list[1].kwargs
     assert "tools" not in second_kwargs
 
     # The exhaustion message was fed back for the round-1 tool_use.
@@ -293,7 +321,7 @@ async def test_caching_marks_last_system_block_when_enabled():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=True)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(
+    client._create_message = AsyncMock(
         return_value=_fake_response('{"findings": [], "summary": "ok"}')
     )
 
@@ -310,7 +338,7 @@ async def test_caching_marks_last_system_block_when_enabled():
         max_tokens=4096,
         temperature=0.3,
     )
-    sent = client._sdk.messages.create.call_args.kwargs["system"]
+    sent = client._create_message.call_args.kwargs["system"]
     assert sent[-1]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in sent[0]
 
@@ -320,7 +348,7 @@ async def test_caching_disabled_leaves_system_unchanged():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(
+    client._create_message = AsyncMock(
         return_value=_fake_response('{"findings": [], "summary": "ok"}')
     )
 
@@ -334,7 +362,7 @@ async def test_caching_disabled_leaves_system_unchanged():
         max_tokens=4096,
         temperature=0.3,
     )
-    sent = client._sdk.messages.create.call_args.kwargs["system"]
+    sent = client._create_message.call_args.kwargs["system"]
     assert "cache_control" not in sent[0]
 
 
@@ -343,7 +371,7 @@ async def test_run_completion_returns_plain_text():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(
+    client._create_message = AsyncMock(
         return_value=_fake_response("# Updated README\n\nNew content here.")
     )
 
@@ -355,7 +383,7 @@ async def test_run_completion_returns_plain_text():
     )
 
     assert result == "# Updated README\n\nNew content here."
-    call_kwargs = client._sdk.messages.create.call_args.kwargs
+    call_kwargs = client._create_message.call_args.kwargs
     assert call_kwargs["model"] == "claude-sonnet-4-6"
     assert call_kwargs["max_tokens"] == 2048
     # run_completion must not pass output_config or tools
@@ -370,7 +398,7 @@ async def test_caching_marks_last_tool_result_when_enabled():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=True)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(
+    client._create_message = AsyncMock(
         side_effect=[
             _tool_use_response("t1", "read_file", {"path": "a.py"}),
             _tool_use_response("t2", "read_file", {"path": "b.py"}),
@@ -394,7 +422,7 @@ async def test_caching_marks_last_tool_result_when_enabled():
     )
 
     # Round 2: the tool_result user turn appended after round 1 must carry cache_control
-    round2_kwargs = client._sdk.messages.create.await_args_list[1].kwargs
+    round2_kwargs = client._create_message.await_args_list[1].kwargs
     round2_last_user_msg = round2_kwargs["messages"][-1]
     assert round2_last_user_msg["role"] == "user"
     last_block = round2_last_user_msg["content"][-1]
@@ -405,7 +433,7 @@ async def test_caching_marks_last_tool_result_when_enabled():
     )
 
     # Round 3: same invariant — the tool_result from round 2 is also marked
-    round3_kwargs = client._sdk.messages.create.await_args_list[2].kwargs
+    round3_kwargs = client._create_message.await_args_list[2].kwargs
     round3_last_user_msg = round3_kwargs["messages"][-1]
     last_block_r3 = round3_last_user_msg["content"][-1]
     assert last_block_r3.get("cache_control") == {"type": "ephemeral"}
@@ -449,7 +477,7 @@ async def test_cache_control_breakpoints_never_exceed_four_across_tool_rounds():
         # Always request another tool round to drive the loop to its cap.
         return _tool_use_response(f"t{counter['n']}", "read_file", {"path": "a.py"})
 
-    client._sdk.messages.create = AsyncMock(side_effect=fake_create)
+    client._create_message = AsyncMock(side_effect=fake_create)
 
     registry = MagicMock()
     registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
@@ -491,7 +519,7 @@ async def test_breakpoint_cap_holds_when_loop_terminates_normally():
             return _tool_use_response(f"t{counter['n']}", "read_file", {"path": "a.py"})
         return _fake_response('{"findings": [], "summary": "done"}')
 
-    client._sdk.messages.create = AsyncMock(side_effect=fake_create)
+    client._create_message = AsyncMock(side_effect=fake_create)
 
     registry = MagicMock()
     registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
@@ -539,7 +567,7 @@ async def test_caller_user_block_cache_control_survives_tool_rounds():
             return _tool_use_response(f"t{counter['n']}", "read_file", {"path": "a.py"})
         return _fake_response('{"findings": [], "summary": "done"}')
 
-    client._sdk.messages.create = AsyncMock(side_effect=fake_create)
+    client._create_message = AsyncMock(side_effect=fake_create)
 
     registry = MagicMock()
     registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
@@ -567,7 +595,7 @@ async def test_caching_disabled_leaves_tool_result_unmarked():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(
+    client._create_message = AsyncMock(
         side_effect=[
             _tool_use_response("t1", "read_file", {"path": "a.py"}),
             _fake_response('{"findings": [], "summary": "done"}'),
@@ -589,7 +617,7 @@ async def test_caching_disabled_leaves_tool_result_unmarked():
         temperature=0.3,
     )
 
-    round2_kwargs = client._sdk.messages.create.await_args_list[1].kwargs
+    round2_kwargs = client._create_message.await_args_list[1].kwargs
     last_user_msg = round2_kwargs["messages"][-1]
     for block in last_user_msg["content"]:
         assert "cache_control" not in block, (
@@ -602,7 +630,7 @@ async def test_run_completion_uses_system_and_user():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(return_value=_fake_response("result"))
+    client._create_message = AsyncMock(return_value=_fake_response("result"))
 
     await client.run_completion(
         model="claude-sonnet-4-6",
@@ -610,7 +638,7 @@ async def test_run_completion_uses_system_and_user():
         user="user prompt",
     )
 
-    call_kwargs = client._sdk.messages.create.call_args.kwargs
+    call_kwargs = client._create_message.call_args.kwargs
     assert call_kwargs["system"] == "sys prompt"
     assert call_kwargs["messages"] == [{"role": "user", "content": "user prompt"}]
 
@@ -620,7 +648,7 @@ async def test_complete_simple_returns_text_without_tools_or_schema():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(return_value=_fake_response("assessment json"))
+    client._create_message = AsyncMock(return_value=_fake_response("assessment json"))
 
     out = await client.complete_simple(
         model="claude-sonnet-4-6",
@@ -631,7 +659,7 @@ async def test_complete_simple_returns_text_without_tools_or_schema():
     )
 
     assert out == "assessment json"
-    kw = client._sdk.messages.create.call_args.kwargs
+    kw = client._create_message.call_args.kwargs
     assert "tools" not in kw and "output_config" not in kw
     assert kw["messages"] == [{"role": "user", "content": "findings..."}]
     assert kw["temperature"] == 0.2
@@ -642,14 +670,14 @@ async def test_complete_simple_caches_last_system_block_when_enabled():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=True)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
-    client._sdk.messages.create = AsyncMock(return_value=_fake_response("ok"))
+    client._create_message = AsyncMock(return_value=_fake_response("ok"))
 
     await client.complete_simple(
         model="m",
         system=[{"type": "text", "text": "a"}, {"type": "text", "text": "b"}],
         user="u",
     )
-    sent = client._sdk.messages.create.call_args.kwargs["system"]
+    sent = client._create_message.call_args.kwargs["system"]
     assert sent[-1]["cache_control"] == {"type": "ephemeral"}
     assert "cache_control" not in sent[0]
 
@@ -663,7 +691,7 @@ async def test_run_review_logs_cache_usage(caplog):
     resp = _fake_response('{"findings": [], "summary": "ok"}')
     resp.usage.cache_read_input_tokens = 70
     resp.usage.cache_creation_input_tokens = 120
-    client._sdk.messages.create = AsyncMock(return_value=resp)
+    client._create_message = AsyncMock(return_value=resp)
 
     with caplog.at_level("INFO", logger="ai_reviewer.agents.anthropic_client"):
         result = await client.run_review(
