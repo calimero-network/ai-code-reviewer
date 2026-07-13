@@ -42,3 +42,10 @@ def test_agent_defaults_sized_for_sonnet5():
 
     cfg = AgentConfig(name="a", model="m", focus_areas=[])
     assert cfg.max_tokens == 8192
+
+
+def test_anthropic_retries_default_is_resilient():
+    # Long review calls drop connections transiently; 1 retry was too few.
+    from ai_reviewer.config import AnthropicApiConfig
+
+    assert AnthropicApiConfig(api_key="x").max_retries == 3
