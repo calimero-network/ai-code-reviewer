@@ -117,6 +117,19 @@ class AnthropicClient:
             max_retries=config.max_retries,
         )
 
+    async def _create_message(self, **kwargs: Any) -> Any:
+        """Send one Messages request via streaming and return the final Message.
+
+        Streaming keeps the connection active for the whole generation. Long
+        non-streaming calls on large prompts leave the connection idle long
+        enough for the network to drop it (httpx.ReadError -> APIConnectionError)
+        and can deliver a corrupted/partial body that fails JSON parsing. The
+        stream helper accumulates the response cleanly and returns the same
+        Message object messages.create() would, so callers are unchanged.
+        """
+        async with self._sdk.messages.stream(**kwargs) as stream:
+            return await stream.get_final_message()
+
     async def run_completion(
         self,
         model: str,
@@ -136,7 +149,7 @@ class AnthropicClient:
             "max_tokens": max_tokens,
         }
         kwargs.update(_sampling_params(model, enable_thinking=False, temperature=None))
-        response = await self._sdk.messages.create(**kwargs)
+        response = await self._create_message(**kwargs)
         return _extract_text(response)
 
     async def complete_simple(
@@ -175,7 +188,7 @@ class AnthropicClient:
             "max_tokens": max_tokens,
         }
         kwargs.update(_sampling_params(model, enable_thinking=False, temperature=temperature))
-        response = await self._sdk.messages.create(**kwargs)
+        response = await self._create_message(**kwargs)
         usage = UsageStats()
         _accumulate_usage(usage, response)
         logger.info(
@@ -259,7 +272,7 @@ class AnthropicClient:
             if tools and not tool_budget_exhausted:
                 kwargs["tools"] = tools
 
-            response = await self._sdk.messages.create(**kwargs)
+            response = await self._create_message(**kwargs)
             _accumulate_usage(usage, response)
 
             stop = getattr(response, "stop_reason", None)
