@@ -40,11 +40,14 @@ agents:
       - authentication
       - data_validation
     description: "Identifies security vulnerabilities and auth issues"
-    max_tokens: 8192
+    # Thinking ON: security reasoning benefits most from deeper analysis. Sonnet 5
+    # reviews far more thoroughly with thinking on. max_tokens raised so thinking
+    # does not consume the output budget and truncate the findings JSON.
+    max_tokens: 16000
     temperature: 0.2
-    thinking_enabled: false
+    thinking_enabled: true
     allow_tool_use: true
-    max_tool_calls: 8
+    max_tool_calls: 20
 
   - name: patterns-reviewer
     model: claude-sonnet-5
@@ -67,11 +70,12 @@ agents:
       - edge_cases
       - error_handling
       - correctness
-    max_tokens: 8192
+    # Thinking ON: correctness/edge-case reasoning is the other high-value case.
+    max_tokens: 16000
     temperature: 0.2
-    thinking_enabled: false
+    thinking_enabled: true
     allow_tool_use: true
-    max_tool_calls: 8
+    max_tool_calls: 20
 
   - name: performance-reviewer
     model: claude-sonnet-5

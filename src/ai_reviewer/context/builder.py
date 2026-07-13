@@ -76,7 +76,10 @@ REVIEW_STANDARD_BLOCK: dict[str, Any] = {
         "filters and ranks findings; your job at this stage is coverage. Signal "
         "certainty honestly through the `confidence` field (0.0-1.0) instead of "
         "omitting doubtful findings: a real-but-unproven concern belongs in the "
-        "report at low confidence. Report each distinct issue exactly once, and do "
+        "report at low confidence. Only conclude with zero findings if, after "
+        "actually investigating the changed code, you genuinely found nothing — "
+        '"I could not fully confirm it" is a reason to report at low confidence, '
+        "not a reason to stay silent. Report each distinct issue exactly once, and do "
         "not flag mechanical formatting or import ordering that an "
         "autoformatter/linter already handles.\n\n"
         "Every finding must point to a specific changed line AND give a concrete fix "

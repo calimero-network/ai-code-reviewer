@@ -736,11 +736,23 @@ def aggregate_findings(
     thresholds = (
         confidence_thresholds if confidence_thresholds is not None else CONFIDENCE_THRESHOLDS
     )
-    pre_filter_count = len(consolidated)
+    dropped = [f for f in consolidated if f.confidence < thresholds.get(f.severity, 0.0)]
     consolidated = [f for f in consolidated if f.confidence >= thresholds.get(f.severity, 0.0)]
-    filtered_count = pre_filter_count - len(consolidated)
-    if filtered_count > 0:
-        logger.info("Confidence filter dropped %d finding(s)", filtered_count)
+    if dropped:
+        # Log WHAT was dropped, not just the count, so we can judge from real
+        # reviews whether the floors are discarding genuine findings (and should
+        # be lowered) or correctly filtering noise. Decision stays evidence-based.
+        logger.info("Confidence filter dropped %d finding(s):", len(dropped))
+        for f in dropped:
+            logger.info(
+                "  dropped [%s conf=%.2f < %.2f] %s:%s %s",
+                f.severity.value,
+                f.confidence,
+                thresholds.get(f.severity, 0.0),
+                f.file_path,
+                f.line_start,
+                f.title,
+            )
 
     pre_dedup_count = len(consolidated)
     consolidated = dedup_cross_file(consolidated)
