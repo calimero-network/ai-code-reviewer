@@ -5,7 +5,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from ai_reviewer.session import ReviewSession
-from ai_reviewer.tools.repo_tools import ToolQuotaExceeded, ToolRegistry
+from ai_reviewer.tools.repo_tools import ToolBudgetExhausted, ToolRegistry
 
 
 @pytest.fixture
@@ -42,7 +42,7 @@ async def test_read_file_cache_hit_does_not_call_github(session, fake_gh):
 async def test_per_agent_max_calls_enforced(session, fake_gh):
     reg = ToolRegistry(session, fake_gh, agent_id="a1", max_calls=1, per_file_max_bytes=512 * 1024)
     await reg.execute("read_file", {"path": "a.py"})
-    with pytest.raises(ToolQuotaExceeded):
+    with pytest.raises(ToolBudgetExhausted):
         await reg.execute("read_file", {"path": "b.py"})
 
 

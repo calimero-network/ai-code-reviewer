@@ -52,14 +52,17 @@ class GitHubFormatter:
         ]
 
         if not review.findings:
-            lines.extend(
-                [
-                    "### ✅ No Issues Found",
-                    "",
-                    "All agents reviewed the code and found no issues. LGTM! 🎉",
-                    "",
-                ]
-            )
+            if review.failed_agents:
+                lines.extend(self._format_incomplete_block(review))
+            else:
+                lines.extend(
+                    [
+                        "### ✅ No Issues Found",
+                        "",
+                        "All agents reviewed the code and found no issues. LGTM! 🎉",
+                        "",
+                    ]
+                )
         else:
             # Group by severity
             by_severity = self._group_findings_by_severity(review.findings)
@@ -76,6 +79,9 @@ class GitHubFormatter:
                         self._format_severity_section(severity, findings, review.agent_count)
                     )
                     lines.append("")
+
+        if review.findings and review.failed_agents:
+            lines.extend(self._format_partial_trailer(review))
 
         lines.extend(
             [
@@ -101,7 +107,13 @@ class GitHubFormatter:
         header = self._format_header(review)
         findings_for_inline = review.findings if inline_findings is None else inline_findings
         if not findings_for_inline:
-            body = "✅ No issues found. LGTM!"
+            if review.failed_agents:
+                body = (
+                    f"⚠️ Review incomplete: {', '.join(review.failed_agents)} did not finish "
+                    "and no findings were produced. Treat this PR as **not yet reviewed**."
+                )
+            else:
+                body = "✅ No issues found. LGTM!"
         else:
             by_sev = self._count_findings_by_severity(findings_for_inline)
             parts = []
@@ -116,6 +128,7 @@ class GitHubFormatter:
             body = (
                 (", ".join(parts) + ". See inline comments.") if parts else "See inline comments."
             )
+            body += self._compact_partial_suffix(review)
         return "\n".join(
             [
                 f"## 🤖 {self.reviewer_name}",
@@ -140,7 +153,13 @@ class GitHubFormatter:
         """Format a minimal top-level body when inline comments are posted (with delta)."""
         header = self._format_header(review)
         if delta.all_issues_resolved:
-            body = "✅ All issues resolved. Ready to merge!"
+            if review.failed_agents:
+                body = (
+                    f"⚠️ Review incomplete: {', '.join(review.failed_agents)} did not finish — "
+                    "treat this PR as **not yet reviewed**, not as approved."
+                )
+            else:
+                body = "✅ All issues resolved. Ready to merge!"
         else:
             new_findings = (
                 delta.new_findings if inline_new_findings is None else inline_new_findings
@@ -155,6 +174,7 @@ class GitHubFormatter:
             body = (
                 (" | ".join(parts) + ". See inline comments.") if parts else "See inline comments."
             )
+            body += self._compact_partial_suffix(review)
         suppressed_line = self._format_suppressed_line(delta)
         content = [
             f"## 🤖 {self.reviewer_name}",
@@ -274,9 +294,27 @@ class GitHubFormatter:
             "",
         ]
 
-        # Add status summary banner
-        lines.extend(self._format_status_banner(delta))
-        lines.extend(["", "---", ""])
+        # Add status summary banner — but never "Ready to Merge" when agents
+        # failed: an all-resolved delta from a partial run proves nothing.
+        review_incomplete = review.failed_agents and delta.all_issues_resolved
+        if not review_incomplete:
+            lines.extend(self._format_status_banner(delta))
+            lines.extend(["", "---", ""])
+        elif delta.fixed_findings:
+            # Fixed issues below are real, but the empty-delta "Review
+            # Incomplete" body block won't render here, so the banner carries it.
+            lines.extend(
+                [
+                    "### ⚠️ Review Incomplete",
+                    "",
+                    f"{', '.join(review.failed_agents)} did not finish — previously reported "
+                    "issues were fixed, but this run may have missed new ones. Treat this PR "
+                    "as **not yet fully reviewed**.",
+                    "",
+                    "---",
+                    "",
+                ]
+            )
 
         # Show FIXED issues first (good news!)
         if delta.fixed_findings:
@@ -297,14 +335,21 @@ class GitHubFormatter:
 
         # If nothing to show
         if not delta.new_findings and not delta.open_findings and not delta.fixed_findings:
-            lines.extend(
-                [
-                    "### ✅ No Issues Found",
-                    "",
-                    "All agents reviewed the code and found no issues. LGTM! 🎉",
-                    "",
-                ]
-            )
+            if review.failed_agents:
+                lines.extend(self._format_incomplete_block(review))
+            else:
+                lines.extend(
+                    [
+                        "### ✅ No Issues Found",
+                        "",
+                        "All agents reviewed the code and found no issues. LGTM! 🎉",
+                        "",
+                    ]
+                )
+
+        # Partial-review note when real findings coexist with failed agents.
+        if (delta.new_findings or delta.open_findings) and review.failed_agents:
+            lines.extend(self._format_partial_trailer(review))
 
         suppressed_line = self._format_suppressed_line(delta)
         if suppressed_line:
@@ -320,6 +365,42 @@ class GitHubFormatter:
         )
 
         return "\n".join(lines)
+
+    @staticmethod
+    def _format_incomplete_block(review: ConsolidatedReview) -> list[str]:
+        """Render the "Review Incomplete" body used when no findings were produced."""
+        return [
+            "### ⚠️ Review Incomplete",
+            "",
+            f"{len(review.failed_agents)} of {review.agent_count} agent(s) did not "
+            f"finish ({', '.join(review.failed_agents)}) and no findings were "
+            "produced. Treat this PR as **not yet reviewed**, not as approved.",
+            "",
+        ]
+
+    @staticmethod
+    def _format_partial_trailer(review: ConsolidatedReview) -> list[str]:
+        """Render the trailer warning findings may be incomplete due to failed agents."""
+        return [
+            f"> ⚠️ Partial review: {', '.join(review.failed_agents)} did not finish — "
+            "findings above may be incomplete.",
+            "",
+        ]
+
+    @staticmethod
+    def _compact_partial_suffix(review: ConsolidatedReview) -> str:
+        """One-line partial-review note appended to a compact body, or '' if complete.
+
+        The compact body is what posts whenever inline comments exist, so a
+        multi-agent run where one agent fails but others find issues must still
+        signal incompleteness here — not only in the full/no-findings paths.
+        """
+        if not review.failed_agents:
+            return ""
+        return (
+            f" ⚠️ Partial review: {', '.join(review.failed_agents)} did not finish — "
+            "coverage may be incomplete."
+        )
 
     @staticmethod
     def _format_suppressed_line(delta: ReviewDelta) -> str:
@@ -474,7 +555,8 @@ class GitHubFormatter:
         Returns:
             GitHub review action
         """
-        if delta.all_issues_resolved and allow_approve:
+        # Never APPROVE off an empty delta caused by agents not finishing.
+        if delta.all_issues_resolved and allow_approve and not review.failed_agents:
             return "APPROVE"
 
         # Block merge only when there are critical findings (not warnings/suggestions/nitpicks)
@@ -501,7 +583,8 @@ class GitHubFormatter:
         Returns:
             GitHub review action: "APPROVE", "REQUEST_CHANGES", or "COMMENT"
         """
-        if not review.findings and allow_approve:
+        # Never APPROVE when no findings exist only because agents failed.
+        if not review.findings and allow_approve and not review.failed_agents:
             return "APPROVE"
         # Block merge only on critical; warnings/suggestions/nitpicks → COMMENT
         if review.has_critical_issues and allow_approve:

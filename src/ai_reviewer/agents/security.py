@@ -49,9 +49,11 @@ Focus your review on identifying:
    - Missing security headers
    - Insecure defaults
 
-Be thorough but precise. Only report issues you can clearly demonstrate in the code.
-Do not speculate about issues that might exist elsewhere.
-Provide specific line numbers and concrete evidence for each finding.
+Report every security concern you find, including ones you are not fully certain
+about — signal certainty through the confidence field instead of omitting the
+finding. Ground every finding in the changed code with specific line numbers and
+concrete evidence; when correctness depends on code outside the diff, use the
+repository tools to confirm the actual behavior rather than speculating.
 """
 
 

@@ -119,7 +119,7 @@ async def test_run_review_with_thinking_enabled_sets_adaptive_config():
 
 
 @pytest.mark.asyncio
-async def test_run_review_without_thinking_omits_config():
+async def test_run_review_without_thinking_sends_disabled():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
     client._sdk = MagicMock()
@@ -138,7 +138,68 @@ async def test_run_review_without_thinking_omits_config():
         temperature=0.3,
     )
     kwargs = client._sdk.messages.create.call_args.kwargs
+    assert kwargs["thinking"] == {"type": "disabled"}
+
+
+def _client_with_mocked_sdk(stop_reason: str = "end_turn", text: str | None = None):
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    body = '{"findings": [], "summary": "ok"}' if text is None else text
+    mock_create = AsyncMock(return_value=_fake_response(body, stop_reason=stop_reason))
+    client._sdk.messages.create = mock_create
+    return client, mock_create
+
+
+@pytest.mark.asyncio
+async def test_run_review_thinking_off_sends_explicit_disabled():
+    """Omitted `thinking` means adaptive-ON for Sonnet 5 — must send explicit disabled."""
+    client, mock_create = _client_with_mocked_sdk()
+    await client.run_review(
+        model="claude-sonnet-5",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=None,
+        enable_thinking=False,
+    )
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["thinking"] == {"type": "disabled"}
+    assert "temperature" not in kwargs  # sonnet-5 rejects it
+
+
+@pytest.mark.asyncio
+async def test_run_review_sonnet46_thinking_off_keeps_temperature():
+    client, mock_create = _client_with_mocked_sdk()
+    await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=None,
+        enable_thinking=False,
+        temperature=0.3,
+    )
+    kwargs = mock_create.call_args.kwargs
+    assert kwargs["thinking"] == {"type": "disabled"}
+    assert kwargs["temperature"] == 0.3
+
+
+@pytest.mark.asyncio
+async def test_run_review_fable_omits_thinking_entirely():
+    """Fable rejects explicit {"type": "disabled"} — the field must be absent."""
+    client, mock_create = _client_with_mocked_sdk()
+    await client.run_review(
+        model="claude-fable-5",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=None,
+        enable_thinking=False,
+    )
+    kwargs = mock_create.call_args.kwargs
     assert "thinking" not in kwargs
+    assert "temperature" not in kwargs
 
 
 @pytest.mark.asyncio
@@ -178,6 +239,53 @@ async def test_tool_use_loop_dispatches_and_feeds_result_back():
     assert last_msg["content"][0]["type"] == "tool_result"
     assert last_msg["content"][0]["tool_use_id"] == "t1"
     assert last_msg["content"][0]["content"] == "file-contents"
+
+
+@pytest.mark.asyncio
+async def test_tool_budget_exhausted_drops_tools_and_finishes():
+    """A registry that hits its tool-call budget must finish with real findings,
+    not thrash on failing tool calls until the round cap marks it incomplete."""
+    from ai_reviewer.tools.repo_tools import ToolBudgetExhausted
+
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    client._sdk.messages.create = AsyncMock(
+        side_effect=[
+            _tool_use_response("t1", "read_file", {"path": "x.py"}),
+            _fake_response('{"findings": [{"title": "bug"}], "summary": "real review"}'),
+        ]
+    )
+
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(side_effect=ToolBudgetExhausted("exceeded max_tool_calls=8"))
+
+    result = await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        enable_thinking=False,
+        max_tokens=4096,
+        temperature=0.3,
+    )
+
+    # Round 2 must omit tools entirely so the model produces its final JSON.
+    second_kwargs = client._sdk.messages.create.await_args_list[1].kwargs
+    assert "tools" not in second_kwargs
+
+    # The exhaustion message was fed back for the round-1 tool_use.
+    first_tool_result = second_kwargs["messages"][-1]["content"][0]
+    assert first_tool_result["tool_use_id"] == "t1"
+    assert "tool budget exhausted" in first_tool_result["content"]
+
+    # Final review parses real findings with no incomplete marker.
+    from ai_reviewer.agents.anthropic_client import INCOMPLETE_SUMMARY_MARKERS
+
+    assert result.parsed["findings"] == [{"title": "bug"}]
+    assert not any(m in result.parsed["summary"] for m in INCOMPLETE_SUMMARY_MARKERS)
 
 
 @pytest.mark.asyncio
@@ -569,3 +677,38 @@ async def test_run_review_logs_cache_usage(caplog):
     assert result.usage.cache_read_input_tokens == 70
     assert "cache_read=70" in caplog.text
     assert "cache_creation=120" in caplog.text
+
+
+def test_incomplete_markers_cover_all_giveup_paths():
+    from ai_reviewer.agents import anthropic_client as ac
+
+    assert ac.TOOL_LOOP_CAP_MARKER in ac.INCOMPLETE_SUMMARY_MARKERS
+    assert ac.PARSE_ERROR_MARKER in ac.INCOMPLETE_SUMMARY_MARKERS
+    assert ac.TRUNCATED_MARKER in ac.INCOMPLETE_SUMMARY_MARKERS
+    assert any(m.startswith("[circuit breaker") for m in ac.INCOMPLETE_SUMMARY_MARKERS)
+
+
+@pytest.mark.asyncio
+async def test_run_review_truncated_response_is_marked_incomplete():
+    """stop_reason=max_tokens must not read as a clean zero-finding review."""
+    client, mock_create = _client_with_mocked_sdk(stop_reason="max_tokens", text="")
+    result = await client.run_review(
+        model="claude-sonnet-5",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=None,
+        enable_thinking=False,
+    )
+    from ai_reviewer.agents.anthropic_client import TRUNCATED_MARKER
+
+    assert TRUNCATED_MARKER in result.parsed["summary"]
+
+
+def test_run_review_default_tool_rounds_matches_tool_call_budget():
+    import inspect
+
+    from ai_reviewer.agents.anthropic_client import AnthropicClient
+
+    sig = inspect.signature(AnthropicClient.run_review)
+    assert sig.parameters["max_tool_rounds"].default == 20

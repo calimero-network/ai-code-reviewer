@@ -263,7 +263,11 @@ def _setup_default_review_handler() -> Callable:
                             e,
                         )
 
-                    if recheck_review is not None and not recheck_review.findings:
+                    if (
+                        recheck_review is not None
+                        and not recheck_review.findings
+                        and not recheck_review.all_agents_failed
+                    ):
                         lgtm_review_count = meta.review_count + 1
                         new_meta = ReviewMeta.build(
                             commit_sha=current_sha,

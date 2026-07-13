@@ -28,7 +28,7 @@ from difflib import SequenceMatcher
 from typing import Any
 from uuid import uuid4
 
-from ai_reviewer.agents.anthropic_client import AnthropicClient
+from ai_reviewer.agents.anthropic_client import INCOMPLETE_SUMMARY_MARKERS, AnthropicClient
 from ai_reviewer.agents.base import ReviewAgent
 from ai_reviewer.agents.patterns import PatternsAgent, StyleAgent
 from ai_reviewer.agents.performance import LogicAgent, PerformanceAgent
@@ -679,7 +679,11 @@ def aggregate_findings(
     for agent_name, findings, summary in all_findings:
         summaries.append(f"**{agent_name}**: {summary}")
 
-        if "Agent failed:" in summary or "401 Unauthorized" in summary:
+        if (
+            "Agent failed:" in summary
+            or "401 Unauthorized" in summary
+            or any(marker in summary for marker in INCOMPLETE_SUMMARY_MARKERS)
+        ):
             failed_agents.append(agent_name)
 
         for raw in findings:

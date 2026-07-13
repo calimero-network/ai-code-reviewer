@@ -22,9 +22,9 @@ agents:
   - name: security-reviewer
     model: claude-sonnet-5
     focus_areas: [security, authentication]
-    thinking_enabled: false
+    thinking_enabled: true
+    max_tokens: 16000
     allow_tool_use: true
-    max_tool_calls: 8
     temperature: 0.2
     custom_prompt_append: |
       This is a Python codebase that handles API keys and GitHub tokens.
@@ -36,9 +36,9 @@ agents:
   - name: patterns-reviewer
     model: claude-sonnet-5
     focus_areas: [architecture, patterns]
-    thinking_enabled: false
+    thinking_enabled: true
+    max_tokens: 16000
     allow_tool_use: true
-    max_tool_calls: 8
     temperature: 0.2
     custom_prompt_append: |
       This codebase follows these key patterns:
@@ -53,17 +53,17 @@ agents:
   - name: logic-reviewer
     model: claude-sonnet-5
     focus_areas: [logic, edge_cases, error_handling]
-    thinking_enabled: false
+    thinking_enabled: true
+    max_tokens: 16000
     allow_tool_use: true
-    max_tool_calls: 8
     temperature: 0.2
 
   - name: performance-reviewer
     model: claude-sonnet-5
     focus_areas: [performance, complexity, resource_management]
-    thinking_enabled: false
+    thinking_enabled: true
+    max_tokens: 16000
     allow_tool_use: true
-    max_tool_calls: 8
     temperature: 0.3
 
   - name: style-reviewer

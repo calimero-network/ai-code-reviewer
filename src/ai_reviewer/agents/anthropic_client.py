@@ -11,8 +11,17 @@ from typing import Any, Protocol
 import anthropic  # noqa: TID251 — the single allowed SDK importer (architecture invariant I1)
 
 from ai_reviewer.config import AnthropicApiConfig
+from ai_reviewer.tools.repo_tools import ToolBudgetExhausted
 
 logger = logging.getLogger(__name__)
+
+# Fed back to the model when the tool-call budget is exhausted mid-turn. Tells it
+# to stop requesting tools and emit its final JSON review from evidence gathered.
+_TOOL_BUDGET_EXHAUSTED_MSG = (
+    "[tool budget exhausted — no more tool calls are available. Produce your "
+    "final JSON review now from the evidence you have already gathered. Do not "
+    "request more tools.]"
+)
 
 # Models that reject temperature/top_p/top_k outright (400 invalid_request_error).
 # ponytail: hardcoded set, add the next rejecting model here when it ships.
@@ -25,8 +34,51 @@ _NO_SAMPLING_PARAMS_MODELS = {
 }
 
 
+# Models that reject an explicit thinking={"type": "disabled"} (thinking is always on).
+_ALWAYS_THINKING_MODELS = {"claude-fable-5", "claude-mythos-5"}
+
+
+# Summary markers for reviews that did NOT complete. aggregate_findings() treats
+# any summary containing one of these as a failed agent — a give-up must never
+# be indistinguishable from a genuinely clean review.
+TOOL_LOOP_CAP_MARKER = "[tool loop cap]"
+PARSE_ERROR_MARKER = "[parse error]"
+CIRCUIT_BREAKER_MARKER = "[circuit breaker: context limit exceeded]"
+TRUNCATED_MARKER = "[truncated at max_tokens]"
+INCOMPLETE_SUMMARY_MARKERS: tuple[str, ...] = (
+    TOOL_LOOP_CAP_MARKER,
+    PARSE_ERROR_MARKER,
+    "[circuit breaker",
+    TRUNCATED_MARKER,
+)
+
+
 def _accepts_temperature(model: str) -> bool:
     return model not in _NO_SAMPLING_PARAMS_MODELS
+
+
+def _sampling_params(
+    model: str, enable_thinking: bool, temperature: float | None
+) -> dict[str, Any]:
+    """Thinking + temperature request params that are safe for the target model.
+
+    Sonnet 5 (and Opus 4.7+) treat an *omitted* `thinking` field as adaptive-ON,
+    so thinking-off agents must send an explicit {"type": "disabled"} or thinking
+    silently eats the max_tokens budget. Fable/Mythos reject explicit "disabled"
+    (thinking is always on there) — omit the field for those instead. Temperature
+    is only sent to models that still accept it.
+    """
+    params: dict[str, Any] = {}
+    if enable_thinking:
+        params["thinking"] = {"type": "adaptive"}
+        if _accepts_temperature(model):
+            params["temperature"] = 1.0  # API requires temp=1 alongside thinking
+    else:
+        if model not in _ALWAYS_THINKING_MODELS:
+            params["thinking"] = {"type": "disabled"}
+        if temperature is not None and _accepts_temperature(model):
+            params["temperature"] = temperature
+    return params
 
 
 class ToolRegistryProtocol(Protocol):
@@ -77,12 +129,14 @@ class AnthropicClient:
         Used for prose generation tasks (e.g. doc drafting) where structured
         output is not needed.
         """
-        response = await self._sdk.messages.create(
-            model=model,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            max_tokens=max_tokens,
-        )
+        kwargs: dict[str, Any] = {
+            "model": model,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+            "max_tokens": max_tokens,
+        }
+        kwargs.update(_sampling_params(model, enable_thinking=False, temperature=None))
+        response = await self._sdk.messages.create(**kwargs)
         return _extract_text(response)
 
     async def complete_simple(
@@ -120,8 +174,7 @@ class AnthropicClient:
             "messages": [{"role": "user", "content": user}],
             "max_tokens": max_tokens,
         }
-        if _accepts_temperature(model):
-            kwargs["temperature"] = temperature
+        kwargs.update(_sampling_params(model, enable_thinking=False, temperature=temperature))
         response = await self._sdk.messages.create(**kwargs)
         usage = UsageStats()
         _accumulate_usage(usage, response)
@@ -152,13 +205,21 @@ class AnthropicClient:
         enable_thinking: bool = False,
         max_tokens: int = 8192,
         temperature: float = 0.3,
-        max_tool_rounds: int = 8,
+        # 20 matches AgentConfig.max_tool_calls — the registry's per-review call
+        # budget is the binding cap; an 8-round loop cap below it made the last
+        # 12 calls unreachable and silently truncated agentic reviews on Sonnet 5.
+        max_tool_rounds: int = 20,
     ) -> AnthropicReviewResult:
         messages: list[dict[str, Any]] = [{"role": "user", "content": user_blocks}]
         usage = UsageStats()
         tool_calls: list[dict[str, Any]] = []
 
         tools = tool_registry.tool_specs() if tool_registry else None
+        # Once the registry's tool-call budget is exhausted, drop `tools` from
+        # every subsequent request so the model must produce its final JSON
+        # instead of thrashing on tool calls that can only fail (which used to
+        # burn the round cap and mark the review incomplete).
+        tool_budget_exhausted = False
 
         system_to_send = system_blocks
         if self.config.enable_prompt_caching and system_blocks:
@@ -179,7 +240,7 @@ class AnthropicClient:
                     self.config.max_combined_context_tokens,
                 )
                 return AnthropicReviewResult(
-                    parsed={"findings": [], "summary": "[circuit breaker: context limit exceeded]"},
+                    parsed={"findings": [], "summary": CIRCUIT_BREAKER_MARKER},
                     raw_text="",
                     usage=usage,
                     tool_calls=tool_calls,
@@ -194,12 +255,9 @@ class AnthropicClient:
                     "format": {"type": "json_schema", "schema": output_schema},
                 },
             }
-            if _accepts_temperature(model):
-                kwargs["temperature"] = 1.0 if enable_thinking else temperature
-            if tools:
+            kwargs.update(_sampling_params(model, enable_thinking, temperature))
+            if tools and not tool_budget_exhausted:
                 kwargs["tools"] = tools
-            if enable_thinking:
-                kwargs["thinking"] = {"type": "adaptive"}
 
             response = await self._sdk.messages.create(**kwargs)
             _accumulate_usage(usage, response)
@@ -226,8 +284,15 @@ class AnthropicClient:
                     usage.cache_creation_input_tokens,
                 )
                 raw_text = _extract_text(response)
+                parsed = _parse_json(raw_text)
+                if stop == "max_tokens":
+                    logger.warning(
+                        "Response truncated at max_tokens=%d — marking review incomplete",
+                        max_tokens,
+                    )
+                    parsed["summary"] = f"{TRUNCATED_MARKER} {parsed.get('summary', '')}".strip()
                 return AnthropicReviewResult(
-                    parsed=_parse_json(raw_text),
+                    parsed=parsed,
                     raw_text=raw_text,
                     usage=usage,
                     tool_calls=tool_calls,
@@ -240,11 +305,19 @@ class AnthropicClient:
                 if getattr(block, "type", None) != "tool_use":
                     continue
                 tool_calls.append({"name": block.name, "input": block.input})
-                try:
-                    tool_output = await tool_registry.execute(block.name, block.input)
-                except Exception as e:  # noqa: BLE001
-                    tool_output = f"[tool error: {e}]"
-                    logger.warning("Tool %s failed: %s", block.name, e)
+                if tool_budget_exhausted:
+                    # Budget already blew earlier in this same turn — answer the
+                    # remaining tool_use blocks without attempting execution.
+                    tool_output = _TOOL_BUDGET_EXHAUSTED_MSG
+                else:
+                    try:
+                        tool_output = await tool_registry.execute(block.name, block.input)
+                    except ToolBudgetExhausted:
+                        tool_budget_exhausted = True
+                        tool_output = _TOOL_BUDGET_EXHAUSTED_MSG
+                    except Exception as e:  # noqa: BLE001
+                        tool_output = f"[tool error: {e}]"
+                        logger.warning("Tool %s failed: %s", block.name, e)
                 tool_result_blocks.append(
                     {
                         "type": "tool_result",
@@ -276,7 +349,7 @@ class AnthropicClient:
 
         logger.warning("Tool-use loop exceeded max_tool_rounds=%d", max_tool_rounds)
         return AnthropicReviewResult(
-            parsed={"findings": [], "summary": "[tool loop cap]"},
+            parsed={"findings": [], "summary": TOOL_LOOP_CAP_MARKER},
             raw_text="",
             usage=usage,
             tool_calls=tool_calls,
@@ -345,4 +418,4 @@ def _parse_json(text: str) -> dict[str, Any]:
         return json.loads(text)
     except json.JSONDecodeError:
         logger.warning("Failed to parse JSON: %r", text[:200])
-        return {"findings": [], "summary": "[parse error]"}
+        return {"findings": [], "summary": PARSE_ERROR_MARKER}
