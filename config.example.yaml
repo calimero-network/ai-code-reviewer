@@ -44,7 +44,7 @@ agents:
     temperature: 0.2
     thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 8
+    max_tool_calls: 20
 
   - name: patterns-reviewer
     model: claude-sonnet-5
@@ -58,7 +58,7 @@ agents:
     temperature: 0.2
     thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 8
+    max_tool_calls: 20
 
   - name: logic-reviewer
     model: claude-sonnet-5
@@ -71,7 +71,7 @@ agents:
     temperature: 0.2
     thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 8
+    max_tool_calls: 20
 
   - name: performance-reviewer
     model: claude-sonnet-5
@@ -84,7 +84,7 @@ agents:
     temperature: 0.3
     thinking_enabled: false
     allow_tool_use: true
-    max_tool_calls: 8
+    max_tool_calls: 20
 
   - name: style-reviewer
     model: claude-haiku-4-5-20251001
