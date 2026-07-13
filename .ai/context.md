@@ -125,7 +125,8 @@ agents:
   - name: security-reviewer
     model: claude-sonnet-4-6
     focus_areas: [security]
-    max_tool_calls: 8
+    max_tokens: 8192
+    max_tool_rounds: 20
   - name: style-reviewer
     model: claude-haiku-4-5-20251001
     focus_areas: [style]
@@ -136,6 +137,10 @@ orchestrator:
   timeout_seconds: 120
 ```
 
+**Agent defaults:**
+- `max_tokens`: 8192 (increased from 4096 to accommodate Sonnet 5 depth)
+- `max_tool_rounds`: 20 (increased from 8 to match tool registry budget)
+
 ## Key Invariants to Preserve
 
 1. **Architecture Invariant I1: Single SDK importer** - Only `agents/anthropic_client.py` may import the Anthropic SDK (marked with `# noqa: TID251`). All other code must access LLMs through `AnthropicClient`. Enforced by ruff's `flake8-tidy-imports` (`TID251`) rule.
@@ -144,11 +149,20 @@ orchestrator:
 4. **Async throughout** - no blocking I/O
 5. **Graceful degradation** - some results better than none
 6. **Type safety** - use enums for Severity/Category, not strings
+7. **Incomplete-marker contract** - When agents hit budget limits or parsing failures, they tag the summary with machine-readable markers (TOOL_LOOP_CAP_MARKER, PARSE_ERROR_MARKER, CIRCUIT_BREAKER_MARKER, TRUNCATED_MARKER) so aggregator can identify low-confidence results
+8. **Coverage-first review prompts** - Agents report all findings (including uncertain ones) and signal certainty via the `confidence` field; filtering happens downstream via per-severity confidence thresholds and cross-review validation
+9. **ToolBudgetExhausted graceful exit** - When tool budget exhausted mid-turn, agent answers remaining tool_use blocks with 'budget exhausted' message and omits tools from subsequent requests, forcing final JSON from gathered evidence instead of looping
 
 ## AnthropicClient Methods
 
 **Main entry points:**
-- `run_review(model, system, user_context, tools, ...)` → Full agent review with tool use, caching, and JSON schema
-- `complete_simple(model, system, user, max_tokens, temperature)` → Lightweight completion with caching but no tools or schema; used for cross-review and other internal calls
+- `run_review(model, system, user_context, tools, ...)` → Full agent review with tool use, caching, and JSON schema; uses `_sampling_params()` to send explicit per-model thinking/temperature config
+- `complete_simple(model, system, user, max_tokens, temperature)` → Lightweight completion with caching but no tools or schema; used for cross-review and other internal calls; also uses `_sampling_params()`
+- `run_completion(model, system, user, max_tokens, temperature)` → Generic completion with `_sampling_params()` support
 
 Both methods log token usage and support prompt caching when `enable_prompt_caching` is true.
+
+**Sampling parameter quirks:**
+- Sonnet 5 and Opus models explicitly send `thinking: {type: disabled}` when thinking is off (instead of omitting the field) and accept temperature
+- Fable and Mythos models must omit the thinking field entirely (they reject the explicit field) and do not accept temperature
+- `_sampling_params()` helper handles all per-model differences
