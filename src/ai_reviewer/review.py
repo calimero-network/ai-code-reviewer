@@ -522,11 +522,18 @@ def _cluster_raw_findings(
     return clusters
 
 
+# Confidence floors per severity. These are a NOISE floor, not a precision gate:
+# the coverage-first prompts tell the model to report findings at honest (often
+# low) confidence, and precision comes from the cross-review validation round.
+# High floors (the old 0.5/0.6/0.7/0.8) silently dropped real findings that
+# Sonnet-5-era models correctly report at moderate confidence. `critical` is set
+# very low so a possible security/data-loss finding is essentially never
+# auto-suppressed — surface it and let cross-review / a human judge.
 CONFIDENCE_THRESHOLDS: dict[Severity, float] = {
-    Severity.CRITICAL: 0.5,
-    Severity.WARNING: 0.6,
-    Severity.SUGGESTION: 0.7,
-    Severity.NITPICK: 0.8,
+    Severity.CRITICAL: 0.2,
+    Severity.WARNING: 0.35,
+    Severity.SUGGESTION: 0.5,
+    Severity.NITPICK: 0.65,
 }
 
 
