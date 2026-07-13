@@ -152,3 +152,6 @@ orchestrator:
 - `complete_simple(model, system, user, max_tokens, temperature)` → Lightweight completion with caching but no tools or schema; used for cross-review and other internal calls
 
 Both methods log token usage and support prompt caching when `enable_prompt_caching` is true.
+
+**Internal helper:**
+- `_create_message(**kwargs)` → Private async helper that sends all Messages API calls via `messages.stream()` + `get_final_message()` (instead of `create()`) for improved connection reliability on large prompts. Returns the same `Message` object; used by `run_review`, `complete_simple`, and the tool-use loop.
