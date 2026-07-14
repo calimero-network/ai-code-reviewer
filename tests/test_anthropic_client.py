@@ -447,6 +447,87 @@ async def test_round_cap_forces_final_findings_emission():
 
 
 @pytest.mark.asyncio
+async def test_circuit_breaker_trips_on_cache_read_context():
+    """The breaker must count cache-read tokens. A tool_use response with tiny
+    input_tokens but huge cache_read_input_tokens (the shape once prompt caching
+    engages) has a real per-request context above the limit, so the next round
+    must abort with the circuit-breaker marker — the cumulative input_tokens sum
+    used previously would have stayed near zero and never tripped."""
+    from ai_reviewer.agents.anthropic_client import CIRCUIT_BREAKER_MARKER
+
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)  # limit = 80_000 * 2 = 160_000
+    client._sdk = MagicMock()
+
+    resp = _tool_use_response("t1", "read_file", {"path": "a.py"})
+    resp.usage.input_tokens = 1000
+    resp.usage.cache_read_input_tokens = 200_000  # true context 201k > 160k
+    resp.usage.cache_creation_input_tokens = 0
+    client._create_message = AsyncMock(return_value=resp)
+
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(return_value="contents")
+
+    result = await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        enable_thinking=False,
+        max_tool_rounds=20,
+    )
+
+    assert result.parsed["summary"] == CIRCUIT_BREAKER_MARKER
+    assert result.parsed["findings"] == []
+    # Round 0 sent, round 1 aborted before sending — exactly 1 call, no runaway.
+    assert client._create_message.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_circuit_breaker_does_not_trip_on_small_per_request_context():
+    """With small per-request usage on every round the breaker never trips even
+    across many rounds — the cumulative sum would balloon, the per-request size
+    stays flat. Normal completion path is unaffected."""
+    from ai_reviewer.agents.anthropic_client import INCOMPLETE_SUMMARY_MARKERS
+
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+
+    counter = {"n": 0}
+
+    def fake_create(**_kwargs):
+        counter["n"] += 1
+        if counter["n"] <= 10:
+            r = _tool_use_response(f"t{counter['n']}", "read_file", {"path": "a.py"})
+            r.usage.input_tokens = 5000
+            r.usage.cache_read_input_tokens = 5000  # ~10k per request, well under 160k
+            return r
+        return _fake_response('{"findings": [{"title": "bug"}], "summary": "done"}')
+
+    client._create_message = AsyncMock(side_effect=fake_create)
+
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(return_value="contents")
+
+    result = await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        enable_thinking=False,
+        max_tool_rounds=20,
+    )
+
+    assert result.parsed["findings"] == [{"title": "bug"}]
+    assert not any(m in result.parsed["summary"] for m in INCOMPLETE_SUMMARY_MARKERS)
+
+
+@pytest.mark.asyncio
 async def test_caching_marks_last_system_block_when_enabled():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=True)
     client = AnthropicClient(cfg)
@@ -717,6 +798,59 @@ async def test_caller_user_block_cache_control_survives_tool_rounds():
     assert all(user_cc_present), (
         f"caller's user-block cache_control was stripped: per-request presence={user_cc_present}"
     )
+
+
+@pytest.mark.asyncio
+async def test_caller_messages0_breakpoint_survives_and_total_stays_under_cap():
+    """Cross-agent cache sharing shape: the caller marks the last shared block on
+    the initial user turn (messages[0]). Across tool rounds that breakpoint must
+    survive the prune pass, and total breakpoints per request - system(1) +
+    messages[0](1) + moving tool_result(1) = 3 - must stay <= 4."""
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=True)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+
+    counts: list[int] = []
+    msg0_cc: list[bool] = []
+    counter = {"n": 0}
+
+    def fake_create(**kwargs):
+        counts.append(_count_cache_control(kwargs))
+        first_user_content = kwargs["messages"][0]["content"]
+        msg0_cc.append(
+            any(isinstance(b, dict) and "cache_control" in b for b in first_user_content)
+        )
+        counter["n"] += 1
+        if counter["n"] < 4:
+            return _tool_use_response(f"t{counter['n']}", "read_file", {"path": "a.py"})
+        return _fake_response('{"findings": [], "summary": "done"}')
+
+    client._create_message = AsyncMock(side_effect=fake_create)
+
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(return_value="contents")
+
+    # Mirrors what base.py builds: shared prefix block carries the breakpoint,
+    # per-agent role block is appended last (unmarked).
+    await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[
+            {"type": "text", "text": "shared", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "## Your reviewer role\nrole"},
+        ],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        enable_thinking=False,
+        max_tool_rounds=8,
+    )
+
+    assert len(counts) >= 3, f"expected multiple tool rounds, ran {len(counts)}"
+    assert all(msg0_cc), f"caller messages[0] breakpoint was stripped: {msg0_cc}"
+    assert max(counts) <= 4, f"breakpoints exceeded the 4-per-request cap: {counts}"
+    # Steady-state (round >= 1) carries all three breakpoints.
+    assert max(counts) == 3, f"expected system+messages0+tool_result=3, got {counts}"
 
 
 @pytest.mark.asyncio

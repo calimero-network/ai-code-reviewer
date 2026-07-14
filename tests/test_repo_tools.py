@@ -124,3 +124,52 @@ async def test_grep_invalid_regex_returns_error(session, fake_gh_with_tree):
     )
     out = await reg.execute("grep", {"pattern": "[unclosed", "path_glob": "*.py"})
     assert out.startswith("[error: invalid regex")
+
+
+@pytest.mark.asyncio
+async def test_tool_result_over_cap_is_truncated_with_marker(session):
+    limit = 100
+    payload = "x" * 1000
+    gh = MagicMock()
+    contents = MagicMock()
+    contents.content = base64.b64encode(payload.encode()).decode()
+    gh.get_file_contents.return_value = contents
+
+    reg = ToolRegistry(
+        session,
+        gh,
+        agent_id="a1",
+        max_calls=10,
+        per_file_max_bytes=512 * 1024,
+        max_tool_result_bytes=limit,
+    )
+    out = await reg.execute("read_file", {"path": "a.py"})
+
+    marker = f"\n[output truncated at {limit} bytes - "
+    assert marker in out
+    body = out[: out.index(marker)]
+    assert len(body.encode("utf-8")) <= limit
+
+
+@pytest.mark.asyncio
+async def test_tool_result_under_cap_is_unchanged(session, fake_gh):
+    reg = ToolRegistry(
+        session,
+        fake_gh,
+        agent_id="a1",
+        max_calls=10,
+        per_file_max_bytes=512 * 1024,
+        max_tool_result_bytes=16 * 1024,
+    )
+    out = await reg.execute("read_file", {"path": "a.py"})
+    assert out == "print('hi')"
+
+
+def test_max_tool_result_bytes_config_parses_and_defaults():
+    from ai_reviewer.config import _parse_config
+
+    config = _parse_config({"github": {"token": "t"}})
+    assert config.anthropic.max_tool_result_bytes == 16 * 1024
+
+    config = _parse_config({"github": {"token": "t"}, "anthropic": {"max_tool_result_bytes": 4096}})
+    assert config.anthropic.max_tool_result_bytes == 4096

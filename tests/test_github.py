@@ -354,6 +354,29 @@ class TestReviewFormatter:
         # Should indicate clean review
         assert "No issues" in comment or "LGTM" in comment or "✅" in comment
 
+    def test_quality_score_not_shown_in_header(self):
+        """The composite score is not rendered - it folds agent count into a
+        code-quality-looking percentage readers cannot act on. JSON export keeps it."""
+        from datetime import datetime
+
+        from ai_reviewer.github.formatter import GitHubFormatter
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        review = ConsolidatedReview(
+            id="review-123",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[],
+            summary="No issues found",
+            agent_count=3,
+            review_quality_score=0.82,
+            total_review_time_ms=2500,
+        )
+        comment = GitHubFormatter().format_review(review)
+        assert "Quality score" not in comment
+        assert "Reviewed by 3 agents" in comment
+
     def test_format_review_compact_is_short_with_inline_hint(self):
         """Compact format used when posting inline comments: short body + 'See inline'."""
         from datetime import datetime

@@ -66,13 +66,11 @@ class ReviewAgent:
     ) -> AgentReview:
         start_time = time.monotonic()
 
-        system_blocks = self._prepend_role(self._system_blocks)
-
         try:
             result = await self.client.run_review(
                 model=self._model,
-                system_blocks=system_blocks,
-                user_blocks=self._user_blocks,
+                system_blocks=self._system_blocks,
+                user_blocks=self._build_user_blocks(),
                 output_schema=FINDINGS_SCHEMA,
                 tool_registry=self._tool_registry,
                 enable_thinking=self._thinking_enabled,
@@ -96,10 +94,25 @@ class ReviewAgent:
             review_time_ms=elapsed_ms,
         )
 
-    def _prepend_role(self, blocks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Inject this agent's SYSTEM_PROMPT as the first block."""
-        role_block = {"type": "text", "text": self.SYSTEM_PROMPT}
-        return [role_block, *blocks]
+    def _build_user_blocks(self) -> list[dict[str, Any]]:
+        """Build this agent's user turn: shared blocks + role prompt appended last.
+
+        The per-agent role goes at the END of the user turn (not system block[0])
+        so the cacheable prefix [system][shared user] is byte-identical across the
+        parallel agents - the first agent cache-writes the ~80k shared context and
+        the rest cache-read it, instead of each full-pricing it independently.
+
+        The same shared user_blocks list is handed to all agents at once, so build
+        a NEW list here and copy each block before mutating - never touch the
+        caller's shared list. The cache breakpoint on the last shared block (right
+        before the role block) survives the client's prune pass, which only strips
+        appended tool_result turns (messages[1:]).
+        """
+        new_blocks = [dict(b) for b in self._user_blocks]
+        if self.client.config.enable_prompt_caching and new_blocks:
+            new_blocks[-1]["cache_control"] = {"type": "ephemeral"}
+        new_blocks.append({"type": "text", "text": f"## Your reviewer role\n{self.SYSTEM_PROMPT}"})
+        return new_blocks
 
 
 def _parse_findings(parsed: dict[str, Any]) -> list[ReviewFinding]:

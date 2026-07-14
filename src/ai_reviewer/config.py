@@ -46,6 +46,7 @@ class AnthropicApiConfig:
     max_combined_context_tokens: int = 80_000
     per_file_max_bytes: int = 512 * 1024
     per_review_github_request_budget: int = 200
+    max_tool_result_bytes: int = 16 * 1024
 
 
 @dataclass
@@ -240,6 +241,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         max_combined_context_tokens=anthropic_raw.get("max_combined_context_tokens", 80_000),
         per_file_max_bytes=anthropic_raw.get("per_file_max_bytes", 512 * 1024),
         per_review_github_request_budget=anthropic_raw.get("per_review_github_request_budget", 200),
+        max_tool_result_bytes=anthropic_raw.get("max_tool_result_bytes", 16 * 1024),
     )
 
     # GitHub config

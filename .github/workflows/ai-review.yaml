@@ -74,8 +74,9 @@ jobs:
             echo "agents=${{ github.event.inputs.agents }}" >> $GITHUB_OUTPUT
           else
             echo "number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
-            # Default to 1 agent for cost; bump via workflow_dispatch when needed.
-            echo "agents=1" >> $GITHUB_OUTPUT
+            # 3 agents so cross-review runs and the low confidence floors apply
+            # (matches core). Size scaling still trims small PRs to 1-2 agents.
+            echo "agents=3" >> $GITHUB_OUTPUT
           fi
 
       - name: Run AI Code Review

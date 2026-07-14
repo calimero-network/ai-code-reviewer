@@ -270,6 +270,10 @@ class AnthropicClient:
 
         circuit_limit = self.config.max_combined_context_tokens * 2
 
+        # True size of the most recent request's context, from the API's own
+        # per-response usage. Drives the circuit breaker below.
+        last_request_context = 0
+
         for round_idx in range(max_tool_rounds + 1):
             # On the final allowed round, stop offering tools so the model is
             # forced to emit its findings JSON from what it already gathered.
@@ -278,14 +282,17 @@ class AnthropicClient:
             # the whole PR to "Review Incomplete". Same salvage as tool-budget
             # exhaustion, applied to the round cap.
             last_round = round_idx == max_tool_rounds
-            # Circuit breaker: abort before sending if accumulated input from prior rounds
-            # already exceeds twice the context limit — paying for this call would just
-            # make it worse without producing useful output.
-            if usage.input_tokens > circuit_limit:
+            # Circuit breaker: abort before sending if the last request's real context
+            # already exceeded twice the limit. We use the API's per-response size
+            # (input + cache_read + cache_creation) — usage.input_tokens alone excludes
+            # cache reads (near-zero once caching engages, so it never trips), and the
+            # cumulative sum measures unique tokens ever seen, not any single request.
+            # The next request is strictly larger than the last, so this bounds it.
+            if last_request_context > circuit_limit:
                 logger.warning(
-                    "Circuit breaker: accumulated input_tokens=%d exceeds 2× context limit=%d — "
+                    "Circuit breaker: last per-request context=%d exceeds 2× context limit=%d — "
                     "aborting tool loop before next request to contain cost",
-                    usage.input_tokens,
+                    last_request_context,
                     self.config.max_combined_context_tokens,
                 )
                 return AnthropicReviewResult(
@@ -312,6 +319,12 @@ class AnthropicClient:
 
             response = await self._create_message(**kwargs)
             _accumulate_usage(usage, response)
+            ru = getattr(response, "usage", None)
+            last_request_context = (
+                (getattr(ru, "input_tokens", 0) or 0)
+                + (getattr(ru, "cache_read_input_tokens", 0) or 0)
+                + (getattr(ru, "cache_creation_input_tokens", 0) or 0)
+            )
 
             stop = getattr(response, "stop_reason", None)
             if stop != "tool_use" or not tool_registry:

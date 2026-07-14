@@ -34,12 +34,15 @@ AI Code Reviewer orchestrates multiple LLM agents — each with a specialized fo
 flowchart LR
     PR["PR Event / CLI"]
     PR --> Pipeline["review_pr()"]
-    Pipeline --> A1["Security Agent"]
-    Pipeline --> A2["Performance Agent"]
-    Pipeline --> A3["Quality Agent"]
+    Pipeline --> Size{"large PR?\n(lines>1000 or\nfiles>20)"}
+    Size -- no --> A1["Security Agent"]
+    Size -- no --> A2["Performance Agent"]
+    Size -- no --> A3["Quality Agent"]
+    Size -- yes --> Shard["Shard map-reduce\n(per agent, per shard)"]
     A1 --> Agg["Aggregation + Cross-Review"]
     A2 --> Agg
     A3 --> Agg
+    Shard --> Agg
     Agg --> Delta["Delta Tracking"]
     Delta --> Conv{"Converged?"}
     Conv -- yes --> Skip["Skip / LGTM"]
@@ -54,7 +57,7 @@ flowchart LR
 |--------|----------------|
 | `cli.py` | Click CLI: `review-pr`, `config validate/show`, `serve` (uvicorn webhook) |
 | `config.py` | YAML/env `Config` dataclasses, `load_config`, `validate_config` |
-| `review.py` | Main pipeline: `review_pr`, PR classification, aggregation + adaptive finding cap, cross-review, language rules |
+| `review.py` | Main pipeline: `review_pr`, PR classification, aggregation + adaptive finding cap, cross-review, language rules; `_build_shards` / `_run_agent_sharded` for the size-gated sharded map-reduce path on large PRs |
 | `models/context.py` | `ReviewContext` dataclass for PR/repo metadata and repo config hooks |
 | `models/findings.py` | `Severity`, `Category`, `ReviewFinding`, `ConsolidatedFinding`, `compute_fuzzy_hash` |
 | `models/review.py` | `ReviewHistory`, `ScoreBreakdown`, `AgentReview`, `ConsolidatedReview` |
@@ -66,7 +69,7 @@ flowchart LR
 | `context/builder.py` | `build_system_blocks` (review standard + few-shot + PR-tuning + language-priority blocks), `build_user_blocks`, `FINDINGS_SCHEMA` |
 | `context/fetch.py` | `fetch_conventions`, `build_repo_map` (GitHub Contents API, budget-aware) |
 | `context/neighbors.py` | Import-graph / sibling heuristics; `parse_imports_by_path` for Python/TS/JS/Go/Rust/Java |
-| `tools/repo_tools.py` | `ToolRegistry` exposing `read_file`/`glob`/`grep` for Claude tool use |
+| `tools/repo_tools.py` | `ToolRegistry` exposing `read_file`/`glob`/`grep` for Claude tool use; results returned to the model are capped at `max_tool_result_bytes` (16KB default), with a "narrow your search" marker on truncation |
 | `session.py` | `ReviewSession` — per-review GitHub quota + file/tree caches + tool counters |
 | `orchestrator/orchestrator.py` | Generic parallel `AgentOrchestrator` (asyncio tasks) |
 | `orchestrator/aggregator.py` | `ReviewAggregator` clustering/merge (alternate path; production uses `aggregate_findings` in `review.py`) |
@@ -140,7 +143,7 @@ sequenceDiagram
 
 ### Key Functions
 
-- **`review_pr()`** (`review.py`): Core orchestration. Fetches PR data, builds context, spawns agents in parallel, aggregates, cross-reviews, prepends secret findings, returns `ConsolidatedReview`.
+- **`review_pr()`** (`review.py`): Core orchestration. Fetches PR data, builds context, spawns agents in parallel, aggregates, cross-reviews, prepends secret findings, returns `ConsolidatedReview`. On large PRs (additions + deletions > 1000 or changed files > 20), agents run through the sharded map-reduce path (`_run_agent_sharded`) instead of a single conversation - see [Large-PR Sharded Review](#large-pr-sharded-review) below.
 - **`ReviewAgent.review()`** (`agents/base.py`): Runs one agent via `AnthropicClient.run_review` (tool-use loop + structured output), returns an `AgentReview`. The model is the configured `AgentConfig.model`, falling back to the agent class's `MODEL`.
 - **`aggregate_findings()`** (`review.py`): Clusters raw findings by similarity, computes consensus scores, applies confidence filtering, cross-file dedup, and an adaptive per-review finding cap (`_cap_findings`).
 - **`default_review_handler()`** (`webhook.py`): Webhook's async handler — includes pre-agent skip checks, LGTM fast path, metadata embedding, and the full post flow.
@@ -166,6 +169,38 @@ Agent count is adaptive: `_effective_agent_count()` scales the number of agents 
 
 - **Thinking policy**: `claude-sonnet-5` only supports adaptive thinking. security-reviewer and logic-reviewer run with `thinking_enabled=true`, `max_tokens=32000`, and `output_config.effort="medium"` (so thinking doesn't starve the findings JSON). patterns/performance/style run with thinking off.
 - **Tool-loop drop**: on the final tool round, `AnthropicClient.run_review` stops offering tools, forcing the agent to emit its findings JSON instead of exiting empty behind a "tool loop cap" marker (which previously discarded the whole review).
+- **Circuit breaker**: before each request, `AnthropicClient.run_review` checks the *last* request's true context size - input + cache_read + cache_creation tokens, taken from the API's own per-response usage - against `2 × max_combined_context_tokens`. If it's already over the limit, the loop aborts and returns the `CIRCUIT_BREAKER_MARKER` summary instead of sending a request that will fail server-side. This replaced measuring cumulative uncached `input_tokens`, which excludes cache reads and so never tripped once prompt caching engaged.
+- **Tool result cap**: results returned to the model through `ToolRegistry` are truncated to `max_tool_result_bytes` (16KB default) with a "narrow your search" marker; the 512KB `per_file_max_bytes` cap on the underlying GitHub fetch is separate and unchanged.
+
+### Cross-Agent Prompt Caching
+
+`build_system_blocks` produces a `[system][shared user]` prefix that is identical across every agent in a review - only the per-agent role prompt differs. `ReviewAgent._build_user_blocks` appends that role prompt as the **last** block of the user turn (not `system` block[0]), with the cache breakpoint (`cache_control: ephemeral`) placed on the last *shared* block, right before the role block. Because the cacheable prefix is now byte-identical across agents, the first agent's request cache-writes the shared ~80k-token context and every other agent's parallel request cache-reads it, instead of each agent paying full price for its own copy.
+
+### Large-PR Sharded Review
+
+PRs above a size gate (`additions + deletions > 1000` or `changed_files_count > 20`, `review.py` `_SHARD_LINE_GATE` / `_SHARD_FILE_GATE`) skip the single-conversation path above and instead run through `_run_agent_sharded`. This exists because a single ever-growing conversation on a large PR drives per-request context to ~130-160k tokens, which trips server-side "Grammar compilation timed out" errors.
+
+```mermaid
+flowchart TD
+    Files["Changed files + diff"]
+    Files --> Group["Group by top-level directory\n(two segments under crates/)"]
+    Group --> Pack["Greedily pack groups into shards\n(~600 changed lines target,\na group is never split)"]
+    Pack --> Cap{"more than 8 shards?"}
+    Cap -- yes --> Repack["Raise budget to total/8,\nrepack"]
+    Cap -- no --> Shards["Shard[] (max 8)"]
+    Repack --> Shards
+    Shards --> PerAgent["Each agent runs every shard\nsequentially, fresh conversation\n+ PR-map block, tool budget = 6"]
+    PerAgent --> Merge["Concatenate findings per agent"]
+    Merge --> CrossShard["One cross-shard pass per agent\n(catches issues spanning shards)"]
+    CrossShard --> Done["AgentReview"]
+```
+
+- **`_build_shards()`**: groups changed files by top-level directory (directories under `crates/` split on their first two path segments), then greedily packs groups into shards up to `_SHARD_TARGET_LINES` (600) changed lines, never splitting a group. If packing produces more than `_SHARD_MAX` (8) shards, the budget is raised to `total_lines / _SHARD_MAX` and repacked. Deterministic: groups and shards are both ordered by their alphabetically-first path.
+- **`build_pr_map_block()`** (`context/builder.py`): a compact whole-PR digest - totals plus one line per file with `(+adds/-dels)` and the function/impl/class symbols scraped from that file's diff hunk headers - given to every shard so an agent reviewing one directory still has visibility into the shape of the rest of the PR.
+- **Per-shard execution**: each shard gets its own fresh conversation (no shared history across shards) with a reduced tool budget of `_SHARD_TOOL_BUDGET` (6) calls, plus the PR-map block appended to its user blocks.
+- **Failure handling**: a shard that raises or returns an incomplete-marker summary is recorded as a coverage gap and skipped; the agent as a whole only fails if every shard fails. A successful agent's summary gets a "Coverage gap: shard(s) ... failed" note appended when any shard failed.
+- **Cross-shard pass** (`_run_cross_shard_pass`): one extra LLM call per agent, given the PR map plus all findings gathered across that agent's shards, looking only for cross-cutting issues no single shard could see (a signature changed in one directory with a stale caller in another, a moved definition, etc.). Non-fatal - a failure here is logged and doesn't affect the agent's other findings.
+- Small and medium PRs are unaffected and keep the existing single-conversation path.
 
 ### Aggregation Pipeline
 

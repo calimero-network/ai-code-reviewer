@@ -16,6 +16,7 @@ Severity semantics: see ai_reviewer.models.findings.Severity.
 """
 
 import asyncio
+import contextlib
 import fnmatch
 import json
 import logging
@@ -23,6 +24,7 @@ import re
 from collections import defaultdict
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import dataclass, field
 from datetime import datetime
 from difflib import SequenceMatcher
 from typing import Any
@@ -34,7 +36,7 @@ from ai_reviewer.agents.patterns import PatternsAgent, StyleAgent
 from ai_reviewer.agents.performance import LogicAgent, PerformanceAgent
 from ai_reviewer.agents.security import AuthenticationAgent, SecurityAgent
 from ai_reviewer.config import AnthropicApiConfig
-from ai_reviewer.context.builder import build_system_blocks, build_user_blocks
+from ai_reviewer.context.builder import build_pr_map_block, build_system_blocks, build_user_blocks
 from ai_reviewer.context.fetch import build_repo_map, fetch_conventions
 from ai_reviewer.context.neighbors import select_neighbors
 from ai_reviewer.github.client import GitHubClient
@@ -106,6 +108,32 @@ def filter_by_ignore_patterns(files: dict[str, str], patterns: list[str]) -> dic
     }
 
 
+def _split_diff_by_file(diff: str) -> list[tuple[str | None, str]]:
+    """Split a unified diff into ``(file_path, section_text)`` on ``diff --git`` boundaries.
+
+    ``file_path`` is ``None`` for any preamble before the first header. Section
+    text preserves the original bytes (including trailing newlines) so joining
+    sections back reproduces the input.
+    """
+    sections: list[tuple[str | None, str]] = []
+    current_lines: list[str] = []
+    current_file: str | None = None
+
+    for line in diff.splitlines(keepends=True):
+        header_match = _DIFF_FILE_HEADER_RE.match(line.rstrip("\n"))
+        if header_match:
+            if current_lines:
+                sections.append((current_file, "".join(current_lines)))
+            current_lines = [line]
+            current_file = header_match.group(1)
+        else:
+            current_lines.append(line)
+
+    if current_lines:
+        sections.append((current_file, "".join(current_lines)))
+    return sections
+
+
 def filter_diff_by_ignore_patterns(diff: str, patterns: list[str]) -> str:
     """Drop entire file sections from a unified diff when the path matches *patterns*.
 
@@ -115,32 +143,11 @@ def filter_diff_by_ignore_patterns(diff: str, patterns: list[str]) -> str:
         return diff
 
     compiled = _compile_ignore_patterns(patterns)
-    sections: list[str] = []
-    current_section: list[str] = []
-    current_file: str | None = None
-
-    for line in diff.splitlines(keepends=True):
-        header_match = _DIFF_FILE_HEADER_RE.match(line.rstrip("\n"))
-        if header_match:
-            if (
-                current_section
-                and current_file is not None
-                and not any(c.match(current_file) for c in compiled)
-            ):
-                sections.append("".join(current_section))
-            current_section = [line]
-            current_file = header_match.group(1)
-        else:
-            current_section.append(line)
-
-    if (
-        current_section
-        and current_file is not None
-        and not any(c.match(current_file) for c in compiled)
-    ):
-        sections.append("".join(current_section))
-
-    return "".join(sections)
+    return "".join(
+        text
+        for path, text in _split_diff_by_file(diff)
+        if path is not None and not any(c.match(path) for c in compiled)
+    )
 
 
 _LANGUAGE_RULES: dict[str, str] = {
@@ -255,9 +262,13 @@ def get_cross_review_prompt(
     findings_blob = []
     for i, f in enumerate(review.findings[:_CROSS_REVIEW_MAX_FINDINGS], 1):
         line_ref = f"{f.line_start}" + (f"-{f.line_end}" if f.line_end else "")
-        findings_blob.append(
-            f"{i}. [id={f.id}] {f.file_path}:{line_ref} [{f.severity.value}] {f.title}\n   {f.description}"
+        entry = (
+            f"{i}. [id={f.id}] {f.file_path}:{line_ref} [{f.severity.value}] {f.title}\n"
+            f"   {f.description}"
         )
+        if f.suggested_fix:
+            entry += f"\n   Suggested fix: {f.suggested_fix}"
+        findings_blob.append(entry)
     findings_text = "\n".join(findings_blob)
 
     # Truncate at newline boundary only when we actually truncated (avoid dropping last line when diff fits)
@@ -265,7 +276,7 @@ def get_cross_review_prompt(
     if len(diff) > _CROSS_REVIEW_DIFF_MAX_CHARS and "\n" in diff_excerpt:
         diff_excerpt = diff_excerpt.rsplit("\n", 1)[0]
 
-    return f"""You are in a **cross-review round**. Multiple agents already produced the findings below for this PR. Your job is to validate them and rank by importance.
+    return f"""You are in an **adversarial cross-review round**. Multiple agents already produced the findings below. Do NOT rank them by gut feel - **try to REFUTE each one**.
 
 ## PR
 - **Repo**: {context.repo_name} | **PR #{context.pr_number}**: {context.pr_title}
@@ -276,14 +287,19 @@ def get_cross_review_prompt(
 {diff_excerpt}
 ```
 
-## Findings to validate and rank
+## Findings to verify
 {findings_text}
 
-For each finding, decide:
-1. **Valid** (true/false): Does it make sense? Does it follow review best practices (concrete, actionable, not nitpicky)? Would you keep it in the final report?
-2. **Rank** (integer): Importance for the author, 1 = most important. Ties allowed.
+For EACH finding, attempt to prove it wrong before you accept it:
 
-Output the list of assessments in the exact JSON format below (use the finding `id` from the list, e.g. finding-1, finding-2).
+1. **valid** (true/false): Mark true ONLY if you can state a CONCRETE, REACHABLE failure scenario - specific inputs or state that lead to a specific wrong output or behavior. Vague risk ("this could be unsafe", "might be a problem") does NOT qualify. If the failure state is unreachable (e.g. every path to it already fails an earlier check or higher-priority guard), or you cannot construct a concrete scenario, mark **false**.
+2. **reason**: One sentence - the concrete failure scenario if valid, or why it is unreachable/not a real bug if invalid.
+3. **adjusted_severity** (optional): one of critical/warning/suggestion/nitpick. Set this ONLY when the finding is real but over-weighted and should be *downgraded* (e.g. a "critical" that is really a suggestion). Omit it if the severity is fine. Cross-review never raises severity.
+4. **fix_ok** (optional, only if the finding has a suggested fix): reason about whether the fix actually closes the failure scenario AND does not break adjacent behavior. Set false if the fix is wrong, incomplete, or introduces a regression (e.g. a regex anchor that still matches the bad token, or a change that degrades the workflow). Omit or set true if the fix is sound.
+
+Rank by importance implicitly via `rank` (1 = most important). A finding you cannot refute AND cannot make concrete stays valid but should rank low.
+
+Output the assessments in the exact JSON format below (use the finding `id` from the list, e.g. finding-1, finding-2).
 """
 
 
@@ -291,11 +307,14 @@ def get_cross_review_output_format() -> str:
     """JSON schema for cross-review round response."""
     return """
 ## Output format (valid JSON only, no markdown fences)
-{"assessments": [{"id": "finding-1", "valid": true, "rank": 1}, {"id": "finding-2", "valid": false, "rank": 5}, ...], "summary": "One sentence on overall quality of the findings."}
+{"assessments": [{"id": "finding-1", "valid": true, "rank": 1, "reason": "concrete scenario", "adjusted_severity": "warning", "fix_ok": true}, {"id": "finding-2", "valid": false, "rank": 5, "reason": "failure state unreachable"}], "summary": "One sentence on overall quality of the findings."}
 
 - "id" must match the finding id from the list (e.g. finding-1, finding-2).
-- "valid": true if the finding should stay in the report, false if it should be dropped or is not actionable.
+- "valid": true only when you stated a concrete, reachable failure scenario; false to drop it.
 - "rank": integer, 1 = most important. Lower rank = higher priority.
+- "reason": one sentence justifying valid/invalid.
+- "adjusted_severity" (optional): critical/warning/suggestion/nitpick - include ONLY to downgrade an over-weighted finding.
+- "fix_ok" (optional): false when the finding's suggested fix is wrong or would break adjacent behavior.
 - Include every finding id from the list in assessments.
 """
 
@@ -335,6 +354,10 @@ def apply_cross_review(
     """Filter and re-rank findings using cross-review assessments.
 
     - Drops findings where the fraction of agents that said valid is < min_validation_agreement.
+    - Downgrade-only severity adjustment: when a majority of assessing agents propose a
+      same-or-lower severity, the finding is lowered (never raised).
+    - Strips a finding's suggested_fix when a majority of assessing agents mark fix_ok false
+      (a wrong patch is worse than none); the drop is silent to the author, logged at INFO.
     - Re-orders by average rank (1 = first), then by severity.
     - Findings with no votes (e.g. omitted by all agents) are kept but assigned rank 99
       and appear at the end; assessments may use "id" or "finding_id" for the finding key.
@@ -342,11 +365,22 @@ def apply_cross_review(
     if not all_assessments:
         return review
 
+    # Priority order: lower number = more severe. Used for ranking and downgrade checks.
+    severity_order = {
+        Severity.CRITICAL: 0,
+        Severity.WARNING: 1,
+        Severity.SUGGESTION: 2,
+        Severity.NITPICK: 3,
+    }
+
     finding_ids = [f.id for f in review.findings]
     id_to_finding = {f.id: f for f in review.findings}
 
-    # Per finding: list of (valid, rank) from each agent
+    # Per finding: list of (valid, rank) from each agent, plus optional
+    # adjusted-severity and fix_ok proposals (only recorded when present).
     id_to_votes: dict[str, list[tuple[bool, int]]] = {fid: [] for fid in finding_ids}
+    id_to_sev_props: dict[str, list[Severity]] = {fid: [] for fid in finding_ids}
+    id_to_fix_votes: dict[str, list[bool]] = {fid: [] for fid in finding_ids}
 
     for _agent_name, assessments in all_assessments:
         for a in assessments:
@@ -363,6 +397,46 @@ def apply_cross_review(
             rank = a.get("rank", 99)
             rank = max(1, int(rank)) if isinstance(rank, (int, float)) else 99
             id_to_votes[fid].append((valid, rank))
+
+            raw_sev = a.get("adjusted_severity")
+            if isinstance(raw_sev, str):
+                with contextlib.suppress(ValueError):
+                    id_to_sev_props[fid].append(Severity(raw_sev.lower().strip()))
+
+            if "fix_ok" in a:
+                raw_fix = a["fix_ok"]
+                if isinstance(raw_fix, bool):
+                    id_to_fix_votes[fid].append(raw_fix)
+                elif isinstance(raw_fix, str):
+                    id_to_fix_votes[fid].append(raw_fix.lower() in ("true", "1", "yes"))
+
+    def _apply_downgrade_and_fix(finding: ConsolidatedFinding, n_votes: int) -> None:
+        """Downgrade-only severity + drop a fix the majority flagged as broken."""
+        props = id_to_sev_props.get(finding.id, [])
+        current = severity_order.get(finding.severity, 4)
+        same_or_lower = [s for s in props if severity_order.get(s, 4) >= current]
+        downgrades = [s for s in props if severity_order.get(s, 4) > current]
+        # Majority of assessing agents propose same-or-lower, and at least one is a real downgrade.
+        if downgrades and len(same_or_lower) * 2 > n_votes:
+            # Least-aggressive downgrade the majority supports (most severe of the proposals).
+            target = min(downgrades, key=lambda s: severity_order.get(s, 4))
+            logger.info(
+                "Cross-review downgraded %s %s -> %s",
+                finding.id,
+                finding.severity.value,
+                target.value,
+            )
+            finding.severity = target
+
+        fix_votes = id_to_fix_votes.get(finding.id, [])
+        if finding.suggested_fix and fix_votes:
+            false_count = sum(1 for ok in fix_votes if not ok)
+            if false_count * 2 > len(fix_votes):
+                logger.info(
+                    "Cross-review withdrew suggested fix for %s (fix_ok false majority)",
+                    finding.id,
+                )
+                finding.suggested_fix = None
 
     kept: list[tuple[ConsolidatedFinding, float, float]] = []  # (finding, valid_ratio, avg_rank)
 
@@ -382,16 +456,11 @@ def apply_cross_review(
         valid_ratio = valid_count / len(votes) if votes else 1.0
         if valid_ratio < min_validation_agreement:
             continue  # Drop finding
+        _apply_downgrade_and_fix(finding, len(votes))
         avg_rank = sum(r for _, r in votes) / len(votes) if votes else 99.0
         kept.append((finding, valid_ratio, avg_rank))
 
     # Sort by avg_rank ascending, then by severity (critical first)
-    severity_order = {
-        Severity.CRITICAL: 0,
-        Severity.WARNING: 1,
-        Severity.SUGGESTION: 2,
-        Severity.NITPICK: 3,
-    }
     kept.sort(key=lambda x: (x[2], severity_order.get(x[0].severity, 4)))
 
     new_findings = [x[0] for x in kept]
@@ -471,8 +540,20 @@ def _raw_text_similarity(text1: str, text2: str) -> float:
     return SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
 
 
+# When file + lines + category all match, the substance is almost always the
+# same even if the wording (and severity) differ, so a lower text bar merges the
+# reworded duplicates that the 0.85 gate used to let through.
+_LINE_OVERLAP_SIMILARITY_THRESHOLD = 0.6
+
+
 def _raw_findings_similar(raw1: dict, raw2: dict, threshold: float = _SIMILARITY_THRESHOLD) -> bool:
-    """Check if two raw findings describe the same issue (for consensus clustering)."""
+    """Check if two raw findings describe the same issue (for consensus clustering).
+
+    Severity is intentionally not part of the gate - a finding raised at
+    different severities across passes is still the same substance and should
+    merge. When file + category match AND the lines overlap (+/-5), the text
+    bar drops to 0.6; without line overlap the stricter default (0.85) holds.
+    """
     path1 = _normalize_path(raw1.get("file_path", ""))
     path2 = _normalize_path(raw2.get("file_path", ""))
     if path1 != path2:
@@ -483,9 +564,6 @@ def _raw_findings_similar(raw1: dict, raw2: dict, threshold: float = _SIMILARITY
     if cat1 != cat2:
         return False
 
-    if not _raw_lines_overlap(raw1, raw2):
-        return False
-
     title1 = (raw1.get("title") or "").strip()
     title2 = (raw2.get("title") or "").strip()
     desc1 = (raw1.get("description") or "").strip()
@@ -493,7 +571,13 @@ def _raw_findings_similar(raw1: dict, raw2: dict, threshold: float = _SIMILARITY
     title_sim = _raw_text_similarity(title1, title2)
     desc_sim = _raw_text_similarity(desc1, desc2)
     combined = (title_sim * 0.6) + (desc_sim * 0.4)
-    return combined >= threshold
+
+    effective = (
+        min(threshold, _LINE_OVERLAP_SIMILARITY_THRESHOLD)
+        if _raw_lines_overlap(raw1, raw2)
+        else threshold
+    )
+    return combined >= effective
 
 
 def _cluster_raw_findings(
@@ -1046,6 +1130,308 @@ def _effective_agent_count(
     return requested
 
 
+# --- Sharded map-reduce review for large PRs ---
+#
+# On large PRs a single ever-growing conversation drives per-request context to
+# ~130-160k tokens, tripping server-side "Grammar compilation timed out" 400s.
+# Sharding bounds per-call context by construction: each agent reviews the PR in
+# directory-grouped slices, then a cross-shard pass catches issues that span them.
+_SHARD_LINE_GATE = 1000
+_SHARD_FILE_GATE = 20
+_SHARD_TARGET_LINES = 600
+_SHARD_MAX = 8
+_SHARD_TOOL_BUDGET = 6
+
+
+@dataclass
+class Shard:
+    """One slice of a PR: a subset of changed files and their portion of the diff."""
+
+    files: dict[str, str]
+    diff: str
+    label: str
+
+
+def _changed_line_count(section: str) -> int:
+    """Count added/removed lines in a per-file diff section (excludes file headers)."""
+    n = 0
+    for line in section.splitlines():
+        if line.startswith(("+++", "---")):
+            continue
+        if line.startswith(("+", "-")):
+            n += 1
+    return n
+
+
+def _shard_group_key(path: str) -> str:
+    """Top-level directory for grouping; two segments under ``crates/`` so crates split."""
+    parts = path.split("/")
+    if parts[0] == "crates" and len(parts) >= 2:
+        return "/".join(parts[:2])
+    return parts[0]
+
+
+@dataclass
+class _DiffGroup:
+    key: str
+    items: list[tuple[str, str]] = field(default_factory=list)  # (path, section)
+    lines: int = 0
+
+    @property
+    def min_path(self) -> str:
+        return min(p for p, _ in self.items)
+
+
+def _pack_groups(groups: list[_DiffGroup], budget: int) -> list[list[_DiffGroup]]:
+    """Greedily pack groups into shards up to *budget* changed lines; never split a group."""
+    shards: list[list[_DiffGroup]] = []
+    current: list[_DiffGroup] = []
+    current_lines = 0
+    for g in groups:
+        if g.lines > budget:
+            if current:
+                shards.append(current)
+                current, current_lines = [], 0
+            shards.append([g])
+            continue
+        if current and current_lines + g.lines > budget:
+            shards.append(current)
+            current, current_lines = [g], g.lines
+        else:
+            current.append(g)
+            current_lines += g.lines
+    if current:
+        shards.append(current)
+    return shards
+
+
+def _build_shards(files: dict[str, str], diff: str) -> list[Shard]:
+    """Split a PR into directory-grouped shards bounded by ``_SHARD_TARGET_LINES``.
+
+    Deterministic: groups are ordered by their alphabetically-first path and packed
+    greedily. A group larger than the budget becomes its own shard (groups are never
+    split). If packing yields more than ``_SHARD_MAX`` shards, the budget is raised to
+    ``total_lines / _SHARD_MAX`` and packing is retried.
+    """
+    grouped: dict[str, _DiffGroup] = {}
+    for path, section in _split_diff_by_file(diff):
+        if path is None:
+            continue
+        key = _shard_group_key(path)
+        group = grouped.setdefault(key, _DiffGroup(key=key))
+        group.items.append((path, section))
+        group.lines += _changed_line_count(section)
+
+    groups = sorted(grouped.values(), key=lambda g: g.min_path)
+    if not groups:
+        return []
+
+    packed = _pack_groups(groups, _SHARD_TARGET_LINES)
+    if len(packed) > _SHARD_MAX:
+        total = sum(g.lines for g in groups)
+        bigger = max(_SHARD_TARGET_LINES, -(-total // _SHARD_MAX))
+        packed = _pack_groups(groups, bigger)
+
+    shards: list[Shard] = []
+    for group_list in packed:
+        ordered = sorted(group_list, key=lambda g: g.min_path)
+        shard_files: dict[str, str] = {}
+        diff_parts: list[str] = []
+        for g in ordered:
+            for path, section in sorted(g.items, key=lambda x: x[0]):
+                diff_parts.append(section)
+                if path in files:
+                    shard_files[path] = files[path]
+        label = ", ".join(g.key for g in ordered)
+        shards.append(Shard(files=shard_files, diff="".join(diff_parts), label=label))
+
+    shards.sort(key=lambda s: min(s.files) if s.files else "")
+    return shards
+
+
+def _raw_to_review_finding(raw: dict[str, Any]) -> ReviewFinding | None:
+    """Build a ReviewFinding from a raw cross-shard finding dict; None if malformed."""
+    try:
+        # severity/category/title are required - defaulting them would dress up
+        # malformed LLM output as a valid low-severity finding (same contract
+        # as _parse_findings in agents/base.py).
+        return ReviewFinding(
+            file_path=raw["file_path"],
+            line_start=int(raw.get("line_start", 1)),
+            line_end=int(raw["line_end"]) if raw.get("line_end") else None,
+            severity=Severity(str(raw["severity"]).lower()),
+            category=Category(str(raw["category"]).lower()),
+            title=raw["title"],
+            description=raw.get("description", ""),
+            suggested_fix=raw.get("suggested_fix"),
+            confidence=float(raw.get("confidence", 0.6)),
+        )
+    except (KeyError, ValueError) as e:
+        logger.warning("Failed to parse cross-shard finding: %s, raw=%r", e, raw)
+        return None
+
+
+async def _run_cross_shard_pass(
+    client: AnthropicClient,
+    pr_map: str,
+    findings: list[ReviewFinding],
+) -> list[ReviewFinding]:
+    """One LLM call over the PR map + merged findings to surface cross-shard issues.
+
+    Cross-shard issues are ones no single shard can see: a signature changed in one
+    directory with a stale caller in another, a moved definition, etc. Non-fatal.
+    """
+    if not findings:
+        return []
+
+    listed = "\n".join(
+        f"- {f.file_path}:{f.line_start} [{f.severity.value}] {f.title}"
+        for f in findings[:_CROSS_REVIEW_MAX_FINDINGS]
+    )
+    prompt = f"""The PR below was reviewed in independent shards, so cross-file issues that span shards may have been missed.
+
+{pr_map}
+
+## Findings already reported (across all shards)
+{listed}
+
+Identify ONLY cross-cutting issues that span shards and are NOT already listed above: a function/type signature changed in one file with a stale caller in another, a moved or renamed definition leaving dangling references, an interface changed on one side but not the other, etc. Do not repeat single-file issues. If you find none, return an empty findings array.
+
+## Output format (valid JSON only, no markdown fences)
+{{"findings": [{{"file_path": "...", "line_start": 1, "severity": "warning", "category": "logic", "title": "...", "description": "...", "confidence": 0.6}}], "summary": "..."}}
+"""
+    raw_text = await client.complete_simple(
+        model=client.config.default_model,
+        system=[
+            {
+                "type": "text",
+                "text": "You are a code reviewer looking only for cross-file issues. Respond with valid JSON.",
+            }
+        ],
+        user=prompt,
+        max_tokens=8192,
+        temperature=0.2,
+    )
+    raw_findings, _ = parse_review_response(raw_text)
+    parsed = [_raw_to_review_finding(r) for r in raw_findings]
+    return [f for f in parsed if f is not None]
+
+
+async def _run_agent_sharded(
+    *,
+    cls: type[ReviewAgent],
+    agent_name: str,
+    agent_index: int,
+    client: AnthropicClient,
+    system_blocks: list[dict[str, Any]],
+    shards: list[Shard],
+    pr_map: str,
+    pr_title: str,
+    pr_body: str,
+    max_total_chars: int,
+    allow_tools: bool,
+    max_tokens: int,
+    temperature: float,
+    thinking_enabled: bool | None,
+    model: str | None,
+    session: ReviewSession,
+    gh: GitHubClient,
+    anthropic_cfg: AnthropicApiConfig,
+    context: ReviewContext,
+    on_status: Callable[..., Any] | None,
+) -> AgentReview | Exception:
+    """Run one agent across shards sequentially, then a cross-shard pass.
+
+    Each shard sees only its own diff/files plus the PR map, and gets a reduced tool
+    budget. A shard that raises or returns an incomplete-marker summary is recorded and
+    skipped; the agent fails only if ALL shards fail. Returns an AgentReview (with a
+    coverage-gap note appended on partial failure) or an Exception when all shards fail.
+    """
+    if on_status:
+        on_status(f"{agent_name}: RUNNING")
+
+    merged: list[ReviewFinding] = []
+    summaries: list[str] = []
+    failed_labels: list[str] = []
+
+    pr_map_block = {"type": "text", "text": pr_map}
+    for k, shard in enumerate(shards):
+        shard_id = f"{agent_name}-{agent_index}-s{k}"
+        user_blocks = build_user_blocks(
+            pr_title=pr_title,
+            pr_body=pr_body,
+            diff=shard.diff,
+            changed_files=shard.files,
+            neighbor_files={},
+            max_total_chars=max_total_chars,
+        )
+        user_blocks.append(dict(pr_map_block))
+        registry = (
+            ToolRegistry(
+                session=session,
+                github_client=gh,
+                agent_id=shard_id,
+                max_calls=_SHARD_TOOL_BUDGET,
+                per_file_max_bytes=anthropic_cfg.per_file_max_bytes,
+                max_tool_result_bytes=anthropic_cfg.max_tool_result_bytes,
+            )
+            if allow_tools
+            else None
+        )
+        agent = cls(
+            client=client,
+            agent_id=shard_id,
+            system_blocks=system_blocks,
+            user_blocks=user_blocks,
+            tool_registry=registry,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            thinking_enabled=thinking_enabled,
+            model=model,
+        )
+        try:
+            result = await agent.review(diff="", file_contents={}, context=context)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Agent %s shard %d (%s) failed: %s", agent_name, k, shard.label, e)
+            failed_labels.append(shard.label)
+            continue
+        if any(marker in result.summary for marker in INCOMPLETE_SUMMARY_MARKERS):
+            logger.warning(
+                "Agent %s shard %d (%s) returned incomplete review", agent_name, k, shard.label
+            )
+            failed_labels.append(shard.label)
+            continue
+        merged.extend(result.findings)
+        summaries.append(result.summary)
+
+    if shards and len(failed_labels) == len(shards):
+        if on_status:
+            on_status(f"{agent_name}: FAILED")
+        return RuntimeError(f"all {len(shards)} shard(s) failed: {', '.join(failed_labels)}")
+
+    try:
+        merged.extend(await _run_cross_shard_pass(client, pr_map, merged))
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Cross-shard pass for %s failed: %s", agent_name, e)
+
+    summary = " ".join(summaries) if summaries else "Review completed"
+    # Note must not contain INCOMPLETE_SUMMARY_MARKERS or aggregate_findings would
+    # wrongly mark this (partially successful) agent as failed.
+    if failed_labels:
+        summary += f"\n\nCoverage gap: shard(s) {', '.join(failed_labels)} failed"
+
+    if on_status:
+        on_status(f"{agent_name}: DONE")
+    return AgentReview(
+        agent_id=f"{agent_name}-{agent_index}",
+        agent_type=getattr(cls, "AGENT_TYPE", agent_name),
+        focus_areas=list(getattr(cls, "FOCUS_AREAS", [])),
+        findings=merged,
+        summary=summary,
+        review_time_ms=0,
+    )
+
+
 async def review_pr(
     repo: str,
     pr_number: int,
@@ -1173,8 +1559,18 @@ async def review_pr(
         if on_status:
             on_status("CREATING")
 
+        # Large PRs: bound per-call context by construction via sharding.
+        sharded = (
+            context.additions + context.deletions > _SHARD_LINE_GATE
+            or context.changed_files_count > _SHARD_FILE_GATE
+        )
+        shards = _build_shards(files, diff) if sharded else []
+        pr_map = build_pr_map_block(files, diff) if sharded else ""
+        if sharded:
+            logger.info("Large PR: using sharded review path (%d shard(s) per agent)", len(shards))
+
         tasks: list[Any] = []
-        instantiated: list[tuple[str, ReviewAgent]] = []
+        instantiated: list[tuple[str, ReviewAgent | None]] = []
         for i, agent_name in enumerate(agent_order):
             cls = _AGENT_CLASSES.get(agent_name)
             if not cls:
@@ -1185,17 +1581,6 @@ async def review_pr(
             )
             allow_tools = agent_cfg.allow_tool_use if agent_cfg else True
             max_tool_calls = agent_cfg.max_tool_calls if agent_cfg else 20
-            registry = (
-                ToolRegistry(
-                    session=session,
-                    github_client=gh,
-                    agent_id=f"{agent_name}-{i}",
-                    max_calls=max_tool_calls,
-                    per_file_max_bytes=anthropic_cfg.per_file_max_bytes,
-                )
-                if allow_tools
-                else None
-            )
             # When only 1 agent runs (small PR), override its system blocks
             # with a comprehensive prompt covering ALL review perspectives.
             agent_system = system_blocks
@@ -1211,6 +1596,46 @@ async def review_pr(
                 }
                 agent_system = [comprehensive_block, *system_blocks]
 
+            if sharded:
+                instantiated.append((agent_name, None))
+                tasks.append(
+                    _run_agent_sharded(
+                        cls=cls,
+                        agent_name=agent_name,
+                        agent_index=i,
+                        client=client,
+                        system_blocks=agent_system,
+                        shards=shards,
+                        pr_map=pr_map,
+                        pr_title=getattr(pr, "title", "") or "",
+                        pr_body=getattr(pr, "body", "") or "",
+                        max_total_chars=anthropic_cfg.max_combined_context_tokens * 4,
+                        allow_tools=allow_tools,
+                        max_tokens=agent_cfg.max_tokens if agent_cfg else 8192,
+                        temperature=agent_cfg.temperature if agent_cfg else 0.3,
+                        thinking_enabled=agent_cfg.thinking_enabled if agent_cfg else None,
+                        model=agent_cfg.model if agent_cfg else None,
+                        session=session,
+                        gh=gh,
+                        anthropic_cfg=anthropic_cfg,
+                        context=context,
+                        on_status=on_status,
+                    )
+                )
+                continue
+
+            registry = (
+                ToolRegistry(
+                    session=session,
+                    github_client=gh,
+                    agent_id=f"{agent_name}-{i}",
+                    max_calls=max_tool_calls,
+                    per_file_max_bytes=anthropic_cfg.per_file_max_bytes,
+                    max_tool_result_bytes=anthropic_cfg.max_tool_result_bytes,
+                )
+                if allow_tools
+                else None
+            )
             agent = cls(
                 client=client,
                 agent_id=f"{agent_name}-{i}",
