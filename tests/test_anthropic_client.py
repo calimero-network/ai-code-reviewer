@@ -1,9 +1,47 @@
 from unittest.mock import AsyncMock, MagicMock
 
+import httpx
 import pytest
 
+from ai_reviewer.agents import anthropic_client as ac
 from ai_reviewer.agents.anthropic_client import AnthropicClient, AnthropicReviewResult
 from ai_reviewer.config import AnthropicApiConfig
+
+# The SDK is banned outside anthropic_client (invariant I1); reach its exception
+# type through the module under test instead of importing it directly.
+BadRequestError = ac.anthropic.BadRequestError
+
+
+def _bad_request(message: str) -> BadRequestError:
+    resp = httpx.Response(400, request=httpx.Request("POST", "http://x"))
+    return BadRequestError(message, response=resp, body=None)
+
+
+def _mock_stream_boundary(client: AnthropicClient, side_effect):
+    """Mock the raw _sdk.messages.stream async-context-manager boundary.
+
+    Each entry in side_effect is either a Message to return from
+    get_final_message() or an exception to raise on entering the context.
+    """
+    calls = {"n": 0}
+
+    def make_cm(**_kwargs):
+        idx = calls["n"]
+        calls["n"] += 1
+        item = side_effect[idx]
+        cm = MagicMock()
+        if isinstance(item, BaseException):
+            cm.__aenter__ = AsyncMock(side_effect=item)
+        else:
+            stream_obj = MagicMock()
+            stream_obj.get_final_message = AsyncMock(return_value=item)
+            cm.__aenter__ = AsyncMock(return_value=stream_obj)
+        cm.__aexit__ = AsyncMock(return_value=None)
+        return cm
+
+    client._sdk = MagicMock()
+    client._sdk.messages.stream = MagicMock(side_effect=make_cm)
+    return client._sdk.messages.stream, calls
 
 
 def _text_block(text: str):
@@ -823,6 +861,65 @@ async def test_run_review_truncated_response_is_marked_incomplete():
     from ai_reviewer.agents.anthropic_client import TRUNCATED_MARKER
 
     assert TRUNCATED_MARKER in result.parsed["summary"]
+
+
+@pytest.fixture
+def _no_retry_sleep(monkeypatch):
+    monkeypatch.setattr(
+        "ai_reviewer.agents.anthropic_client.asyncio.sleep", AsyncMock(return_value=None)
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_message_retries_grammar_timeout_then_succeeds(_no_retry_sleep):
+    """A 'Grammar compilation timed out' 400 is retried; the retry's result is returned."""
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    final = _fake_response('{"findings": [], "summary": "ok"}')
+    stream, calls = _mock_stream_boundary(
+        client,
+        [_bad_request("Error code: 400 - Grammar compilation timed out."), final],
+    )
+
+    result = await client._create_message(model="claude-sonnet-5", max_tokens=8192)
+
+    assert result is final
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_create_message_does_not_retry_other_bad_request():
+    """A 400 without the grammar-timeout marker propagates on the first failure."""
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    stream, calls = _mock_stream_boundary(
+        client,
+        [_bad_request("Error code: 400 - invalid model"), _fake_response("{}")],
+    )
+
+    with pytest.raises(BadRequestError):
+        await client._create_message(model="claude-sonnet-5", max_tokens=8192)
+
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_create_message_grammar_timeout_retries_are_exhausted(_no_retry_sleep):
+    """After _GRAMMAR_TIMEOUT_MAX_RETRIES consecutive failures the error is raised."""
+    from ai_reviewer.agents.anthropic_client import _GRAMMAR_TIMEOUT_MAX_RETRIES
+
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    total_attempts = _GRAMMAR_TIMEOUT_MAX_RETRIES + 1
+    stream, calls = _mock_stream_boundary(
+        client,
+        [_bad_request("Grammar compilation timed out") for _ in range(total_attempts)],
+    )
+
+    with pytest.raises(BadRequestError):
+        await client._create_message(model="claude-sonnet-5", max_tokens=8192)
+
+    assert calls["n"] == total_attempts
 
 
 def test_run_review_default_tool_rounds_matches_tool_call_budget():
