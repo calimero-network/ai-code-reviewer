@@ -1,5 +1,35 @@
 # AI Code Reviewer – What Changed & What’s Next
 
+## 2026-07-14 - Large-PR reliability (sharded review, shared caching, circuit breaker fix)
+
+### Added
+- **Sharded map-reduce review for large PRs**: gated on `additions + deletions > 1000` or
+  `changed_files_count > 20`. The PR is split into up to 8 directory-coherent shards
+  (~600 changed lines each, a directory group is never split across shards). Each agent
+  reviews every shard in a fresh conversation with a reduced tool budget (6 calls) plus a
+  deterministic PR-map block (`build_pr_map_block`) for whole-PR context. Per-shard findings
+  are concatenated per agent, then one cross-shard pass per agent looks for issues that span
+  shards (stale callers of a signature changed elsewhere, moved definitions, etc.). A single
+  shard failure is recorded as a coverage-gap note in the summary; the agent as a whole only
+  fails if every shard fails. Small/medium PRs are unaffected and keep the existing single-
+  conversation path.
+
+### Fixed
+- **Cross-agent prompt cache sharing**: the per-agent role prompt moved from system block[0]
+  to the end of the user turn (`ReviewAgent._build_user_blocks`). The cacheable prefix
+  (`[system][shared user]`) is now byte-identical across agents, so the first agent's cache
+  write is reused by the rest instead of each agent cache-writing its own ~80k-token prefix.
+  The cache breakpoint sits on the last shared user block, with the role block appended after it.
+- **Circuit breaker accuracy**: now measures the last request's true context (input +
+  cache_read + cache_creation, from the API's own per-response usage) instead of cumulative
+  uncached `input_tokens`, which excludes cache reads and never tripped once caching engaged.
+- **Tool result size cap**: tool results fed back to the model are capped at
+  `max_tool_result_bytes` (16KB default) with a "narrow your search" marker so an oversized
+  match doesn't blow out context; the 512KB `per_file_max_bytes` cap on the GitHub fetch
+  itself is unchanged.
+
+---
+
 ## 2026-07-14 - Sonnet 5 reliability + recall fixes
 
 ### Migrated
