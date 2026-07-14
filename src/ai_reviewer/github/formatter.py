@@ -196,20 +196,18 @@ class GitHubFormatter:
         return "\n".join(content)
 
     def _format_header(self, review: ConsolidatedReview) -> str:
-        """Format the review header."""
-        consensus_pct = int(review.review_quality_score * 100)
+        """Format the review header.
+
+        The composite quality score is deliberately not shown: it folds review
+        setup (agent count) into a code-quality-looking percentage that readers
+        cannot act on. It remains available in the JSON export.
+        """
         time_sec = review.total_review_time_ms / 1000
 
         if review.id == "lgtm-fast-path":
-            return (
-                f"**All previous comments resolved** | Quality score (this pass): {consensus_pct}%"
-            )
+            return "**All previous comments resolved**"
 
-        return (
-            f"**Reviewed by {review.agent_count} agents** | "
-            f"Quality score (this pass): {consensus_pct}% | "
-            f"Review time: {time_sec:.1f}s"
-        )
+        return f"**Reviewed by {review.agent_count} agents** | Review time: {time_sec:.1f}s"
 
     def _format_severity_section(
         self, severity: Severity, findings: list, agent_count: int
