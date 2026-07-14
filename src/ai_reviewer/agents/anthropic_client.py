@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -41,6 +42,14 @@ _ALWAYS_THINKING_MODELS = {"claude-fable-5", "claude-mythos-5"}
 # Adaptive thinking shares max_tokens with the response; the default effort "high"
 # can exhaust the budget and truncate the findings JSON, so cap thinking effort here.
 _THINKING_EFFORT = "medium"
+
+
+# Server-side grammar (JSON-schema constrained decoding) compilation can time out on
+# large context + schema requests, returning a 400. The SDK's max_retries only covers
+# 408/429/5xx, so it never retries this; Anthropic's guidance treats it as often
+# transient, so we retry it specifically here.
+_GRAMMAR_TIMEOUT_MARKER = "Grammar compilation timed out"
+_GRAMMAR_TIMEOUT_MAX_RETRIES = 2
 
 
 # Summary markers for reviews that did NOT complete. aggregate_findings() treats
@@ -131,9 +140,24 @@ class AnthropicClient:
         and can deliver a corrupted/partial body that fails JSON parsing. The
         stream helper accumulates the response cleanly and returns the same
         Message object messages.create() would, so callers are unchanged.
+
+        A "Grammar compilation timed out" 400 is retried here (see
+        _GRAMMAR_TIMEOUT_MARKER); any other error propagates immediately.
         """
-        async with self._sdk.messages.stream(**kwargs) as stream:
-            return await stream.get_final_message()
+        for attempt in range(1, _GRAMMAR_TIMEOUT_MAX_RETRIES + 2):
+            try:
+                async with self._sdk.messages.stream(**kwargs) as stream:
+                    return await stream.get_final_message()
+            except anthropic.BadRequestError as exc:
+                retriable = _GRAMMAR_TIMEOUT_MARKER in str(exc)
+                if not retriable or attempt > _GRAMMAR_TIMEOUT_MAX_RETRIES:
+                    raise
+                logger.warning(
+                    "Grammar compilation timed out, retrying (%d/%d)",
+                    attempt,
+                    _GRAMMAR_TIMEOUT_MAX_RETRIES,
+                )
+                await asyncio.sleep(attempt)  # 1s, 2s backoff
 
     async def run_completion(
         self,
