@@ -6,19 +6,48 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 _FUZZY_WORD_RE = re.compile(r"\b\w{4,}\b")
+_FUZZY_SYMBOL_RE = re.compile(r"`([\w.]+)`")
+_LINE_BUCKET_SIZE = 20
 
 
-def compute_fuzzy_hash(file_path: str, title: str) -> str | None:
-    """12-char hex SHA256 key from file path and title keywords for fuzzy matching.
+def compute_fuzzy_hash(
+    file_path: str,
+    title: str,
+    category: str | None = None,
+    line_start: int | None = None,
+) -> str | None:
+    """Substance-stable 12-char SHA256 key for cross-run fuzzy matching.
 
-    Returns None when file_path or title is empty. Uses words of 4+ characters
-    from the title; when none match, falls back to the lowercased stripped title.
+    Keys on substance rather than exact title wording so a re-worded re-raise
+    of the same issue hashes the same. The symbol component is up to 3
+    backtick-quoted identifiers from the title (sorted); when the title has no
+    backticked identifiers it falls back to sorted 4+ char title keywords so
+    prose titles still hash meaningfully.
+
+    ``category`` and ``line_start`` are optional and only fold into the key when
+    supplied (line_bucket = line_start // 20, stable under small drift). Callers
+    that lack them - e.g. previous comments parsed from posted text - simply omit
+    them, and two callers that both omit them produce identical hashes.
+
+    Returns None when file_path or title is empty.
     """
     if not file_path or not title:
         return None
-    words = sorted(set(_FUZZY_WORD_RE.findall(title.lower())))
-    word_key = ":".join(words[:5]) if words else title.lower().strip()
-    key = f"{file_path}:{word_key}"
+    idents = sorted(set(_FUZZY_SYMBOL_RE.findall(title)))[:3]
+    if idents:
+        symbol_key = ":".join(idents)
+    else:
+        words = sorted(set(_FUZZY_WORD_RE.findall(title.lower())))
+        symbol_key = ":".join(words[:5]) if words else title.lower().strip()
+
+    parts = [file_path]
+    cat_key = (category or "").lower().strip()
+    if cat_key:
+        parts.append(cat_key)
+    if line_start:
+        parts.append(str(line_start // _LINE_BUCKET_SIZE))
+    parts.append(symbol_key)
+    key = ":".join(parts)
     return hashlib.sha256(key.encode()).hexdigest()[:12]
 
 
@@ -111,10 +140,12 @@ class ConsolidatedFinding:
 
     @property
     def finding_hash_fuzzy(self) -> str | None:
-        """Fuzzy hash ignoring line number and category for cross-run matching.
+        """Substance-stable fuzzy hash for cross-run matching.
 
-        Uses file_path + sorted title keywords (4+ chars) so the hash stays
-        stable when a finding drifts lines or gets recategorized between runs.
+        Keys on file_path + title symbols (see compute_fuzzy_hash) so a re-worded
+        re-raise of the same issue matches across runs. category/line_start are
+        deliberately omitted: the matching side (PreviousComment, parsed from
+        posted text) cannot recover them, and both sides must hash identically.
         Returns None when file_path or title is empty (mirrors PreviousComment).
         """
         return compute_fuzzy_hash(self.file_path, self.title)

@@ -15,6 +15,7 @@ from ai_reviewer.review import (
     _detect_pr_type,
     _effective_agent_count,
     _raw_findings_similar,
+    _raw_text_similarity,
     _thresholds_for_run,
     _truncate_to_byte_limit,
     aggregate_findings,
@@ -96,6 +97,71 @@ class TestRawFindingsSimilar:
             "line_start": 10,
             "category": "performance",
             "title": "Issue found",
+        }
+        assert _raw_findings_similar(raw1, raw2) is False
+
+    def test_line_overlap_lowers_threshold_to_merge_reworded(self):
+        """Same file/lines/category with moderately similar (0.6+) text now clusters."""
+        raw1 = {
+            "file_path": "src/agg.py",
+            "line_start": 20,
+            "line_end": 24,
+            "category": "logic",
+            "title": "Aggregation shows false green on partial failure",
+            "description": "A failed shard is not reflected in the summary.",
+        }
+        raw2 = {
+            "file_path": "src/agg.py",
+            "line_start": 22,
+            "line_end": 26,
+            "category": "logic",
+            "title": "Aggregation shows false green when a shard fails",
+            "description": "One failing shard is hidden from the overall status.",
+        }
+        # Merges under the loosened (line-overlap) 0.6 bar.
+        assert _raw_findings_similar(raw1, raw2) is True
+        # The same moderately-similar pair would NOT merge at the strict 0.85 bar
+        # if the lines did not overlap; here they overlap so 0.6 wins regardless.
+        combined = _raw_text_similarity(raw1["title"], raw2["title"]) * 0.6 + (
+            _raw_text_similarity(raw1["description"], raw2["description"]) * 0.4
+        )
+        assert 0.6 <= combined < 0.85
+
+    def test_different_severities_still_cluster(self):
+        """Severity is not part of the similarity gate - differing severities merge."""
+        raw1 = {
+            "file_path": "src/agg.py",
+            "line_start": 20,
+            "category": "logic",
+            "severity": "critical",
+            "title": "False green aggregation",
+            "description": "Failed shard hidden.",
+        }
+        raw2 = {
+            "file_path": "src/agg.py",
+            "line_start": 21,
+            "category": "logic",
+            "severity": "warning",
+            "title": "False green aggregation",
+            "description": "Failed shard hidden.",
+        }
+        assert _raw_findings_similar(raw1, raw2) is True
+
+    def test_unrelated_findings_still_separate(self):
+        """A genuinely different issue in the same file/category does not merge."""
+        raw1 = {
+            "file_path": "src/agg.py",
+            "line_start": 20,
+            "category": "logic",
+            "title": "False green aggregation on partial failure",
+            "description": "Failed shard is hidden from the summary.",
+        }
+        raw2 = {
+            "file_path": "src/agg.py",
+            "line_start": 22,
+            "category": "logic",
+            "title": "Off-by-one in retry backoff counter",
+            "description": "The exponential backoff overshoots by one attempt.",
         }
         assert _raw_findings_similar(raw1, raw2) is False
 
@@ -470,6 +536,23 @@ class TestParseCrossReviewResponse:
         assert assessments == []
         assert summary == ""
 
+    def test_adjusted_severity_and_fix_ok_accepted(self):
+        """New optional keys pass through the parser."""
+        content = (
+            '{"assessments": [{"id": "f1", "valid": true, "rank": 1, '
+            '"adjusted_severity": "warning", "fix_ok": false}], "summary": "s"}'
+        )
+        assessments, _ = parse_cross_review_response(content)
+        assert assessments[0]["adjusted_severity"] == "warning"
+        assert assessments[0]["fix_ok"] is False
+
+    def test_missing_optional_keys_tolerated(self):
+        """Absent adjusted_severity/fix_ok simply are not present (no error)."""
+        content = '{"assessments": [{"id": "f1", "valid": true, "rank": 1}], "summary": "s"}'
+        assessments, _ = parse_cross_review_response(content)
+        assert "adjusted_severity" not in assessments[0]
+        assert "fix_ok" not in assessments[0]
+
 
 class TestApplyCrossReview:
     """Tests for apply_cross_review."""
@@ -556,6 +639,111 @@ class TestApplyCrossReview:
         all_assessments = [("a1", [{"id": "f1", "valid": True, "rank": 1}])]
         result = apply_cross_review(review, all_assessments)
         assert result.summary == review.summary
+
+    def test_downgrade_on_majority(self):
+        """Majority proposing a lower severity downgrades the finding (kept)."""
+        review = _make_review([_make_finding("f1", Severity.CRITICAL)])
+        all_assessments = [
+            ("a1", [{"id": "f1", "valid": True, "rank": 1, "adjusted_severity": "warning"}]),
+            ("a2", [{"id": "f1", "valid": True, "rank": 1, "adjusted_severity": "warning"}]),
+            ("a3", [{"id": "f1", "valid": True, "rank": 1}]),
+        ]
+        result = apply_cross_review(review, all_assessments)
+        assert len(result.findings) == 1
+        assert result.findings[0].severity == Severity.WARNING
+
+    def test_never_upgrades(self):
+        """A proposed higher severity is ignored (cross-review only downgrades)."""
+        review = _make_review([_make_finding("f1", Severity.SUGGESTION)])
+        all_assessments = [
+            ("a1", [{"id": "f1", "valid": True, "rank": 1, "adjusted_severity": "critical"}]),
+            ("a2", [{"id": "f1", "valid": True, "rank": 1, "adjusted_severity": "critical"}]),
+        ]
+        result = apply_cross_review(review, all_assessments)
+        assert result.findings[0].severity == Severity.SUGGESTION
+
+    def test_no_downgrade_without_majority(self):
+        """A single downgrade vote among several validators does not move severity."""
+        review = _make_review([_make_finding("f1", Severity.CRITICAL)])
+        all_assessments = [
+            ("a1", [{"id": "f1", "valid": True, "rank": 1, "adjusted_severity": "nitpick"}]),
+            ("a2", [{"id": "f1", "valid": True, "rank": 1}]),
+            ("a3", [{"id": "f1", "valid": True, "rank": 1}]),
+        ]
+        result = apply_cross_review(review, all_assessments)
+        assert result.findings[0].severity == Severity.CRITICAL
+
+    def test_fix_stripped_on_fix_ok_false_majority(self):
+        """Majority fix_ok=false drops the suggested_fix (finding stays)."""
+        f = _make_finding("f1", Severity.WARNING)
+        f.suggested_fix = "anchor the regex with \\b"
+        review = _make_review([f])
+        all_assessments = [
+            ("a1", [{"id": "f1", "valid": True, "rank": 1, "fix_ok": False}]),
+            ("a2", [{"id": "f1", "valid": True, "rank": 1, "fix_ok": False}]),
+            ("a3", [{"id": "f1", "valid": True, "rank": 1, "fix_ok": True}]),
+        ]
+        result = apply_cross_review(review, all_assessments)
+        assert len(result.findings) == 1
+        assert result.findings[0].suggested_fix is None
+
+    def test_fix_kept_when_no_false_majority(self):
+        """A minority fix_ok=false keeps the suggested_fix."""
+        f = _make_finding("f1", Severity.WARNING)
+        f.suggested_fix = "use parameterized query"
+        review = _make_review([f])
+        all_assessments = [
+            ("a1", [{"id": "f1", "valid": True, "rank": 1, "fix_ok": False}]),
+            ("a2", [{"id": "f1", "valid": True, "rank": 1, "fix_ok": True}]),
+            ("a3", [{"id": "f1", "valid": True, "rank": 1, "fix_ok": True}]),
+        ]
+        result = apply_cross_review(review, all_assessments)
+        assert result.findings[0].suggested_fix == "use parameterized query"
+
+    def test_critical_security_bypass_not_downgraded(self):
+        """CRITICAL+SECURITY findings keep their severity and fix despite adjustment votes."""
+        f = _make_finding("f1", Severity.CRITICAL)
+        f.category = Category.SECURITY
+        f.suggested_fix = "sanitize input"
+        review = _make_review([f])
+        all_assessments = [
+            (
+                "a1",
+                [
+                    {
+                        "id": "f1",
+                        "valid": True,
+                        "rank": 1,
+                        "adjusted_severity": "nitpick",
+                        "fix_ok": False,
+                    }
+                ],
+            ),
+            (
+                "a2",
+                [
+                    {
+                        "id": "f1",
+                        "valid": True,
+                        "rank": 1,
+                        "adjusted_severity": "nitpick",
+                        "fix_ok": False,
+                    }
+                ],
+            ),
+        ]
+        result = apply_cross_review(review, all_assessments)
+        assert len(result.findings) == 1
+        assert result.findings[0].severity == Severity.CRITICAL
+        assert result.findings[0].suggested_fix == "sanitize input"
+
+    def test_legacy_plain_valid_rank_still_parses(self):
+        """Old-style assessments without adjusted_severity/fix_ok still apply."""
+        review = _make_review([_make_finding("f1", Severity.WARNING)])
+        all_assessments = [("a1", [{"id": "f1", "valid": True, "rank": 1}])]
+        result = apply_cross_review(review, all_assessments)
+        assert len(result.findings) == 1
+        assert result.findings[0].severity == Severity.WARNING
 
     def test_summary_appends_when_dropped(self):
         """When only dropping (no reorder), summary should not claim 're-ranked'."""
@@ -736,6 +924,28 @@ class TestGetCrossReviewPrompt:
         assert excerpt.endswith("a" * 30)
         assert not excerpt.endswith("b")
 
+    def test_prompt_contains_refute_and_reachability_language(self):
+        context = ReviewContext(
+            repo_name="test/repo",
+            pr_number=1,
+            pr_title="Title",
+            pr_description="",
+            base_branch="main",
+            head_branch="feature",
+            author="dev",
+            changed_files_count=1,
+            additions=10,
+            deletions=2,
+        )
+        review = _make_review([_make_finding("finding-1")])
+        prompt = get_cross_review_prompt(context, review, "diff")
+        lowered = prompt.lower()
+        assert "refute" in lowered
+        assert "reachable" in lowered
+        assert "concrete" in lowered
+        assert "adjusted_severity" in prompt
+        assert "fix_ok" in prompt
+
 
 class TestEffectiveAgentCount:
     """Tests for _effective_agent_count."""
@@ -792,10 +1002,11 @@ def _make_raw_finding(
     confidence: float = 0.8,
     file_path: str = "src/foo.py",
     title: str = "Test issue",
+    line_start: int = 10,
 ) -> dict:
     return {
         "file_path": file_path,
-        "line_start": 10,
+        "line_start": line_start,
         "severity": severity,
         "category": "logic",
         "title": title,
@@ -896,10 +1107,10 @@ class TestConfidenceFiltering:
             (
                 "agent-1",
                 [
-                    _make_raw_finding("critical", 0.3),
-                    _make_raw_finding("warning", 0.4, title="Warning issue"),
-                    _make_raw_finding("suggestion", 0.5, title="Suggestion issue"),
-                    _make_raw_finding("nitpick", 0.6, title="Nit: Style issue"),
+                    _make_raw_finding("critical", 0.3, line_start=10),
+                    _make_raw_finding("warning", 0.4, title="Warning issue", line_start=40),
+                    _make_raw_finding("suggestion", 0.5, title="Suggestion issue", line_start=70),
+                    _make_raw_finding("nitpick", 0.6, title="Nit: Style issue", line_start=100),
                 ],
                 "summary",
             ),
@@ -913,9 +1124,11 @@ class TestConfidenceFiltering:
             (
                 "agent-1",
                 [
-                    _make_raw_finding("critical", 0.95),
-                    _make_raw_finding("nitpick", 0.5, title="Nit: Low confidence nit"),
-                    _make_raw_finding("warning", 0.9, title="High conf warning"),
+                    _make_raw_finding("critical", 0.95, line_start=10),
+                    _make_raw_finding(
+                        "nitpick", 0.5, title="Nit: Low confidence nit", line_start=40
+                    ),
+                    _make_raw_finding("warning", 0.9, title="High conf warning", line_start=70),
                 ],
                 "summary",
             ),

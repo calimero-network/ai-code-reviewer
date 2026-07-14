@@ -201,11 +201,13 @@ class GitHubFormatter:
         time_sec = review.total_review_time_ms / 1000
 
         if review.id == "lgtm-fast-path":
-            return f"**All previous comments resolved** | Quality score: {consensus_pct}%"
+            return (
+                f"**All previous comments resolved** | Quality score (this pass): {consensus_pct}%"
+            )
 
         return (
             f"**Reviewed by {review.agent_count} agents** | "
-            f"Quality score: {consensus_pct}% | "
+            f"Quality score (this pass): {consensus_pct}% | "
             f"Review time: {time_sec:.1f}s"
         )
 

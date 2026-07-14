@@ -289,3 +289,68 @@ class TestFindingHashFuzzy:
         f1 = _make_consolidated_finding(line_start=10)
         f2 = _make_consolidated_finding(line_start=50)
         assert f1.finding_hash != f2.finding_hash  # Primary IS line-sensitive
+
+
+class TestComputeFuzzyHash:
+    """Tests for the substance-stable compute_fuzzy_hash."""
+
+    def test_reworded_same_symbol_same_hash(self):
+        """Different wording, same backticked symbol/file/category/nearby lines -> same hash."""
+        from ai_reviewer.models.findings import compute_fuzzy_hash
+
+        h1 = compute_fuzzy_hash(
+            "src/app.py", "`aggregate` returns false green", category="logic", line_start=40
+        )
+        h2 = compute_fuzzy_hash(
+            "src/app.py", "Bug in `aggregate` hides failures", category="logic", line_start=45
+        )
+        assert h1 == h2
+
+    def test_different_symbol_differs(self):
+        """A different backticked symbol yields a different hash."""
+        from ai_reviewer.models.findings import compute_fuzzy_hash
+
+        h1 = compute_fuzzy_hash(
+            "src/app.py", "`aggregate` is wrong", category="logic", line_start=40
+        )
+        h2 = compute_fuzzy_hash("src/app.py", "`combine` is wrong", category="logic", line_start=40)
+        assert h1 != h2
+
+    def test_far_line_bucket_differs(self):
+        """Same symbol far away (different line bucket) yields a different hash."""
+        from ai_reviewer.models.findings import compute_fuzzy_hash
+
+        h1 = compute_fuzzy_hash(
+            "src/app.py", "`aggregate` is wrong", category="logic", line_start=40
+        )
+        h2 = compute_fuzzy_hash(
+            "src/app.py", "`aggregate` is wrong", category="logic", line_start=200
+        )
+        assert h1 != h2
+
+    def test_no_backtick_falls_back_to_keyword_behavior(self):
+        """A prose title (no backticks) reproduces the legacy file+keyword hash."""
+        import hashlib
+
+        from ai_reviewer.models.findings import compute_fuzzy_hash
+
+        title = "SQL injection vulnerability found"
+        got = compute_fuzzy_hash("src/db.py", title)
+        words = sorted({"injection", "vulnerability", "found"})
+        legacy_key = f"src/db.py:{':'.join(words[:5])}"
+        expected = hashlib.sha256(legacy_key.encode()).hexdigest()[:12]
+        assert got == expected
+
+    def test_two_arg_callers_stay_consistent(self):
+        """Both delta sides call with (file_path, title) only -> identical hashes."""
+        from ai_reviewer.models.findings import compute_fuzzy_hash
+
+        current = compute_fuzzy_hash("src/db.py", "Missing `guard` on `flush`")
+        previous = compute_fuzzy_hash("src/db.py", "Missing `guard` on `flush`")
+        assert current == previous is not None
+
+    def test_empty_inputs_return_none(self):
+        from ai_reviewer.models.findings import compute_fuzzy_hash
+
+        assert compute_fuzzy_hash("", "title") is None
+        assert compute_fuzzy_hash("f.py", "") is None

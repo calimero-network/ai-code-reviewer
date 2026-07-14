@@ -16,6 +16,7 @@ Severity semantics: see ai_reviewer.models.findings.Severity.
 """
 
 import asyncio
+import contextlib
 import fnmatch
 import json
 import logging
@@ -261,9 +262,13 @@ def get_cross_review_prompt(
     findings_blob = []
     for i, f in enumerate(review.findings[:_CROSS_REVIEW_MAX_FINDINGS], 1):
         line_ref = f"{f.line_start}" + (f"-{f.line_end}" if f.line_end else "")
-        findings_blob.append(
-            f"{i}. [id={f.id}] {f.file_path}:{line_ref} [{f.severity.value}] {f.title}\n   {f.description}"
+        entry = (
+            f"{i}. [id={f.id}] {f.file_path}:{line_ref} [{f.severity.value}] {f.title}\n"
+            f"   {f.description}"
         )
+        if f.suggested_fix:
+            entry += f"\n   Suggested fix: {f.suggested_fix}"
+        findings_blob.append(entry)
     findings_text = "\n".join(findings_blob)
 
     # Truncate at newline boundary only when we actually truncated (avoid dropping last line when diff fits)
@@ -271,7 +276,7 @@ def get_cross_review_prompt(
     if len(diff) > _CROSS_REVIEW_DIFF_MAX_CHARS and "\n" in diff_excerpt:
         diff_excerpt = diff_excerpt.rsplit("\n", 1)[0]
 
-    return f"""You are in a **cross-review round**. Multiple agents already produced the findings below for this PR. Your job is to validate them and rank by importance.
+    return f"""You are in an **adversarial cross-review round**. Multiple agents already produced the findings below. Do NOT rank them by gut feel - **try to REFUTE each one**.
 
 ## PR
 - **Repo**: {context.repo_name} | **PR #{context.pr_number}**: {context.pr_title}
@@ -282,14 +287,19 @@ def get_cross_review_prompt(
 {diff_excerpt}
 ```
 
-## Findings to validate and rank
+## Findings to verify
 {findings_text}
 
-For each finding, decide:
-1. **Valid** (true/false): Does it make sense? Does it follow review best practices (concrete, actionable, not nitpicky)? Would you keep it in the final report?
-2. **Rank** (integer): Importance for the author, 1 = most important. Ties allowed.
+For EACH finding, attempt to prove it wrong before you accept it:
 
-Output the list of assessments in the exact JSON format below (use the finding `id` from the list, e.g. finding-1, finding-2).
+1. **valid** (true/false): Mark true ONLY if you can state a CONCRETE, REACHABLE failure scenario - specific inputs or state that lead to a specific wrong output or behavior. Vague risk ("this could be unsafe", "might be a problem") does NOT qualify. If the failure state is unreachable (e.g. every path to it already fails an earlier check or higher-priority guard), or you cannot construct a concrete scenario, mark **false**.
+2. **reason**: One sentence - the concrete failure scenario if valid, or why it is unreachable/not a real bug if invalid.
+3. **adjusted_severity** (optional): one of critical/warning/suggestion/nitpick. Set this ONLY when the finding is real but over-weighted and should be *downgraded* (e.g. a "critical" that is really a suggestion). Omit it if the severity is fine. Cross-review never raises severity.
+4. **fix_ok** (optional, only if the finding has a suggested fix): reason about whether the fix actually closes the failure scenario AND does not break adjacent behavior. Set false if the fix is wrong, incomplete, or introduces a regression (e.g. a regex anchor that still matches the bad token, or a change that degrades the workflow). Omit or set true if the fix is sound.
+
+Rank by importance implicitly via `rank` (1 = most important). A finding you cannot refute AND cannot make concrete stays valid but should rank low.
+
+Output the assessments in the exact JSON format below (use the finding `id` from the list, e.g. finding-1, finding-2).
 """
 
 
@@ -297,11 +307,14 @@ def get_cross_review_output_format() -> str:
     """JSON schema for cross-review round response."""
     return """
 ## Output format (valid JSON only, no markdown fences)
-{"assessments": [{"id": "finding-1", "valid": true, "rank": 1}, {"id": "finding-2", "valid": false, "rank": 5}, ...], "summary": "One sentence on overall quality of the findings."}
+{"assessments": [{"id": "finding-1", "valid": true, "rank": 1, "reason": "concrete scenario", "adjusted_severity": "warning", "fix_ok": true}, {"id": "finding-2", "valid": false, "rank": 5, "reason": "failure state unreachable"}], "summary": "One sentence on overall quality of the findings."}
 
 - "id" must match the finding id from the list (e.g. finding-1, finding-2).
-- "valid": true if the finding should stay in the report, false if it should be dropped or is not actionable.
+- "valid": true only when you stated a concrete, reachable failure scenario; false to drop it.
 - "rank": integer, 1 = most important. Lower rank = higher priority.
+- "reason": one sentence justifying valid/invalid.
+- "adjusted_severity" (optional): critical/warning/suggestion/nitpick - include ONLY to downgrade an over-weighted finding.
+- "fix_ok" (optional): false when the finding's suggested fix is wrong or would break adjacent behavior.
 - Include every finding id from the list in assessments.
 """
 
@@ -341,6 +354,10 @@ def apply_cross_review(
     """Filter and re-rank findings using cross-review assessments.
 
     - Drops findings where the fraction of agents that said valid is < min_validation_agreement.
+    - Downgrade-only severity adjustment: when a majority of assessing agents propose a
+      same-or-lower severity, the finding is lowered (never raised).
+    - Strips a finding's suggested_fix when a majority of assessing agents mark fix_ok false
+      (a wrong patch is worse than none); the drop is silent to the author, logged at INFO.
     - Re-orders by average rank (1 = first), then by severity.
     - Findings with no votes (e.g. omitted by all agents) are kept but assigned rank 99
       and appear at the end; assessments may use "id" or "finding_id" for the finding key.
@@ -348,11 +365,22 @@ def apply_cross_review(
     if not all_assessments:
         return review
 
+    # Priority order: lower number = more severe. Used for ranking and downgrade checks.
+    severity_order = {
+        Severity.CRITICAL: 0,
+        Severity.WARNING: 1,
+        Severity.SUGGESTION: 2,
+        Severity.NITPICK: 3,
+    }
+
     finding_ids = [f.id for f in review.findings]
     id_to_finding = {f.id: f for f in review.findings}
 
-    # Per finding: list of (valid, rank) from each agent
+    # Per finding: list of (valid, rank) from each agent, plus optional
+    # adjusted-severity and fix_ok proposals (only recorded when present).
     id_to_votes: dict[str, list[tuple[bool, int]]] = {fid: [] for fid in finding_ids}
+    id_to_sev_props: dict[str, list[Severity]] = {fid: [] for fid in finding_ids}
+    id_to_fix_votes: dict[str, list[bool]] = {fid: [] for fid in finding_ids}
 
     for _agent_name, assessments in all_assessments:
         for a in assessments:
@@ -369,6 +397,46 @@ def apply_cross_review(
             rank = a.get("rank", 99)
             rank = max(1, int(rank)) if isinstance(rank, (int, float)) else 99
             id_to_votes[fid].append((valid, rank))
+
+            raw_sev = a.get("adjusted_severity")
+            if isinstance(raw_sev, str):
+                with contextlib.suppress(ValueError):
+                    id_to_sev_props[fid].append(Severity(raw_sev.lower().strip()))
+
+            if "fix_ok" in a:
+                raw_fix = a["fix_ok"]
+                if isinstance(raw_fix, bool):
+                    id_to_fix_votes[fid].append(raw_fix)
+                elif isinstance(raw_fix, str):
+                    id_to_fix_votes[fid].append(raw_fix.lower() in ("true", "1", "yes"))
+
+    def _apply_downgrade_and_fix(finding: ConsolidatedFinding, n_votes: int) -> None:
+        """Downgrade-only severity + drop a fix the majority flagged as broken."""
+        props = id_to_sev_props.get(finding.id, [])
+        current = severity_order.get(finding.severity, 4)
+        same_or_lower = [s for s in props if severity_order.get(s, 4) >= current]
+        downgrades = [s for s in props if severity_order.get(s, 4) > current]
+        # Majority of assessing agents propose same-or-lower, and at least one is a real downgrade.
+        if downgrades and len(same_or_lower) * 2 > n_votes:
+            # Least-aggressive downgrade the majority supports (most severe of the proposals).
+            target = min(downgrades, key=lambda s: severity_order.get(s, 4))
+            logger.info(
+                "Cross-review downgraded %s %s -> %s",
+                finding.id,
+                finding.severity.value,
+                target.value,
+            )
+            finding.severity = target
+
+        fix_votes = id_to_fix_votes.get(finding.id, [])
+        if finding.suggested_fix and fix_votes:
+            false_count = sum(1 for ok in fix_votes if not ok)
+            if false_count * 2 > len(fix_votes):
+                logger.info(
+                    "Cross-review withdrew suggested fix for %s (fix_ok false majority)",
+                    finding.id,
+                )
+                finding.suggested_fix = None
 
     kept: list[tuple[ConsolidatedFinding, float, float]] = []  # (finding, valid_ratio, avg_rank)
 
@@ -388,16 +456,11 @@ def apply_cross_review(
         valid_ratio = valid_count / len(votes) if votes else 1.0
         if valid_ratio < min_validation_agreement:
             continue  # Drop finding
+        _apply_downgrade_and_fix(finding, len(votes))
         avg_rank = sum(r for _, r in votes) / len(votes) if votes else 99.0
         kept.append((finding, valid_ratio, avg_rank))
 
     # Sort by avg_rank ascending, then by severity (critical first)
-    severity_order = {
-        Severity.CRITICAL: 0,
-        Severity.WARNING: 1,
-        Severity.SUGGESTION: 2,
-        Severity.NITPICK: 3,
-    }
     kept.sort(key=lambda x: (x[2], severity_order.get(x[0].severity, 4)))
 
     new_findings = [x[0] for x in kept]
@@ -477,8 +540,20 @@ def _raw_text_similarity(text1: str, text2: str) -> float:
     return SequenceMatcher(None, text1.lower(), text2.lower()).ratio()
 
 
+# When file + lines + category all match, the substance is almost always the
+# same even if the wording (and severity) differ, so a lower text bar merges the
+# reworded duplicates that the 0.85 gate used to let through.
+_LINE_OVERLAP_SIMILARITY_THRESHOLD = 0.6
+
+
 def _raw_findings_similar(raw1: dict, raw2: dict, threshold: float = _SIMILARITY_THRESHOLD) -> bool:
-    """Check if two raw findings describe the same issue (for consensus clustering)."""
+    """Check if two raw findings describe the same issue (for consensus clustering).
+
+    Severity is intentionally not part of the gate - a finding raised at
+    different severities across passes is still the same substance and should
+    merge. When file + category match AND the lines overlap (+/-5), the text
+    bar drops to 0.6; without line overlap the stricter default (0.85) holds.
+    """
     path1 = _normalize_path(raw1.get("file_path", ""))
     path2 = _normalize_path(raw2.get("file_path", ""))
     if path1 != path2:
@@ -489,9 +564,6 @@ def _raw_findings_similar(raw1: dict, raw2: dict, threshold: float = _SIMILARITY
     if cat1 != cat2:
         return False
 
-    if not _raw_lines_overlap(raw1, raw2):
-        return False
-
     title1 = (raw1.get("title") or "").strip()
     title2 = (raw2.get("title") or "").strip()
     desc1 = (raw1.get("description") or "").strip()
@@ -499,7 +571,13 @@ def _raw_findings_similar(raw1: dict, raw2: dict, threshold: float = _SIMILARITY
     title_sim = _raw_text_similarity(title1, title2)
     desc_sim = _raw_text_similarity(desc1, desc2)
     combined = (title_sim * 0.6) + (desc_sim * 0.4)
-    return combined >= threshold
+
+    effective = (
+        min(threshold, _LINE_OVERLAP_SIMILARITY_THRESHOLD)
+        if _raw_lines_overlap(raw1, raw2)
+        else threshold
+    )
+    return combined >= effective
 
 
 def _cluster_raw_findings(

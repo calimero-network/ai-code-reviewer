@@ -354,6 +354,27 @@ class TestReviewFormatter:
         # Should indicate clean review
         assert "No issues" in comment or "LGTM" in comment or "✅" in comment
 
+    def test_quality_score_labeled_per_pass(self):
+        """Header labels the score 'this pass' so carried-over re-raises don't read as absolute."""
+        from datetime import datetime
+
+        from ai_reviewer.github.formatter import GitHubFormatter
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        review = ConsolidatedReview(
+            id="review-123",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[],
+            summary="No issues found",
+            agent_count=3,
+            review_quality_score=0.82,
+            total_review_time_ms=2500,
+        )
+        comment = GitHubFormatter().format_review(review)
+        assert "Quality score (this pass):" in comment
+
     def test_format_review_compact_is_short_with_inline_hint(self):
         """Compact format used when posting inline comments: short body + 'See inline'."""
         from datetime import datetime
