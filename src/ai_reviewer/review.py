@@ -522,11 +522,15 @@ def _cluster_raw_findings(
     return clusters
 
 
+# Noise floor only. The 3-agent cross-review round is the real precision gate;
+# these just cut the lowest-confidence chaff before it runs. Sonnet 5 reports
+# systematically low self-confidence (real findings land at 0.3-0.55), so these
+# sit well below the model's numbers — higher floors silently ate ~65 findings/day.
 CONFIDENCE_THRESHOLDS: dict[Severity, float] = {
-    Severity.CRITICAL: 0.5,
-    Severity.WARNING: 0.6,
-    Severity.SUGGESTION: 0.7,
-    Severity.NITPICK: 0.8,
+    Severity.CRITICAL: 0.3,
+    Severity.WARNING: 0.4,
+    Severity.SUGGESTION: 0.5,
+    Severity.NITPICK: 0.6,
 }
 
 

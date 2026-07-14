@@ -812,10 +812,10 @@ class TestConfidenceFiltering:
         assert Severity.NITPICK in CONFIDENCE_THRESHOLDS
 
     def test_default_threshold_values(self):
-        assert CONFIDENCE_THRESHOLDS[Severity.CRITICAL] == 0.5
-        assert CONFIDENCE_THRESHOLDS[Severity.WARNING] == 0.6
-        assert CONFIDENCE_THRESHOLDS[Severity.SUGGESTION] == 0.7
-        assert CONFIDENCE_THRESHOLDS[Severity.NITPICK] == 0.8
+        assert CONFIDENCE_THRESHOLDS[Severity.CRITICAL] == 0.3
+        assert CONFIDENCE_THRESHOLDS[Severity.WARNING] == 0.4
+        assert CONFIDENCE_THRESHOLDS[Severity.SUGGESTION] == 0.5
+        assert CONFIDENCE_THRESHOLDS[Severity.NITPICK] == 0.6
 
     def test_high_confidence_findings_kept(self):
         """Findings at or above their severity threshold are kept."""
@@ -826,33 +826,33 @@ class TestConfidenceFiltering:
         assert len(result.findings) == 1
 
     def test_low_confidence_critical_dropped(self):
-        """Critical finding below 0.5 confidence is dropped."""
+        """Critical finding below 0.3 confidence is dropped."""
         all_findings = [
-            ("agent-1", [_make_raw_finding("critical", 0.4)], "summary"),
+            ("agent-1", [_make_raw_finding("critical", 0.2)], "summary"),
         ]
         result = aggregate_findings(all_findings, "test/repo", 1)
         assert len(result.findings) == 0
 
     def test_low_confidence_warning_dropped(self):
-        """Warning finding below 0.6 confidence is dropped."""
+        """Warning finding below 0.4 confidence is dropped."""
         all_findings = [
-            ("agent-1", [_make_raw_finding("warning", 0.5)], "summary"),
+            ("agent-1", [_make_raw_finding("warning", 0.3)], "summary"),
         ]
         result = aggregate_findings(all_findings, "test/repo", 1)
         assert len(result.findings) == 0
 
     def test_low_confidence_suggestion_dropped(self):
-        """Suggestion finding below 0.7 confidence is dropped."""
+        """Suggestion finding below 0.5 confidence is dropped."""
         all_findings = [
-            ("agent-1", [_make_raw_finding("suggestion", 0.6)], "summary"),
+            ("agent-1", [_make_raw_finding("suggestion", 0.4)], "summary"),
         ]
         result = aggregate_findings(all_findings, "test/repo", 1)
         assert len(result.findings) == 0
 
     def test_low_confidence_nitpick_dropped(self):
-        """Nitpick finding below 0.8 confidence is dropped."""
+        """Nitpick finding below 0.6 confidence is dropped."""
         all_findings = [
-            ("agent-1", [_make_raw_finding("nitpick", 0.7)], "summary"),
+            ("agent-1", [_make_raw_finding("nitpick", 0.5)], "summary"),
         ]
         result = aggregate_findings(all_findings, "test/repo", 1)
         assert len(result.findings) == 0
@@ -863,10 +863,10 @@ class TestConfidenceFiltering:
             (
                 "agent-1",
                 [
-                    _make_raw_finding("critical", 0.5),
-                    _make_raw_finding("warning", 0.6, title="Warning issue"),
-                    _make_raw_finding("suggestion", 0.7, title="Suggestion issue"),
-                    _make_raw_finding("nitpick", 0.8, title="Nit: Style issue"),
+                    _make_raw_finding("critical", 0.3),
+                    _make_raw_finding("warning", 0.4, title="Warning issue"),
+                    _make_raw_finding("suggestion", 0.5, title="Suggestion issue"),
+                    _make_raw_finding("nitpick", 0.6, title="Nit: Style issue"),
                 ],
                 "summary",
             ),
