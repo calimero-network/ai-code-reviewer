@@ -119,6 +119,17 @@ agent = MyAgent(
 review = await agent.review(diff="", file_contents={}, context=ctx)
 ```
 
+### Grammar Compilation Timeout Handling
+
+`AnthropicClient._create_message()` automatically retries when a `BadRequestError` with the message "Grammar compilation timed out" is encountered. The retry logic:
+
+- Retries up to 2 additional times (`_GRAMMAR_TIMEOUT_MAX_RETRIES = 2`)
+- Uses incremental backoff: 1 second, then 2 seconds
+- Re-raises the error if retries are exhausted
+- **Fails immediately** for all other errors, including other `400` errors
+
+This retry is transparent to agents and handles transient grammar compilation failures without requiring changes to agent code.
+
 ### Simple Completions
 
 For lightweight single-turn completions without tools or JSON schema (e.g., cross-review summarization), use `AnthropicClient.complete_simple()`:
@@ -138,6 +149,7 @@ This method:
 - Returns plain text (not structured JSON)
 - Logs token usage on every call
 - Respects prompt caching configuration (cache_control breakpoint on last system block)
+- Inherits grammar compilation timeout retry logic from `_create_message()`
 - Is useful for operations that must go through `AnthropicClient` for invariant I1 compliance but don't need full agent infrastructure
 
 ## Tool Registry Interface
