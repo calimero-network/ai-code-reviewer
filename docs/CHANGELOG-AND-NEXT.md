@@ -1,5 +1,32 @@
 # AI Code Reviewer – What Changed & What’s Next
 
+## 2026-07-14 - Sonnet 5 reliability + recall fixes
+
+### Migrated
+- **Models**: `claude-sonnet-4-6` → `claude-sonnet-5` for review agents; style agent stays on
+  `claude-haiku-4-5`.
+- **Thinking**: `claude-sonnet-5` supports only adaptive thinking. security-reviewer and
+  logic-reviewer now run with `thinking_enabled: true`, `max_tokens: 32000`, and
+  `output_config.effort: medium` so thinking doesn't starve the findings JSON. patterns,
+  performance, and style stay thinking-off.
+- **Default agent order**: `DEFAULT_AGENT_ORDER` reordered to security-reviewer,
+  logic-reviewer, patterns-reviewer, performance-reviewer, style-reviewer, so `--agents 3`
+  with no repo config runs security + logic + patterns.
+
+### Fixed
+- **Tool-loop salvage**: the final tool round now drops tool access instead of letting the
+  agent exit empty behind a "tool loop cap" marker, which used to discard the whole review.
+- **Confidence floors**: lowered per-severity floors (critical 0.3 / warning 0.4 / suggestion
+  0.5 / nitpick 0.6) restore recall lost to Sonnet 5's more conservative reporting, but only
+  when cross-review will run (≥ 3 effective agents). When cross-review is skipped (1-2
+  agents), floors fall back to the conservative set (0.5 / 0.6 / 0.7 / 0.8) since the
+  cross-review precision gate isn't there to catch false positives.
+- **Streaming + retries**: all Messages API calls now stream (`messages.stream` +
+  `get_final_message`) to stop dropped/corrupted responses on long generations, and dropped
+  API connections are retried with a widened webhook timeout.
+
+---
+
 ## 2026-04 — Anthropic Messages API migration
 
 ### Migrated

@@ -14,7 +14,7 @@ AI Code Reviewer takes a different approach to automated code review: instead of
 
 - **Multi-Agent Architecture**: Run 2–5+ LLM agents in parallel, each with a specialized focus area
 - **Consensus-Based Scoring**: Findings are weighted by how many agents agree, reducing false positives
-- **Anthropic Messages API**: All models (Claude Sonnet 4.6, Haiku 4.5) accessed directly via the official `anthropic` SDK, with prompt caching, JSON-schema structured output, and tool use
+- **Anthropic Messages API**: All models (Claude Sonnet 5, Haiku 4.5) accessed directly via the official `anthropic` SDK, streamed via `messages.stream`, with prompt caching, JSON-schema structured output, and tool use
 - **GitHub Integration**: Automatic PR reviews via webhooks, with inline comments and thread resolution
 - **Incremental Reviews**: Delta tracking detects new, fixed, and open findings across pushes — with convergence logic that stops reviewing when findings stabilize
 - **Documentation Review**: Rule-based check that flags missing doc updates on architecture-impacting PRs — works out-of-the-box on any repo by probing for `CLAUDE.md`, `AGENTS.md`, and architecture folders (zero LLM cost)
@@ -44,11 +44,11 @@ git diff main | ai-reviewer review --output markdown
 
 ## How It Works
 
-All LLM agents call Anthropic's Messages API directly via the official `anthropic` SDK. Security, performance, patterns, and logic agents run on `claude-sonnet-4-6`; the style agent uses `claude-haiku-4-5-20251001`. Repo exploration happens through Claude tool use (`read_file` / `glob` / `grep`) backed by the GitHub Contents API — no cloning, no extra infrastructure.
+All LLM agents call Anthropic's Messages API directly via the official `anthropic` SDK. Security, performance, patterns, and logic agents run on `claude-sonnet-5` (security and logic with adaptive extended thinking on); the style agent uses `claude-haiku-4-5`. Repo exploration happens through Claude tool use (`read_file` / `glob` / `grep`) backed by the GitHub Contents API — no cloning, no extra infrastructure.
 
 ```mermaid
 flowchart LR
-    PR["PR Diff"] --> Anthropic["Anthropic Messages API\n(claude-sonnet-4-6 / haiku-4-5)"]
+    PR["PR Diff"] --> Anthropic["Anthropic Messages API\n(claude-sonnet-5 / haiku-4-5)"]
 
     subgraph Agents["Parallel Agent Execution"]
         A1["Sonnet\n(Security)"]
@@ -76,7 +76,7 @@ Create `config.yaml`:
 ```yaml
 anthropic:
   api_key: ${ANTHROPIC_API_KEY}
-  default_model: claude-sonnet-4-6
+  default_model: claude-sonnet-5
   enable_prompt_caching: true
   max_combined_context_tokens: 80000
 
@@ -85,15 +85,15 @@ github:
 
 agents:
   - name: security-reviewer
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5
     focus_areas: [security, architecture]
 
   - name: performance-reviewer
-    model: claude-sonnet-4-6
+    model: claude-sonnet-5
     focus_areas: [performance, logic]
 
   - name: style-reviewer
-    model: claude-haiku-4-5-20251001
+    model: claude-haiku-4-5
     focus_areas: [style, readability]
     allow_tool_use: false
 
@@ -268,8 +268,8 @@ documentation:
 
 doc_generation:
   enabled: true
-  understanding_model: claude-sonnet-4-6   # stage 1: full-PR comprehension
-  apply_model: claude-haiku-4-5-20251001   # stage 3: drafting edits/pages
+  understanding_model: claude-sonnet-5     # stage 1: full-PR comprehension
+  apply_model: claude-haiku-4-5            # stage 3: drafting edits/pages
   allow_new_pages: true                    # may create + wire new pages
   verify_confidence_threshold: medium      # below this, flag for a human
   max_files: 5
