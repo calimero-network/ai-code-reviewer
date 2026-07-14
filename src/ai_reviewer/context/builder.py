@@ -287,7 +287,6 @@ def build_pr_map_block(files: dict[str, str], diff: str) -> str:
     at ``_PR_MAP_MAX_FILES`` files and ``_PR_MAP_MAX_BYTES`` bytes.
     """
     entries: list[dict[str, Any]] = []
-    by_path: dict[str, dict[str, Any]] = {}
     current: dict[str, Any] | None = None
     total_adds = total_dels = 0
 
@@ -296,7 +295,6 @@ def build_pr_map_block(files: dict[str, str], diff: str) -> str:
         if header:
             current = {"path": header.group(1), "adds": 0, "dels": 0, "symbols": []}
             entries.append(current)
-            by_path[current["path"]] = current
             continue
         if current is None:
             continue
