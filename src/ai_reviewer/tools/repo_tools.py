@@ -81,12 +81,14 @@ class ToolRegistry:
         agent_id: str,
         max_calls: int,
         per_file_max_bytes: int,
+        max_tool_result_bytes: int = 16 * 1024,
     ) -> None:
         self.session = session
         self.gh = github_client
         self.agent_id = agent_id
         self.max_calls = max_calls
         self.per_file_max_bytes = per_file_max_bytes
+        self.max_tool_result_bytes = max_tool_result_bytes
 
     def tool_specs(self) -> list[dict[str, Any]]:
         return TOOL_SPECS
@@ -99,12 +101,28 @@ class ToolRegistry:
         self.session.incr_tool_call(self.agent_id)
 
         if name == "read_file":
-            return self._read_file(tool_input["path"])
-        if name == "glob":
-            return self._glob(tool_input["pattern"])
-        if name == "grep":
-            return self._grep(tool_input["pattern"], tool_input["path_glob"])
-        raise ValueError(f"Unknown tool: {name}")
+            result = self._read_file(tool_input["path"])
+        elif name == "glob":
+            result = self._glob(tool_input["pattern"])
+        elif name == "grep":
+            result = self._grep(tool_input["pattern"], tool_input["path_glob"])
+        else:
+            raise ValueError(f"Unknown tool: {name}")
+        return self._cap_result(result)
+
+    def _cap_result(self, result: str) -> str:
+        # Every tool result re-enters the conversation and is re-sent on every
+        # later round, so a single oversized result can blow the whole context
+        # budget - cap at the model-facing boundary regardless of tool.
+        limit = self.max_tool_result_bytes
+        if len(result.encode("utf-8")) <= limit:
+            return result
+        truncated = result.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+        return (
+            f"{truncated}\n[output truncated at {limit} bytes - "
+            "use grep or a narrower glob pattern to find what you need "
+            "instead of reading the whole file]"
+        )
 
     def _read_file(self, path: str) -> str:
         # Block path traversal — the GitHub API would reject it too, but reject early

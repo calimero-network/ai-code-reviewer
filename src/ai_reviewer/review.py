@@ -1192,6 +1192,7 @@ async def review_pr(
                     agent_id=f"{agent_name}-{i}",
                     max_calls=max_tool_calls,
                     per_file_max_bytes=anthropic_cfg.per_file_max_bytes,
+                    max_tool_result_bytes=anthropic_cfg.max_tool_result_bytes,
                 )
                 if allow_tools
                 else None
