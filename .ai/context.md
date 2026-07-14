@@ -152,3 +152,6 @@ orchestrator:
 - `complete_simple(model, system, user, max_tokens, temperature)` → Lightweight completion with caching but no tools or schema; used for cross-review and other internal calls
 
 Both methods log token usage and support prompt caching when `enable_prompt_caching` is true.
+
+**Error handling:**
+- `_create_message()` retries the specific 'Grammar compilation timed out' 400 error up to 2 times (`_GRAMMAR_TIMEOUT_MAX_RETRIES`) with short incremental backoff (1s, 2s) before propagating. All other errors, including other 400s, fail immediately without retry.
