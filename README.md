@@ -44,7 +44,7 @@ git diff main | ai-reviewer review --output markdown
 
 ## How It Works
 
-All LLM agents call Anthropic's Messages API directly via the official `anthropic` SDK. Security, performance, patterns, and logic agents run on `claude-sonnet-5` (security and logic with adaptive extended thinking on); the style agent uses `claude-haiku-4-5`. Repo exploration happens through Claude tool use (`read_file` / `glob` / `grep`) backed by the GitHub Contents API — no cloning, no extra infrastructure.
+All LLM agents call Anthropic's Messages API directly via the official `anthropic` SDK. Security, performance, patterns, and logic agents run on `claude-sonnet-5` (security and logic with adaptive extended thinking on); the style agent uses `claude-haiku-4-5`. Repo exploration happens through Claude tool use (`read_file` / `glob` / `grep`) backed by the GitHub Contents API — no cloning, no extra infrastructure. Each tool result is capped at `max_tool_result_bytes` (16 KB default) before being fed back to the model; oversized results are truncated with a marker to narrow the search, preventing context bloat and ensuring agents focus on relevant snippets.
 
 ```mermaid
 flowchart LR
@@ -79,6 +79,7 @@ anthropic:
   default_model: claude-sonnet-5
   enable_prompt_caching: true
   max_combined_context_tokens: 80000
+  max_tool_result_bytes: 16384  # Cap per-tool-result size (16 KB default) fed back to agents
 
 github:
   token: ${GITHUB_TOKEN}  # or Classic PAT for thread resolution (see below)
@@ -135,7 +136,7 @@ ai-reviewer config show
 ## Output Example
 
 ```
-Reviewed by 3 agents  |  Quality score: 87%
+Reviewed by 3 agents in 45s
 
 CRITICAL (1)
   SQL Injection in auth/login.py:45  [3/3 agents]
@@ -150,6 +151,8 @@ SUGGESTION (3)
   Extract magic number 86400 to a named constant
   Add docstring to AuthHandler
 ```
+
+> **Note:** The review header shows agent count and review time. A quality score is computed internally and available via JSON export (`review_quality_score`), but is no longer rendered in posted GitHub reviews to avoid overconfidence in consensus metrics.
 
 ---
 
