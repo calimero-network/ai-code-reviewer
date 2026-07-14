@@ -553,8 +553,7 @@ def _thresholds_for_run(
     if cross_review_active:
         return base
     return {
-        sev: max(base.get(sev, 0.0), floor)
-        for sev, floor in _NO_CROSS_REVIEW_THRESHOLDS.items()
+        sev: max(base.get(sev, 0.0), floor) for sev, floor in _NO_CROSS_REVIEW_THRESHOLDS.items()
     }
 
 
