@@ -15,6 +15,7 @@ anthropic:
   enable_prompt_caching: true
   max_combined_context_tokens: 80000
   per_file_max_bytes: 524288
+  max_tool_result_bytes: 16384  # cap per-tool-result size fed back to model; results exceeding this are truncated with a 'narrow your search' marker
   per_review_github_request_budget: 200
 
 # ============================================================================
