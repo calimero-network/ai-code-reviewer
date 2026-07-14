@@ -1252,13 +1252,16 @@ def _build_shards(files: dict[str, str], diff: str) -> list[Shard]:
 def _raw_to_review_finding(raw: dict[str, Any]) -> ReviewFinding | None:
     """Build a ReviewFinding from a raw cross-shard finding dict; None if malformed."""
     try:
+        # severity/category/title are required - defaulting them would dress up
+        # malformed LLM output as a valid low-severity finding (same contract
+        # as _parse_findings in agents/base.py).
         return ReviewFinding(
             file_path=raw["file_path"],
             line_start=int(raw.get("line_start", 1)),
             line_end=int(raw["line_end"]) if raw.get("line_end") else None,
-            severity=Severity(str(raw.get("severity", "suggestion")).lower()),
-            category=Category(str(raw.get("category", "logic")).lower()),
-            title=raw.get("title", "Cross-shard issue"),
+            severity=Severity(str(raw["severity"]).lower()),
+            category=Category(str(raw["category"]).lower()),
+            title=raw["title"],
             description=raw.get("description", ""),
             suggested_fix=raw.get("suggested_fix"),
             confidence=float(raw.get("confidence", 0.6)),

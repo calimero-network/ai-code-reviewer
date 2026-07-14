@@ -1692,6 +1692,42 @@ def _fake_agent_cls(queue):
     return _FakeAgent
 
 
+class TestRawToReviewFinding:
+    """Malformed cross-shard findings are dropped, not dressed up with defaults."""
+
+    def test_missing_severity_dropped(self):
+        from ai_reviewer.review import _raw_to_review_finding
+
+        raw = {"file_path": "a.py", "line_start": 3, "category": "logic", "title": "t"}
+        assert _raw_to_review_finding(raw) is None
+
+    def test_missing_category_dropped(self):
+        from ai_reviewer.review import _raw_to_review_finding
+
+        raw = {"file_path": "a.py", "line_start": 3, "severity": "warning", "title": "t"}
+        assert _raw_to_review_finding(raw) is None
+
+    def test_missing_title_dropped(self):
+        from ai_reviewer.review import _raw_to_review_finding
+
+        raw = {"file_path": "a.py", "line_start": 3, "severity": "warning", "category": "logic"}
+        assert _raw_to_review_finding(raw) is None
+
+    def test_complete_finding_parses(self):
+        from ai_reviewer.review import _raw_to_review_finding
+
+        raw = {
+            "file_path": "a.py",
+            "line_start": 3,
+            "severity": "warning",
+            "category": "logic",
+            "title": "stale caller",
+            "description": "d",
+        }
+        f = _raw_to_review_finding(raw)
+        assert f is not None and f.severity == Severity.WARNING
+
+
 class TestRunAgentSharded:
     """Failure and coverage semantics of _run_agent_sharded."""
 
