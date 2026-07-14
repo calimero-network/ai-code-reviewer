@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 FINDINGS_SCHEMA: dict[str, Any] = {
@@ -264,3 +265,65 @@ def build_user_blocks(
     changed_block = _files_block("Changed files (full contents)", truncated)
     assembled = "\n\n".join([pr_meta, diff_block, changed_block, neighbor_block])
     return [{"type": "text", "text": assembled}]
+
+
+# PR map: a deterministic, no-LLM digest of the whole PR's shape. Included in
+# every shard's context so a shard reviewing one slice still sees the full PR.
+_PR_MAP_MAX_FILES = 150
+_PR_MAP_MAX_BYTES = 4096
+_PR_MAP_FILE_HEADER_RE = re.compile(r"^diff --git a/.+ b/(.+)$")
+# Grab the enclosing symbol name a diff hunk header carries after the second @@.
+_PR_MAP_SYMBOL_RE = re.compile(
+    r"\b(?:fn|def|func|class|impl|struct|trait|enum|interface|type)\s+"
+    r"([A-Za-z_][A-Za-z0-9_]*)"
+)
+
+
+def build_pr_map_block(files: dict[str, str], diff: str) -> str:
+    """Compact whole-PR digest: totals plus one line per file with hunk symbols.
+
+    Each file line is ``path (+A/-D)`` optionally followed by the function/impl
+    names scraped from that file's ``@@ ... @@ <context>`` hunk headers. Capped
+    at ``_PR_MAP_MAX_FILES`` files and ``_PR_MAP_MAX_BYTES`` bytes.
+    """
+    entries: list[dict[str, Any]] = []
+    by_path: dict[str, dict[str, Any]] = {}
+    current: dict[str, Any] | None = None
+    total_adds = total_dels = 0
+
+    for line in diff.splitlines():
+        header = _PR_MAP_FILE_HEADER_RE.match(line)
+        if header:
+            current = {"path": header.group(1), "adds": 0, "dels": 0, "symbols": []}
+            entries.append(current)
+            by_path[current["path"]] = current
+            continue
+        if current is None:
+            continue
+        if line.startswith("@@"):
+            ctx = line.split("@@")[-1].strip() if "@@" in line[2:] else ""
+            m = _PR_MAP_SYMBOL_RE.search(ctx)
+            if m and m.group(1) not in current["symbols"]:
+                current["symbols"].append(m.group(1))
+        elif line.startswith("+") and not line.startswith("+++"):
+            current["adds"] += 1
+            total_adds += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            current["dels"] += 1
+            total_dels += 1
+
+    file_count = len(files) or len(entries)
+    lines = [f"## PR map\n\nTotal: +{total_adds}/-{total_dels} across {file_count} file(s)\n"]
+    for e in entries[:_PR_MAP_MAX_FILES]:
+        row = f"- {e['path']} (+{e['adds']}/-{e['dels']})"
+        if e["symbols"]:
+            row += ": " + ", ".join(e["symbols"])
+        lines.append(row)
+    if len(entries) > _PR_MAP_MAX_FILES:
+        lines.append(f"- ... and {len(entries) - _PR_MAP_MAX_FILES} more file(s)")
+
+    block = "\n".join(lines)
+    if len(block.encode("utf-8")) > _PR_MAP_MAX_BYTES:
+        block = block.encode("utf-8")[:_PR_MAP_MAX_BYTES].decode("utf-8", errors="ignore")
+        block += "\n[... PR map truncated ...]"
+    return block

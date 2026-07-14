@@ -801,6 +801,59 @@ async def test_caller_user_block_cache_control_survives_tool_rounds():
 
 
 @pytest.mark.asyncio
+async def test_caller_messages0_breakpoint_survives_and_total_stays_under_cap():
+    """Cross-agent cache sharing shape: the caller marks the last shared block on
+    the initial user turn (messages[0]). Across tool rounds that breakpoint must
+    survive the prune pass, and total breakpoints per request - system(1) +
+    messages[0](1) + moving tool_result(1) = 3 - must stay <= 4."""
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=True)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+
+    counts: list[int] = []
+    msg0_cc: list[bool] = []
+    counter = {"n": 0}
+
+    def fake_create(**kwargs):
+        counts.append(_count_cache_control(kwargs))
+        first_user_content = kwargs["messages"][0]["content"]
+        msg0_cc.append(
+            any(isinstance(b, dict) and "cache_control" in b for b in first_user_content)
+        )
+        counter["n"] += 1
+        if counter["n"] < 4:
+            return _tool_use_response(f"t{counter['n']}", "read_file", {"path": "a.py"})
+        return _fake_response('{"findings": [], "summary": "done"}')
+
+    client._create_message = AsyncMock(side_effect=fake_create)
+
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(return_value="contents")
+
+    # Mirrors what base.py builds: shared prefix block carries the breakpoint,
+    # per-agent role block is appended last (unmarked).
+    await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[
+            {"type": "text", "text": "shared", "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": "## Your reviewer role\nrole"},
+        ],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        enable_thinking=False,
+        max_tool_rounds=8,
+    )
+
+    assert len(counts) >= 3, f"expected multiple tool rounds, ran {len(counts)}"
+    assert all(msg0_cc), f"caller messages[0] breakpoint was stripped: {msg0_cc}"
+    assert max(counts) <= 4, f"breakpoints exceeded the 4-per-request cap: {counts}"
+    # Steady-state (round >= 1) carries all three breakpoints.
+    assert max(counts) == 3, f"expected system+messages0+tool_result=3, got {counts}"
+
+
+@pytest.mark.asyncio
 async def test_caching_disabled_leaves_tool_result_unmarked():
     """When caching is off, no cache_control is added to tool_result blocks."""
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)

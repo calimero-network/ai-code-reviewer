@@ -1199,6 +1199,353 @@ class TestCrossAgentRoutesThroughClient:
         # assert_awaited_once() above.
 
 
+def _file_diff(path: str, adds: int, dels: int, symbol: str | None = None) -> str:
+    """Synthesize a single-file unified-diff section with `adds`+`dels` changed lines."""
+    ctx = f" fn {symbol}(&self)" if symbol else ""
+    lines = [
+        f"diff --git a/{path} b/{path}",
+        f"--- a/{path}",
+        f"+++ b/{path}",
+        f"@@ -1,{dels + 1} +1,{adds + 1} @@{ctx}",
+    ]
+    lines += [f"+added {i}" for i in range(adds)]
+    lines += [f"-removed {i}" for i in range(dels)]
+    return "\n".join(lines) + "\n"
+
+
+class TestBuildShards:
+    """Tests for _build_shards directory-grouped sharding."""
+
+    def _big_diff(self) -> tuple[dict[str, str], str]:
+        """33 files / 2583 changed lines across several dirs and crates."""
+        specs = {
+            "crates/node": 8,
+            "crates/store": 8,
+            "crates/network": 5,
+            "src": 6,
+            "server": 6,
+        }
+        files: dict[str, str] = {}
+        parts: list[str] = []
+        # 39 add / 39 del = 78 changed lines per file; 33 files = 2574 lines.
+        for group, count in specs.items():
+            for i in range(count):
+                path = f"{group}/file_{i}.rs"
+                files[path] = f"// contents of {path}\n"
+                parts.append(_file_diff(path, 39, 39, symbol=f"do_{i}"))
+        return files, "".join(parts)
+
+    def test_deterministic(self):
+        from ai_reviewer.review import _build_shards
+
+        files, diff = self._big_diff()
+        a = _build_shards(files, diff)
+        b = _build_shards(files, diff)
+        assert [s.label for s in a] == [s.label for s in b]
+        assert [s.diff for s in a] == [s.diff for s in b]
+
+    def test_big_pr_yields_four_to_six_shards(self):
+        from ai_reviewer.review import _build_shards
+
+        files, diff = self._big_diff()
+        shards = _build_shards(files, diff)
+        assert 4 <= len(shards) <= 6
+
+    def test_respects_target_or_single_group(self):
+        from ai_reviewer.review import _SHARD_TARGET_LINES, _build_shards, _changed_line_count
+
+        files, diff = self._big_diff()
+        for shard in _build_shards(files, diff):
+            over_budget = _changed_line_count(shard.diff) > _SHARD_TARGET_LINES
+            # Over-budget shards are only allowed when they hold a single group.
+            assert not over_budget or "," not in shard.label
+
+    def test_never_splits_a_group(self):
+        from ai_reviewer.review import _build_shards
+
+        files, diff = self._big_diff()
+        # Every file of crates/node must land in exactly one shard.
+        node_files = [p for p in files if p.startswith("crates/node/")]
+        for path in node_files:
+            containing = [s for s in _build_shards(files, diff) if path in s.files]
+            assert len(containing) == 1
+        # And all crates/node files share that one shard.
+        node_shards = {
+            id(s) for s in _build_shards(files, diff) for p in node_files if p in s.files
+        }
+        assert len(node_shards) == 1
+
+    def test_caps_at_max_with_repack(self):
+        from ai_reviewer.review import _SHARD_MAX, _build_shards
+
+        # 64 groups of 100 changed lines each: budget 600 would yield 11 shards;
+        # the re-pack at total/8 must bring it down to <= _SHARD_MAX.
+        files: dict[str, str] = {}
+        parts: list[str] = []
+        for g in range(64):
+            path = f"dir_{g:02d}/file.py"
+            files[path] = "x\n"
+            parts.append(_file_diff(path, 50, 50))
+        shards = _build_shards(files, "".join(parts))
+        assert len(shards) <= _SHARD_MAX
+
+
+class TestBuildPrMapBlock:
+    """Tests for build_pr_map_block."""
+
+    def test_contains_counts_and_symbols(self):
+        from ai_reviewer.context.builder import build_pr_map_block
+
+        diff = _file_diff("src/auth.py", 5, 2, symbol="login") + _file_diff("src/util.py", 1, 0)
+        files = {"src/auth.py": "", "src/util.py": ""}
+        block = build_pr_map_block(files, diff)
+        assert "src/auth.py (+5/-2)" in block
+        assert "src/util.py (+1/-0)" in block
+        assert "login" in block
+        assert "2 file(s)" in block
+        assert "+6/-2" in block  # totals across files
+
+    def test_capped_size(self):
+        from ai_reviewer.context.builder import _PR_MAP_MAX_BYTES, build_pr_map_block
+
+        files: dict[str, str] = {}
+        parts: list[str] = []
+        for i in range(300):
+            path = f"pkg/module_{i:03d}/handler.py"
+            files[path] = ""
+            parts.append(_file_diff(path, 3, 1, symbol=f"handle_{i}"))
+        block = build_pr_map_block(files, "".join(parts))
+        assert len(block.encode("utf-8")) <= _PR_MAP_MAX_BYTES + 40
+
+
+async def _run_review_pr_mocked(
+    additions: int, deletions: int, changed_files_count: int, num_agents: int = 3
+):
+    """Drive review_pr with all I/O + agent drivers mocked; return (safe, sharded) mocks."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import ai_reviewer.review as rev
+    from ai_reviewer.config import AnthropicApiConfig
+    from ai_reviewer.models.review import AgentReview
+
+    gh = MagicMock()
+    pr = MagicMock()
+    pr.head.sha = "sha"
+    pr.title = "t"
+    pr.body = "b"
+    gh.get_pull_request.return_value = pr
+    gh.get_repo.return_value = MagicMock()
+    gh.get_pr_diff.return_value = ""
+    gh.get_changed_files.return_value = {}
+    gh.load_repo_config.return_value = {}
+    gh.load_repo_conventions.return_value = ""
+    gh.build_review_context.return_value = ReviewContext(
+        repo_name="o/r",
+        pr_number=1,
+        pr_title="t",
+        pr_description="",
+        base_branch="main",
+        head_branch="f",
+        author="a",
+        changed_files_count=changed_files_count,
+        additions=additions,
+        deletions=deletions,
+    )
+
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+
+    fake = AgentReview(
+        agent_id="a", agent_type="t", focus_areas=[], findings=[], summary="ok", review_time_ms=0
+    )
+
+    with (
+        patch.object(rev, "GitHubClient", return_value=gh),
+        patch.object(rev, "AnthropicClient", return_value=client),
+        patch.object(rev, "_prepare_shared_context", new=AsyncMock(return_value=([], []))),
+        patch.object(rev, "_run_agent_safe", new=AsyncMock(return_value=fake)) as safe,
+        patch.object(rev, "_run_agent_sharded", new=AsyncMock(return_value=fake)) as sharded,
+    ):
+        await rev.review_pr(
+            repo="o/r",
+            pr_number=1,
+            anthropic_cfg=AnthropicApiConfig(api_key="sk"),
+            github_token="tok",
+            num_agents=num_agents,
+        )
+    return safe, sharded
+
+
+class TestShardGate:
+    """Tests for the size gate that selects the sharded vs single-conversation path."""
+
+    @pytest.mark.asyncio
+    async def test_small_pr_uses_single_path(self):
+        safe, sharded = await _run_review_pr_mocked(
+            additions=500, deletions=499, changed_files_count=19
+        )
+        sharded.assert_not_called()
+        safe.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_over_line_gate_uses_sharded_path(self):
+        safe, sharded = await _run_review_pr_mocked(
+            additions=501, deletions=500, changed_files_count=19
+        )
+        sharded.assert_called()
+        safe.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_over_file_gate_uses_sharded_path(self):
+        safe, sharded = await _run_review_pr_mocked(
+            additions=10, deletions=10, changed_files_count=21
+        )
+        sharded.assert_called()
+        safe.assert_not_called()
+
+
+def _make_shards(n: int):
+    from ai_reviewer.review import Shard
+
+    return [
+        Shard(files={f"g{k}/a.py": "x"}, diff=_file_diff(f"g{k}/a.py", 1, 0), label=f"g{k}")
+        for k in range(n)
+    ]
+
+
+def _make_review_finding():
+    from ai_reviewer.models.findings import Category, ReviewFinding, Severity
+
+    return ReviewFinding(
+        file_path="g0/a.py",
+        line_start=1,
+        line_end=None,
+        severity=Severity.WARNING,
+        category=Category.LOGIC,
+        title="Issue",
+        description="d",
+        suggested_fix=None,
+        confidence=0.8,
+    )
+
+
+def _sharded_kwargs(cls, shards, client):
+    """Common keyword args for _run_agent_sharded in the failure-semantics tests."""
+    from unittest.mock import MagicMock
+
+    from ai_reviewer.config import AnthropicApiConfig
+
+    return {
+        "cls": cls,
+        "agent_name": "logic-reviewer",
+        "agent_index": 0,
+        "client": client,
+        "system_blocks": [],
+        "shards": shards,
+        "pr_map": "## PR map\n\nTotal: +1/-0 across 1 file(s)",
+        "pr_title": "t",
+        "pr_body": "b",
+        "max_total_chars": 600_000,
+        "allow_tools": False,
+        "max_tokens": 8192,
+        "temperature": 0.3,
+        "thinking_enabled": None,
+        "model": None,
+        "session": MagicMock(),
+        "gh": MagicMock(),
+        "anthropic_cfg": AnthropicApiConfig(api_key="sk"),
+        "context": MagicMock(),
+        "on_status": None,
+    }
+
+
+def _fake_agent_cls(queue):
+    """A ReviewAgent stand-in whose review() pops queued results/exceptions per shard."""
+
+    class _FakeAgent:
+        AGENT_TYPE = "logic-reviewer"
+        FOCUS_AREAS = ["logic"]
+
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+        async def review(self, diff, file_contents, context):
+            item = queue.pop(0)
+            if isinstance(item, Exception):
+                raise item
+            return item
+
+    return _FakeAgent
+
+
+class TestRunAgentSharded:
+    """Failure and coverage semantics of _run_agent_sharded."""
+
+    def _client(self):
+        from unittest.mock import AsyncMock, MagicMock
+
+        client = MagicMock()
+        client.config.default_model = "m"
+        client.complete_simple = AsyncMock(return_value='{"findings": [], "summary": "none"}')
+        return client
+
+    @pytest.mark.asyncio
+    async def test_partial_failure_still_succeeds_with_coverage_note(self):
+        from ai_reviewer.agents.anthropic_client import INCOMPLETE_SUMMARY_MARKERS
+        from ai_reviewer.models.review import AgentReview
+        from ai_reviewer.review import _run_agent_sharded
+
+        finding = _make_review_finding()
+        queue = [
+            AgentReview("a", "t", [], [finding], "shard0 ok", 0),
+            RuntimeError("shard1 boom"),
+            AgentReview("a", "t", [], [], "shard2 ok", 0),
+        ]
+        cls = _fake_agent_cls(queue)
+        client = self._client()
+        result = await _run_agent_sharded(**_sharded_kwargs(cls, _make_shards(3), client))
+
+        assert isinstance(result, AgentReview)
+        assert finding in result.findings
+        assert "Coverage gap" in result.summary
+        assert "g1" in result.summary
+        # Partial-failure note must not read as an incomplete-review marker.
+        assert not any(m in result.summary for m in INCOMPLETE_SUMMARY_MARKERS)
+        # Merged findings were non-empty, so the cross-shard pass ran.
+        client.complete_simple.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_incomplete_marker_shard_counts_as_failure_without_leaking_marker(self):
+        from ai_reviewer.agents.anthropic_client import (
+            INCOMPLETE_SUMMARY_MARKERS,
+            TOOL_LOOP_CAP_MARKER,
+        )
+        from ai_reviewer.models.review import AgentReview
+        from ai_reviewer.review import _run_agent_sharded
+
+        queue = [
+            AgentReview("a", "t", [], [_make_review_finding()], "ok", 0),
+            AgentReview("a", "t", [], [], TOOL_LOOP_CAP_MARKER, 0),
+        ]
+        cls = _fake_agent_cls(queue)
+        result = await _run_agent_sharded(**_sharded_kwargs(cls, _make_shards(2), self._client()))
+
+        assert isinstance(result, AgentReview)
+        assert "Coverage gap" in result.summary
+        assert not any(m in result.summary for m in INCOMPLETE_SUMMARY_MARKERS)
+
+    @pytest.mark.asyncio
+    async def test_all_shards_fail_marks_agent_failed(self):
+        from ai_reviewer.review import _run_agent_sharded
+
+        queue = [RuntimeError("boom") for _ in range(3)]
+        cls = _fake_agent_cls(queue)
+        result = await _run_agent_sharded(**_sharded_kwargs(cls, _make_shards(3), self._client()))
+
+        assert isinstance(result, Exception)
+
+
 def test_aggregate_findings_marks_incomplete_agent_as_failed():
     from ai_reviewer.agents.anthropic_client import PARSE_ERROR_MARKER, TOOL_LOOP_CAP_MARKER
     from ai_reviewer.review import aggregate_findings
