@@ -823,9 +823,9 @@ _AGENT_CLASSES: dict[str, type[ReviewAgent]] = {
 
 DEFAULT_AGENT_ORDER = [
     "security-reviewer",
-    "performance-reviewer",
-    "patterns-reviewer",
     "logic-reviewer",
+    "patterns-reviewer",
+    "performance-reviewer",
     "style-reviewer",
 ]
 

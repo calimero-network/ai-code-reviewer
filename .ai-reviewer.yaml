@@ -11,7 +11,7 @@ anthropic:
   api_key: ${ANTHROPIC_API_KEY}
   default_model: claude-sonnet-5
   timeout_seconds: 300
-  max_retries: 1
+  max_retries: 3
   enable_prompt_caching: true
   max_combined_context_tokens: 80000
   per_file_max_bytes: 524288
