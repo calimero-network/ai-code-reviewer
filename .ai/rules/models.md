@@ -51,6 +51,23 @@ class ReviewFinding:
     confidence: float  # 0.0-1.0
 ```
 
+### ConsolidatedFinding
+```python
+@dataclass
+class ConsolidatedFinding:
+    """Aggregated finding across multiple agents."""
+    # ... fields from ReviewFinding ...
+    finding_hash_fuzzy: str  # Fuzzy hash for deduplication
+```
+
+The `finding_hash_fuzzy` is computed by `compute_fuzzy_hash()` using:
+- **Backticked identifiers** extracted from the title (e.g., `` `variable_name` ``)
+- **Fallback to keywords** extracted from prose titles if no backticked symbols found
+- **Category** as part of the hash key
+- **Line-number bucket** (coarse-grained line range) to group related findings
+
+This enables substance-stable fingerprinting across similar findings with minor variations.
+
 ### Enums
 ```python
 class Severity(Enum):
@@ -128,6 +145,21 @@ class MyModel:
             severity=Severity(data["severity"]),  # String to enum
         )
 ```
+
+## Fuzzy Hashing for Finding Deduplication
+
+The `compute_fuzzy_hash()` function generates stable hashes for finding deduplication:
+
+**Inputs:**
+- **Backticked identifiers**: Primary hash key; extracted from finding titles (e.g., `` `foo()`, `bar` ``)
+- **Keyword extraction**: Fallback for prose-only titles; sorted alphabetically for stability
+- **Category**: Included in hash to differentiate findings across categories
+- **Line-number bucket**: Coarse-grained grouping (e.g., lines 10–19 in same bucket)
+
+**Clustering Threshold (`_LINE_OVERLAP_SIMILARITY_THRESHOLD`):**
+- When file and category match **and** lines overlap, the text-similarity threshold for merging is **0.6** (lowered from 0.85)
+- Severity is no longer part of the similarity gate, allowing findings of different severity levels to cluster if content matches
+- This enables looser within-pass clustering while maintaining substance-stable deduplication
 
 ## Type Relationships
 
