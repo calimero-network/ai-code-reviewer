@@ -83,12 +83,13 @@ class ConsolidatedReview:
 1. Create `src/ai_reviewer/agents/new_agent.py`
 2. Extend `ReviewAgent` base class
 3. Define `MODEL`, `AGENT_TYPE`, `FOCUS_AREAS`, `SYSTEM_PROMPT`
-4. Add to agent config in `config.yaml`
+4. Implement `_build_user_blocks()` to append role prompt as the last block (never mutating shared user_blocks)
+5. Add to agent config in `config.yaml`
 
 ### Change how findings are aggregated
 
 - Edit `src/ai_reviewer/orchestrator/aggregator.py`
-- Key method: `ReviewAggregator.aggregate()`
+- Key methods: `ReviewAggregator.aggregate()`, `compute_fuzzy_hash()` (now keys on backticked identifiers + category + line-number bucket), `_raw_findings_similar()` (now uses loosened 0.6 similarity threshold for overlapping line ranges, drops hard line-overlap gate)
 
 ### Modify GitHub output format
 
@@ -140,15 +141,16 @@ orchestrator:
 
 1. **Architecture Invariant I1: Single SDK importer** - Only `agents/anthropic_client.py` may import the Anthropic SDK (marked with `# noqa: TID251`). All other code must access LLMs through `AnthropicClient`. Enforced by ruff's `flake8-tidy-imports` (`TID251`) rule.
 2. **Tool registries implement `ToolRegistryProtocol`** - enables structural typing and flexible tool implementations
-3. **Agents are stateless** - each review is independent
+3. **Agents are stateless** - each review is independent; role/system prompt appended per-agent via `_build_user_blocks()` to enable cross-agent cache sharing
 4. **Async throughout** - no blocking I/O
 5. **Graceful degradation** - some results better than none
 6. **Type safety** - use enums for Severity/Category, not strings
+7. **Fuzzy finding deduplication** - hash computed from backticked identifiers/category/line-bucket; clustering loosened (0.6 similarity threshold) for overlapping line ranges without hard line-overlap gate
 
 ## AnthropicClient Methods
 
 **Main entry points:**
-- `run_review(model, system, user_context, tools, ...)` → Full agent review with tool use, caching, and JSON schema
+- `run_review(model, system, user_context, tools, ...)` → Full agent review with tool use, caching, and JSON schema. Circuit breaker compares true per-request context (input_tokens + cache_read_input_tokens + cache_creation_input_tokens from API response) against 2× max_combined_context_tokens. Role/system prompt is appended as the last block of the user turn with cache breakpoint on the last shared user block, enabling cross-agent prompt cache sharing.
 - `complete_simple(model, system, user, max_tokens, temperature)` → Lightweight completion with caching but no tools or schema; used for cross-review and other internal calls
 
 Both methods log token usage and support prompt caching when `enable_prompt_caching` is true.
