@@ -147,6 +147,52 @@ async def test_run_review_with_thinking_enabled_sets_adaptive_config():
 
 
 @pytest.mark.asyncio
+async def test_run_review_thinking_sets_medium_effort():
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    client._create_message = AsyncMock(
+        return_value=_fake_response('{"findings": [], "summary": "ok"}')
+    )
+
+    await client.run_review(
+        model="claude-sonnet-5",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=None,
+        enable_thinking=True,
+        max_tokens=32000,
+        temperature=1.0,
+    )
+    kwargs = client._create_message.call_args.kwargs
+    assert kwargs["output_config"]["effort"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_run_review_without_thinking_omits_effort():
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    client._create_message = AsyncMock(
+        return_value=_fake_response('{"findings": [], "summary": "ok"}')
+    )
+
+    await client.run_review(
+        model="claude-sonnet-5",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=None,
+        enable_thinking=False,
+        max_tokens=8192,
+        temperature=0.3,
+    )
+    kwargs = client._create_message.call_args.kwargs
+    assert "effort" not in kwargs["output_config"]
+
+
+@pytest.mark.asyncio
 async def test_run_review_without_thinking_sends_disabled():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)

@@ -8,12 +8,14 @@ from ai_reviewer.models.context import ReviewContext
 from ai_reviewer.models.findings import Category, ConsolidatedFinding, Severity
 from ai_reviewer.models.review import ConsolidatedReview
 from ai_reviewer.review import (
+    _NO_CROSS_REVIEW_THRESHOLDS,
     CONFIDENCE_THRESHOLDS,
     _cap_findings,
     _cluster_raw_findings,
     _detect_pr_type,
     _effective_agent_count,
     _raw_findings_similar,
+    _thresholds_for_run,
     _truncate_to_byte_limit,
     aggregate_findings,
     apply_cross_review,
@@ -800,6 +802,37 @@ def _make_raw_finding(
         "description": "Description",
         "confidence": confidence,
     }
+
+
+class TestThresholdsForRun:
+    """Tests for _thresholds_for_run conservative-floor fallback."""
+
+    def test_cross_review_active_returns_base_unchanged(self):
+        base = {
+            Severity.CRITICAL: 0.3,
+            Severity.WARNING: 0.4,
+            Severity.SUGGESTION: 0.5,
+            Severity.NITPICK: 0.6,
+        }
+        assert _thresholds_for_run(base, cross_review_active=True) is base
+
+    def test_cross_review_inactive_raises_to_conservative_floors(self):
+        base = {
+            Severity.CRITICAL: 0.3,
+            Severity.WARNING: 0.4,
+            Severity.SUGGESTION: 0.5,
+            Severity.NITPICK: 0.6,
+        }
+        result = _thresholds_for_run(base, cross_review_active=False)
+        assert result[Severity.CRITICAL] == _NO_CROSS_REVIEW_THRESHOLDS[Severity.CRITICAL]
+        assert result[Severity.WARNING] == _NO_CROSS_REVIEW_THRESHOLDS[Severity.WARNING]
+        assert result[Severity.SUGGESTION] == _NO_CROSS_REVIEW_THRESHOLDS[Severity.SUGGESTION]
+        assert result[Severity.NITPICK] == _NO_CROSS_REVIEW_THRESHOLDS[Severity.NITPICK]
+
+    def test_base_above_conservative_is_kept(self):
+        base = {Severity.CRITICAL: 0.9}
+        result = _thresholds_for_run(base, cross_review_active=False)
+        assert result[Severity.CRITICAL] == 0.9
 
 
 class TestConfidenceFiltering:

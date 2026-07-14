@@ -38,6 +38,11 @@ _NO_SAMPLING_PARAMS_MODELS = {
 _ALWAYS_THINKING_MODELS = {"claude-fable-5", "claude-mythos-5"}
 
 
+# Adaptive thinking shares max_tokens with the response; the default effort "high"
+# can exhaust the budget and truncate the findings JSON, so cap thinking effort here.
+_THINKING_EFFORT = "medium"
+
+
 # Summary markers for reviews that did NOT complete. aggregate_findings() treats
 # any summary containing one of these as a failed agent — a give-up must never
 # be indistinguishable from a genuinely clean review.
@@ -275,6 +280,8 @@ class AnthropicClient:
                     "format": {"type": "json_schema", "schema": output_schema},
                 },
             }
+            if enable_thinking:
+                kwargs["output_config"]["effort"] = _THINKING_EFFORT
             kwargs.update(_sampling_params(model, enable_thinking, temperature))
             if tools and not tool_budget_exhausted and not last_round:
                 kwargs["tools"] = tools

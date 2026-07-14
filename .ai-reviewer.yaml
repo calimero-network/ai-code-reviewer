@@ -23,7 +23,7 @@ agents:
     model: claude-sonnet-5
     focus_areas: [security, authentication]
     thinking_enabled: true
-    max_tokens: 16000
+    max_tokens: 32000
     allow_tool_use: true
     temperature: 0.2
     custom_prompt_append: |
@@ -54,7 +54,7 @@ agents:
     model: claude-sonnet-5
     focus_areas: [logic, edge_cases, error_handling]
     thinking_enabled: true
-    max_tokens: 16000
+    max_tokens: 32000
     allow_tool_use: true
     temperature: 0.2
 
