@@ -38,6 +38,11 @@ _NO_SAMPLING_PARAMS_MODELS = {
 _ALWAYS_THINKING_MODELS = {"claude-fable-5", "claude-mythos-5"}
 
 
+# Adaptive thinking shares max_tokens with the response; the default effort "high"
+# can exhaust the budget and truncate the findings JSON, so cap thinking effort here.
+_THINKING_EFFORT = "medium"
+
+
 # Summary markers for reviews that did NOT complete. aggregate_findings() treats
 # any summary containing one of these as a failed agent — a give-up must never
 # be indistinguishable from a genuinely clean review.
@@ -241,7 +246,14 @@ class AnthropicClient:
 
         circuit_limit = self.config.max_combined_context_tokens * 2
 
-        for _ in range(max_tool_rounds + 1):
+        for round_idx in range(max_tool_rounds + 1):
+            # On the final allowed round, stop offering tools so the model is
+            # forced to emit its findings JSON from what it already gathered.
+            # Without this, an agent that keeps calling tools until the cap exits
+            # the loop with empty findings — discarding a full review and flipping
+            # the whole PR to "Review Incomplete". Same salvage as tool-budget
+            # exhaustion, applied to the round cap.
+            last_round = round_idx == max_tool_rounds
             # Circuit breaker: abort before sending if accumulated input from prior rounds
             # already exceeds twice the context limit — paying for this call would just
             # make it worse without producing useful output.
@@ -268,8 +280,10 @@ class AnthropicClient:
                     "format": {"type": "json_schema", "schema": output_schema},
                 },
             }
+            if enable_thinking:
+                kwargs["output_config"]["effort"] = _THINKING_EFFORT
             kwargs.update(_sampling_params(model, enable_thinking, temperature))
-            if tools and not tool_budget_exhausted:
+            if tools and not tool_budget_exhausted and not last_round:
                 kwargs["tools"] = tools
 
             response = await self._create_message(**kwargs)

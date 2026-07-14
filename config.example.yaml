@@ -43,7 +43,7 @@ agents:
     # Thinking ON: security reasoning benefits most from deeper analysis. Sonnet 5
     # reviews far more thoroughly with thinking on. max_tokens raised so thinking
     # does not consume the output budget and truncate the findings JSON.
-    max_tokens: 16000
+    max_tokens: 32000
     temperature: 0.2
     thinking_enabled: true
     allow_tool_use: true
@@ -71,7 +71,7 @@ agents:
       - error_handling
       - correctness
     # Thinking ON: correctness/edge-case reasoning is the other high-value case.
-    max_tokens: 16000
+    max_tokens: 32000
     temperature: 0.2
     thinking_enabled: true
     allow_tool_use: true

@@ -28,7 +28,7 @@
 
 ## 1. System Overview
 
-AI Code Reviewer orchestrates multiple LLM agents — each with a specialized focus area — to produce consensus-based code reviews. All LLM access goes through Anthropic's Messages API via the official `anthropic` SDK. Agents run on `claude-sonnet-4-6` (reasoning-heavy, with extended thinking) or `claude-sonnet-4-6` (broader, faster). Repo exploration happens through Claude tool use (`read_file` / `glob` / `grep`) backed by the GitHub Contents API.
+AI Code Reviewer orchestrates multiple LLM agents — each with a specialized focus area — to produce consensus-based code reviews. All LLM access goes through Anthropic's Messages API via the official `anthropic` SDK. Review agents run on `claude-sonnet-5` (security-reviewer and logic-reviewer with adaptive extended thinking on; the other review agents run with thinking off), and the style agent runs on `claude-haiku-4-5`. Repo exploration happens through Claude tool use (`read_file` / `glob` / `grep`) backed by the GitHub Contents API.
 
 ```mermaid
 flowchart LR
@@ -58,7 +58,7 @@ flowchart LR
 | `models/context.py` | `ReviewContext` dataclass for PR/repo metadata and repo config hooks |
 | `models/findings.py` | `Severity`, `Category`, `ReviewFinding`, `ConsolidatedFinding`, `compute_fuzzy_hash` |
 | `models/review.py` | `ReviewHistory`, `ScoreBreakdown`, `AgentReview`, `ConsolidatedReview` |
-| `agents/anthropic_client.py` | `AnthropicClient`: Messages API wrapper with tool-use loop, adaptive thinking, JSON-schema structured output, prompt caching; `run_review` / `complete_simple` / `run_completion`. Sole importer of the `anthropic` SDK (invariant I1) |
+| `agents/anthropic_client.py` | `AnthropicClient`: Messages API wrapper with tool-use loop, adaptive thinking, JSON-schema structured output, prompt caching; `run_review` / `complete_simple` / `run_completion`. All calls stream via `messages.stream` + `get_final_message` to avoid dropped/corrupted long responses. Sole importer of the `anthropic` SDK (invariant I1) |
 | `agents/base.py` | `ReviewAgent` base class; drives `AnthropicClient.run_review` per agent (model from config, falling back to class `MODEL`) |
 | `agents/security.py` | `SecurityAgent`, `AuthenticationAgent` (Sonnet) |
 | `agents/performance.py` | `PerformanceAgent`, `LogicAgent` (Sonnet) |
@@ -151,18 +151,21 @@ sequenceDiagram
 
 ### Agent Spawning
 
-Production uses **parallel `asyncio.gather`** of `ReviewAgent.review()`, one per agent. Agents are resolved from the `_AGENT_CLASSES` registry (configurable via `.ai-reviewer.yaml`; default order in `DEFAULT_AGENT_ORDER`):
+Production uses **parallel `asyncio.gather`** of `ReviewAgent.review()`, one per agent. Agents are resolved from the `_AGENT_CLASSES` registry (configurable via `.ai-reviewer.yaml`; default order in `DEFAULT_AGENT_ORDER` is security-reviewer, logic-reviewer, patterns-reviewer, performance-reviewer, style-reviewer, so `--agents 3` with no repo config runs security + logic + patterns):
 
 | Agent class | `AGENT_TYPE` | Model | Focus |
 |-------------|--------------|-------|-------|
-| `SecurityAgent` | `security-reviewer` | Sonnet | OWASP Top 10, injection, auth, crypto, secrets |
-| `AuthenticationAgent` | `authentication-reviewer` | Sonnet | AuthN/AuthZ, session/token handling |
-| `PerformanceAgent` | `performance-reviewer` | Sonnet | Algorithmic complexity, resource leaks, concurrency |
-| `LogicAgent` | `logic-reviewer` | Sonnet | Correctness, edge cases, error handling |
-| `PatternsAgent` | `patterns-reviewer` | Sonnet | Consistency, SOLID, anti-patterns, architecture |
+| `SecurityAgent` | `security-reviewer` | Sonnet 5 + thinking | OWASP Top 10, injection, auth, crypto, secrets |
+| `AuthenticationAgent` | `authentication-reviewer` | Sonnet 5 | AuthN/AuthZ, session/token handling |
+| `PerformanceAgent` | `performance-reviewer` | Sonnet 5 | Algorithmic complexity, resource leaks, concurrency |
+| `LogicAgent` | `logic-reviewer` | Sonnet 5 + thinking | Correctness, edge cases, error handling, concurrency/CRDT/DAG invariants |
+| `PatternsAgent` | `patterns-reviewer` | Sonnet 5 | Consistency, SOLID, anti-patterns, architecture |
 | `StyleAgent` | `style-reviewer` | Haiku | Readability, naming, docs (nitpick-tier) |
 
-Agent count is adaptive: `_effective_agent_count()` scales the number of agents to PR size. Cross-review is auto-skipped when ≤ 2 agents run. When a single agent runs (small PR) it is instructed to cover all perspectives.
+Agent count is adaptive: `_effective_agent_count()` scales the number of agents to PR size. Cross-review is auto-skipped when ≤ 2 agents run. When a single agent runs (small PR) it is instructed to cover all perspectives. When cross-review is skipped, the confidence filter falls back to the conservative floor set, since the cross-review precision gate isn't there to catch false positives.
+
+- **Thinking policy**: `claude-sonnet-5` only supports adaptive thinking. security-reviewer and logic-reviewer run with `thinking_enabled=true`, `max_tokens=32000`, and `output_config.effort="medium"` (so thinking doesn't starve the findings JSON). patterns/performance/style run with thinking off.
+- **Tool-loop drop**: on the final tool round, `AnthropicClient.run_review` stops offering tools, forcing the agent to emit its findings JSON instead of exiting empty behind a "tool loop cap" marker (which previously discarded the whole review).
 
 ### Aggregation Pipeline
 
@@ -173,13 +176,15 @@ flowchart TD
     Cluster --> |"same file, category,\noverlapping lines ±5,\ntitle+desc similarity ≥ 0.85"| Merged["ConsolidatedFinding[]"]
     Merged --> Dedup["dedup_cross_file()"]
     Dedup --> |"3+ findings with same\n(category, title) across files\n→ collapse to 1"| Filtered["Confidence filter"]
-    Filtered --> |"per-severity thresholds:\ncritical ≥ 0.5, warning ≥ 0.6,\nsuggestion ≥ 0.7, nitpick ≥ 0.8"| XR{"Cross-review?"}
+    Filtered --> |"per-severity thresholds:\ncritical ≥ 0.3, warning ≥ 0.4,\nsuggestion ≥ 0.5, nitpick ≥ 0.6"| XR{"Cross-review?"}
     XR -- "agents > 2" --> CrossReview["run_cross_review_round()"]
     CrossReview --> Apply["apply_cross_review()"]
     Apply --> |"drop if valid fraction\n< 2/3 agreement\n(CRITICAL+SECURITY always kept)"| Cap["_cap_findings()"]
     XR -- "agents ≤ 2" --> Cap
     Cap --> |"keep top N by priority_score,\nN = max(5, min(20, lines//100+5)),\ncriticals always kept"| Final["Final findings"]
 ```
+
+The thresholds above are the floors used when cross-review runs (≥ 3 effective agents). When cross-review is skipped (1-2 effective agents, small/medium PRs), the filter falls back to a conservative set: critical ≥ 0.5, warning ≥ 0.6, suggestion ≥ 0.7, nitpick ≥ 0.8.
 
 **Clustering** (`_cluster_raw_findings`): Groups findings that share the same file, category, overlapping line ranges (±5 lines), and combined title+description similarity ≥ 0.85 (character-level `SequenceMatcher`). Each cluster becomes one `ConsolidatedFinding` with `consensus_score = unique_agents_in_cluster / total_agents`.
 

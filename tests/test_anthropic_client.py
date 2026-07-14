@@ -147,6 +147,52 @@ async def test_run_review_with_thinking_enabled_sets_adaptive_config():
 
 
 @pytest.mark.asyncio
+async def test_run_review_thinking_sets_medium_effort():
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    client._create_message = AsyncMock(
+        return_value=_fake_response('{"findings": [], "summary": "ok"}')
+    )
+
+    await client.run_review(
+        model="claude-sonnet-5",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=None,
+        enable_thinking=True,
+        max_tokens=32000,
+        temperature=1.0,
+    )
+    kwargs = client._create_message.call_args.kwargs
+    assert kwargs["output_config"]["effort"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_run_review_without_thinking_omits_effort():
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    client._create_message = AsyncMock(
+        return_value=_fake_response('{"findings": [], "summary": "ok"}')
+    )
+
+    await client.run_review(
+        model="claude-sonnet-5",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=None,
+        enable_thinking=False,
+        max_tokens=8192,
+        temperature=0.3,
+    )
+    kwargs = client._create_message.call_args.kwargs
+    assert "effort" not in kwargs["output_config"]
+
+
+@pytest.mark.asyncio
 async def test_run_review_without_thinking_sends_disabled():
     cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
     client = AnthropicClient(cfg)
@@ -313,6 +359,52 @@ async def test_tool_budget_exhausted_drops_tools_and_finishes():
     from ai_reviewer.agents.anthropic_client import INCOMPLETE_SUMMARY_MARKERS
 
     assert result.parsed["findings"] == [{"title": "bug"}]
+    assert not any(m in result.parsed["summary"] for m in INCOMPLETE_SUMMARY_MARKERS)
+
+
+@pytest.mark.asyncio
+async def test_round_cap_forces_final_findings_emission():
+    """An agent that keeps calling tools until the round cap must still emit
+    real findings: the final round drops tools so the model produces its JSON,
+    instead of discarding the whole review with the TOOL_LOOP_CAP sentinel."""
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+
+    counter = {"n": 0}
+
+    def fake_create(**kwargs):
+        counter["n"] += 1
+        # Model keeps requesting tools whenever they're offered; when the final
+        # round withholds them, it emits its findings.
+        if "tools" in kwargs:
+            return _tool_use_response(f"t{counter['n']}", "read_file", {"path": "a.py"})
+        return _fake_response('{"findings": [{"title": "real bug"}], "summary": "reviewed"}')
+
+    client._create_message = AsyncMock(side_effect=fake_create)
+
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(return_value="contents")
+
+    result = await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        enable_thinking=False,
+        max_tokens=4096,
+        temperature=0.3,
+        max_tool_rounds=3,
+    )
+
+    from ai_reviewer.agents.anthropic_client import INCOMPLETE_SUMMARY_MARKERS
+
+    # The last request omitted tools, forcing the emission.
+    assert "tools" not in client._create_message.await_args_list[-1].kwargs
+    # Real findings survive instead of the cap sentinel.
+    assert result.parsed["findings"] == [{"title": "real bug"}]
     assert not any(m in result.parsed["summary"] for m in INCOMPLETE_SUMMARY_MARKERS)
 
 

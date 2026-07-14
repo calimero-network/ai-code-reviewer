@@ -522,12 +522,39 @@ def _cluster_raw_findings(
     return clusters
 
 
+# Noise floor only. The 3-agent cross-review round is the real precision gate;
+# these just cut the lowest-confidence chaff before it runs. Sonnet 5 reports
+# systematically low self-confidence (real findings land at 0.3-0.55), so these
+# sit well below the model's numbers — higher floors silently ate ~65 findings/day.
 CONFIDENCE_THRESHOLDS: dict[Severity, float] = {
+    Severity.CRITICAL: 0.3,
+    Severity.WARNING: 0.4,
+    Severity.SUGGESTION: 0.5,
+    Severity.NITPICK: 0.6,
+}
+
+
+# When the 3-agent cross-review precision gate will NOT run (effective agents < 3),
+# findings get no downstream validation, so fall back to conservative floors to
+# avoid posting low-confidence noise. With cross-review on, the low CONFIDENCE_THRESHOLDS
+# let recall through and cross-review does the precision work.
+_NO_CROSS_REVIEW_THRESHOLDS: dict[Severity, float] = {
     Severity.CRITICAL: 0.5,
     Severity.WARNING: 0.6,
     Severity.SUGGESTION: 0.7,
     Severity.NITPICK: 0.8,
 }
+
+
+def _thresholds_for_run(
+    base: dict[Severity, float], cross_review_active: bool
+) -> dict[Severity, float]:
+    """Raise floors to the conservative set when cross-review won't validate findings."""
+    if cross_review_active:
+        return base
+    return {
+        sev: max(base.get(sev, 0.0), floor) for sev, floor in _NO_CROSS_REVIEW_THRESHOLDS.items()
+    }
 
 
 _CROSS_FILE_ALSO_FOUND_CAP = 5
@@ -795,9 +822,9 @@ _AGENT_CLASSES: dict[str, type[ReviewAgent]] = {
 
 DEFAULT_AGENT_ORDER = [
     "security-reviewer",
-    "performance-reviewer",
-    "patterns-reviewer",
     "logic-reviewer",
+    "patterns-reviewer",
+    "performance-reviewer",
     "style-reviewer",
 ]
 
@@ -1218,12 +1245,22 @@ async def review_pr(
             Severity.SUGGESTION: config.aggregator.min_confidence_suggestion,
             Severity.NITPICK: config.aggregator.min_confidence_nitpick,
         }
+    base_thresholds = (
+        confidence_thresholds if confidence_thresholds is not None else CONFIDENCE_THRESHOLDS
+    )
+    cross_review_active = enable_cross_review and num_agents > 1
+    effective_thresholds = _thresholds_for_run(base_thresholds, cross_review_active)
+    if not cross_review_active:
+        logger.info(
+            "Cross-review inactive (agents=%d): using conservative confidence floors",
+            num_agents,
+        )
     total_lines = context.additions + context.deletions
     review = aggregate_findings(
         list(all_findings),
         repo,
         pr_number,
-        confidence_thresholds=confidence_thresholds,
+        confidence_thresholds=effective_thresholds,
         total_lines=total_lines,
     )
 
