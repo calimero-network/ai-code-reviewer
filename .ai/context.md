@@ -120,6 +120,7 @@ anthropic:
   max_retries: 1
   max_combined_context_tokens: 80000
   enable_prompt_caching: true
+  agent_review_deadline_seconds: 900
 
 agents:
   - name: security-reviewer
@@ -148,7 +149,10 @@ orchestrator:
 ## AnthropicClient Methods
 
 **Main entry points:**
-- `run_review(model, system, user_context, tools, ...)` → Full agent review with tool use, caching, and JSON schema
+- `run_review(model, system, user_context, tools, ...)` → Full agent review with tool use, caching, and JSON schema; enforces per-agent wall-clock deadline via `agent_review_deadline_seconds` config (default 900s). Returns `AnthropicReviewResult` with `DEADLINE_MARKER` ('[deadline exceeded]') summary if deadline is exceeded.
 - `complete_simple(model, system, user, max_tokens, temperature)` → Lightweight completion with caching but no tools or schema; used for cross-review and other internal calls
 
 Both methods log token usage and support prompt caching when `enable_prompt_caching` is true.
+
+**Connection resilience:**
+- `_create_message()` catches `anthropic.APIConnectionError` and retries up to 2 times with exponential backoff (2s, 4s) before re-raising, with deadline awareness to avoid hanging indefinitely.
