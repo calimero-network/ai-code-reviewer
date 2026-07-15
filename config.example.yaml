@@ -217,3 +217,18 @@ doc_generation:
 logging:
   level: INFO
   format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+# ============================================================================
+# CLOUD TASKS JOB QUEUE (webhook only; set via environment, not this file)
+# ============================================================================
+# When both TASK_QUEUE_PATH and TASK_TARGET_URL are set, the webhook becomes a
+# thin enqueuer: PR/`/ai-review` events are pushed onto Cloud Tasks and executed
+# durably (with retry + backoff) against POST /process-review. Leave them unset
+# to run reviews inline in the webhook request (local/CI fallback).
+#
+#   TASK_QUEUE_PATH   projects/<P>/locations/<L>/queues/<Q>   full queue path
+#   TASK_TARGET_URL   https://<this-service-url>              this service's base URL
+#   TASK_AUTH_TOKEN   <shared secret>                         required; /process-review
+#                                                             fails closed (401) if unset
+#   TASK_MAX_ATTEMPTS 4                                       retries before terminal
+#                                                             (posts a visible notice)

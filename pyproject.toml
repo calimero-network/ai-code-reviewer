@@ -40,6 +40,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Optional: only needed to run reviews as durable Cloud Tasks jobs (queue mode).
+# The Actions/CLI path stays lean and never installs this.
+gcp = ["google-cloud-tasks>=2"]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
