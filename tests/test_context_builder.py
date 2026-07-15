@@ -150,3 +150,168 @@ def test_build_user_blocks_truncates_neighbors_first():
     combined = "\n".join(b["text"] for b in blocks)
     assert "keep-this" in combined
     assert "[... neighbors truncated ...]" in combined
+
+
+# --- Hunk-context (pull-based) mode ---
+
+
+def _numbered(n: int) -> str:
+    """n lines uniquely labeled L0001.. so no label is a substring of another."""
+    return "\n".join(f"L{i:04d}" for i in range(1, n + 1))
+
+
+def test_hunk_mode_large_file_becomes_excerpt():
+    content = _numbered(400)
+    diff = "diff --git a/big.py b/big.py\n@@ -100,3 +100,4 @@\n+new\n"
+    blocks = build_user_blocks(
+        pr_title="t",
+        pr_body="",
+        diff=diff,
+        changed_files={"big.py": content},
+        neighbor_files={},
+        full_file_max_lines=300,
+        hunk_context_lines=60,
+    )
+    combined = "\n".join(b["text"] for b in blocks)
+    # Window is [100-60, 100+4+60] = [40, 164]; 125 lines kept of 400.
+    assert "[excerpt: 125 of 400 lines - hunks +/-60 context" in combined
+    assert "L0100" in combined  # inside the hunk
+    assert "L0040" in combined  # window low boundary
+    assert "L0164" in combined  # window high boundary
+    assert "L0039" not in combined  # just outside the window
+    assert "L0400" not in combined  # distant content excluded
+
+
+def test_hunk_mode_small_file_kept_full():
+    content = _numbered(100)
+    diff = "diff --git a/small.py b/small.py\n@@ -50,1 +50,2 @@\n+new\n"
+    blocks = build_user_blocks(
+        pr_title="t",
+        pr_body="",
+        diff=diff,
+        changed_files={"small.py": content},
+        neighbor_files={},
+        full_file_max_lines=300,
+    )
+    combined = "\n".join(b["text"] for b in blocks)
+    assert "[excerpt:" not in combined
+    assert "L0001" in combined
+    assert "L0100" in combined
+
+
+def test_hunk_mode_overlapping_hunks_merge_into_one_window():
+    content = _numbered(400)
+    diff = "diff --git a/big.py b/big.py\n@@ -100,2 +100,2 @@\n+a\n@@ -150,2 +150,2 @@\n+b\n"
+    blocks = build_user_blocks(
+        pr_title="t",
+        pr_body="",
+        diff=diff,
+        changed_files={"big.py": content},
+        neighbor_files={},
+        full_file_max_lines=300,
+        hunk_context_lines=60,
+    )
+    combined = "\n".join(b["text"] for b in blocks)
+    # Windows [40,162] and [90,212] overlap -> single merged window, no separator.
+    assert "\n...\n" not in combined
+    assert "L0100" in combined
+    assert "L0200" in combined
+
+
+def test_hunk_mode_disjoint_hunks_keep_separator():
+    content = _numbered(400)
+    diff = "diff --git a/big.py b/big.py\n@@ -20,1 +20,1 @@\n+a\n@@ -380,1 +380,1 @@\n+b\n"
+    blocks = build_user_blocks(
+        pr_title="t",
+        pr_body="",
+        diff=diff,
+        changed_files={"big.py": content},
+        neighbor_files={},
+        full_file_max_lines=300,
+        hunk_context_lines=60,
+    )
+    combined = "\n".join(b["text"] for b in blocks)
+    assert "\n...\n" in combined  # two disjoint windows
+
+
+def test_hunk_mode_trimmed_paths_out_records_only_excerpted():
+    diff = (
+        "diff --git a/big.py b/big.py\n@@ -100,1 +100,1 @@\n+x\n"
+        "diff --git a/small.py b/small.py\n@@ -1,1 +1,1 @@\n+y\n"
+    )
+    trimmed: set[str] = set()
+    build_user_blocks(
+        pr_title="t",
+        pr_body="",
+        diff=diff,
+        changed_files={"big.py": _numbered(400), "small.py": _numbered(100)},
+        neighbor_files={},
+        full_file_max_lines=300,
+        trimmed_paths_out=trimmed,
+    )
+    assert trimmed == {"big.py"}
+
+
+def test_hunk_mode_caps_neighbors_to_first_lines():
+    blocks = build_user_blocks(
+        pr_title="t",
+        pr_body="",
+        diff="diff --git a/a.py b/a.py\n@@ -1,1 +1,1 @@\n+x\n",
+        changed_files={"a.py": _numbered(10)},
+        neighbor_files={"n.py": _numbered(100)},
+        full_file_max_lines=300,
+    )
+    combined = "\n".join(b["text"] for b in blocks)
+    assert "truncated to first 40 lines" in combined
+    assert "L0040" in combined
+    assert "L0041" not in combined
+
+
+def test_hunk_mode_none_preserves_full_content():
+    content = _numbered(400)
+    diff = "diff --git a/big.py b/big.py\n@@ -100,3 +100,4 @@\n+new\n"
+    trimmed: set[str] = set()
+    blocks = build_user_blocks(
+        pr_title="t",
+        pr_body="",
+        diff=diff,
+        changed_files={"big.py": content},
+        neighbor_files={"n.py": _numbered(100)},
+        full_file_max_lines=None,
+        trimmed_paths_out=trimmed,
+    )
+    combined = "\n".join(b["text"] for b in blocks)
+    assert "[excerpt:" not in combined
+    assert "truncated to first" not in combined
+    assert content in combined  # full changed file verbatim
+    assert _numbered(100) in combined  # full neighbor verbatim
+    assert trimmed == set()
+
+
+# --- Conventions aggregate cap ---
+
+
+def test_conventions_block_truncated_over_aggregate_cap():
+    convention_texts = {"A.md": "a\n" * 5000, "B.md": "b\n" * 5000}
+    blocks = build_system_blocks(
+        agent_role="r",
+        convention_texts=convention_texts,
+        repo_map="m",
+        conventions_max_chars=2000,
+    )
+    combined = "\n".join(b["text"] for b in blocks)
+    assert "[conventions truncated at 2000 chars]" in combined
+
+
+def test_conventions_block_untouched_under_cap():
+    convention_texts = {"A.md": "always cite file:line", "B.md": "follow PEP8"}
+    blocks = build_system_blocks(
+        agent_role="r",
+        convention_texts=convention_texts,
+        repo_map="m",
+        conventions_max_chars=16_000,
+    )
+    combined = "\n".join(b["text"] for b in blocks)
+    assert "[conventions truncated at" not in combined
+    assert "always cite file:line" in combined
+    assert "follow PEP8" in combined

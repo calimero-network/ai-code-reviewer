@@ -82,6 +82,30 @@ def _tool_use_response(tool_id: str, name: str, input_: dict):
     return msg
 
 
+def _thinking_block(text: str = "reasoning", signature: str = "sig"):
+    b = MagicMock()
+    b.type = "thinking"
+    b.thinking = text
+    b.signature = signature
+    return b
+
+
+def _thinking_tool_use_response(tool_id: str, name: str, input_: dict):
+    """A thinking-on assistant turn: a signed thinking block plus a tool_use."""
+    msg = MagicMock()
+    msg.stop_reason = "tool_use"
+    msg.content = [_thinking_block(), _tool_use_block(tool_id, name, input_)]
+    msg.usage.input_tokens = 10
+    msg.usage.output_tokens = 5
+    msg.usage.cache_read_input_tokens = 0
+    msg.usage.cache_creation_input_tokens = 0
+    return msg
+
+
+def _has_thinking(content) -> bool:
+    return any(isinstance(b, dict) and b.get("type") == "thinking" for b in content)
+
+
 @pytest.mark.asyncio
 async def test_create_message_uses_streaming_not_blocking_create():
     """The API call must go through messages.stream() + get_final_message(), not
@@ -525,6 +549,165 @@ async def test_circuit_breaker_does_not_trip_on_small_per_request_context():
 
     assert result.parsed["findings"] == [{"title": "bug"}]
     assert not any(m in result.parsed["summary"] for m in INCOMPLETE_SUMMARY_MARKERS)
+
+
+@pytest.mark.asyncio
+async def test_thinking_stripped_from_all_but_last_assistant_turn():
+    """With thinking enabled the signed block is required only on the last
+    assistant turn; earlier turns' thinking is dead weight re-sent every round.
+    Only the most recent assistant turn keeps its thinking in the final request;
+    the first request (no prior assistant) is untouched."""
+    import copy
+
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+
+    snapshots: list[list] = []
+    counter = {"n": 0}
+
+    def fake_create(**kwargs):
+        snapshots.append(copy.deepcopy(kwargs["messages"]))
+        counter["n"] += 1
+        if counter["n"] <= 3:
+            return _thinking_tool_use_response(f"t{counter['n']}", "read_file", {"path": "a.py"})
+        return _fake_response('{"findings": [], "summary": "done"}')
+
+    client._create_message = AsyncMock(side_effect=fake_create)
+
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(return_value="contents")
+
+    await client.run_review(
+        model="claude-sonnet-5",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        enable_thinking=True,
+        max_tokens=8192,
+        temperature=1.0,
+    )
+
+    # First request: only the caller's user turn, no assistant yet — untouched.
+    assert len(snapshots[0]) == 1
+    assert snapshots[0][0]["role"] == "user"
+
+    # Final request carries 3 appended assistant turns; only the most recent one
+    # keeps its thinking block, the earlier two were stripped.
+    final = snapshots[-1]
+    assistant_turns = [m for m in final if m["role"] == "assistant"]
+    assert len(assistant_turns) == 3
+    assert not _has_thinking(assistant_turns[0]["content"])
+    assert not _has_thinking(assistant_turns[1]["content"])
+    assert _has_thinking(assistant_turns[2]["content"])
+    # The kept thinking block still carries its signature (required by the API).
+    kept = next(b for b in assistant_turns[2]["content"] if b.get("type") == "thinking")
+    assert kept["signature"] == "sig"
+    # Stripping never removes the tool_use blocks themselves.
+    assert all(any(b.get("type") == "tool_use" for b in t["content"]) for t in assistant_turns)
+
+
+@pytest.mark.asyncio
+async def test_soft_finalize_forces_emission_before_hard_breaker():
+    """When per-request context crosses 75% of the breaker mid-loop, the agent
+    must stop offering tools and finalize with real findings — instead of
+    growing another 25% into the hard breaker and being discarded."""
+    import copy
+
+    from ai_reviewer.agents.anthropic_client import (
+        _CONTEXT_BUDGET_MSG,
+        INCOMPLETE_SUMMARY_MARKERS,
+    )
+
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)  # circuit_limit = 160_000, soft = 120_000
+    client._sdk = MagicMock()
+
+    snapshots: list[list] = []
+    tools_present: list[bool] = []
+    counter = {"n": 0}
+
+    def fake_create(**kwargs):
+        snapshots.append(copy.deepcopy(kwargs["messages"]))
+        tools_present.append("tools" in kwargs)
+        counter["n"] += 1
+        if "tools" not in kwargs:
+            return _fake_response('{"findings": [{"title": "real bug"}], "summary": "reviewed"}')
+        r = _tool_use_response(f"t{counter['n']}", "read_file", {"path": "a.py"})
+        if counter["n"] == 2:
+            # Round 1 crosses the 75% soft threshold, still under the hard breaker.
+            r.usage.input_tokens = 1000
+            r.usage.cache_read_input_tokens = 130_000  # 131k > 120k, < 160k
+        return r
+
+    client._create_message = AsyncMock(side_effect=fake_create)
+
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(return_value="contents")
+
+    result = await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        enable_thinking=False,
+        max_tool_rounds=20,
+    )
+
+    # Rounds 0 and 1 offered tools; round 2 (post soft-finalize) must omit them.
+    assert tools_present[0] and tools_present[1]
+    assert not tools_present[2]
+
+    # Round 1's pending tool_use (t2) was answered with the context-budget message.
+    last_user = snapshots[2][-1]
+    assert last_user["role"] == "user"
+    assert last_user["content"][0]["tool_use_id"] == "t2"
+    assert last_user["content"][0]["content"] == _CONTEXT_BUDGET_MSG
+
+    # Review completed with real findings and no incomplete / circuit marker.
+    assert result.parsed["findings"] == [{"title": "real bug"}]
+    assert not any(m in result.parsed["summary"] for m in INCOMPLETE_SUMMARY_MARKERS)
+
+
+@pytest.mark.asyncio
+async def test_hard_breaker_wins_over_soft_finalize_on_huge_first_jump():
+    """A single jump straight past the hard limit (not just 75%) must still abort
+    with CIRCUIT_BREAKER_MARKER. Soft-finalize sets its flag the same round, but
+    the hard breaker at the top of the next round fires before the salvage can
+    complete — the last-resort abort for pathological context blow-ups."""
+    from ai_reviewer.agents.anthropic_client import CIRCUIT_BREAKER_MARKER
+
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)  # circuit_limit = 160_000
+    client._sdk = MagicMock()
+
+    resp = _tool_use_response("t1", "read_file", {"path": "a.py"})
+    resp.usage.input_tokens = 1000
+    resp.usage.cache_read_input_tokens = 200_000  # 201k > 160k hard, past 1.0x
+    client._create_message = AsyncMock(return_value=resp)
+
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(return_value="contents")
+
+    result = await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        enable_thinking=False,
+        max_tool_rounds=20,
+    )
+
+    assert result.parsed["summary"] == CIRCUIT_BREAKER_MARKER
+    assert result.parsed["findings"] == []
+    # Round 0 sent, round 1 aborted before sending — no runaway.
+    assert client._create_message.await_count == 1
 
 
 @pytest.mark.asyncio

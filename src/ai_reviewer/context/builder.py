@@ -160,6 +160,7 @@ def build_system_blocks(
     pr_type: str | None = None,
     pr_size: str | None = None,
     language_rules: str = "",
+    conventions_max_chars: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return system prompt blocks in deterministic order.
 
@@ -167,6 +168,8 @@ def build_system_blocks(
     cache_control by the client. ``language_rules`` is the (already-rendered)
     language-specific high-severity guidance for the repo's languages; the
     caller computes it so this module stays language-agnostic.
+    ``conventions_max_chars`` caps the aggregate conventions block; None leaves
+    it unbounded.
     """
     role_block = {
         "type": "text",
@@ -182,7 +185,12 @@ def build_system_blocks(
     for name, text in convention_texts.items():
         convention_parts.append(f"### {name}\n\n{text.strip()}")
     if convention_parts:
-        convention_block_text = "## Project conventions\n\n" + "\n\n".join(convention_parts)
+        body = "\n\n".join(convention_parts)
+        if conventions_max_chars is not None and len(body) > conventions_max_chars:
+            body = _truncate_on_line_boundary(body, conventions_max_chars) + (
+                f"\n[conventions truncated at {conventions_max_chars} chars]"
+            )
+        convention_block_text = "## Project conventions\n\n" + body
     else:
         convention_block_text = "## Project conventions\n\n(none available)"
     convention_block = {"type": "text", "text": convention_block_text}
@@ -210,6 +218,77 @@ def build_system_blocks(
     return blocks
 
 
+def _truncate_on_line_boundary(text: str, max_chars: int) -> str:
+    """Truncate to at most max_chars, backing up to the last newline when possible."""
+    if len(text) <= max_chars:
+        return text
+    cut = text[:max_chars]
+    nl = cut.rfind("\n")
+    return cut[:nl] if nl > 0 else cut
+
+
+# New-side of a unified-diff hunk header: ``@@ -a,b +c,d @@`` (d defaults to 1).
+_HUNK_HEADER_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+_DIFF_FILE_HEADER_RE = re.compile(r"^diff --git a/.+ b/(.+)$")
+
+
+def _hunk_windows_for_file(diff: str, target_path: str) -> list[tuple[int, int]]:
+    """New-side (start_line, line_count) for each hunk of *target_path* in *diff*."""
+    windows: list[tuple[int, int]] = []
+    current: str | None = None
+    for line in diff.splitlines():
+        header = _DIFF_FILE_HEADER_RE.match(line)
+        if header:
+            current = header.group(1)
+            continue
+        if current != target_path:
+            continue
+        h = _HUNK_HEADER_RE.match(line)
+        if h:
+            start = int(h.group(1))
+            count = int(h.group(2)) if h.group(2) is not None else 1
+            windows.append((start, count))
+    return windows
+
+
+def _hunk_excerpt(content: str, hunks: list[tuple[int, int]], context: int) -> str:
+    """Excerpt file lines around each hunk (+/- *context*), merging overlaps.
+
+    Windows are joined by a ``...`` separator line and prefixed with a note
+    stating kept/total line counts.
+    """
+    lines = content.splitlines()
+    total = len(lines)
+    ranges = [
+        (max(1, start - context), min(total, start + count + context)) for start, count in hunks
+    ]
+    ranges.sort()
+    merged: list[list[int]] = []
+    for lo, hi in ranges:
+        if merged and lo <= merged[-1][1] + 1:
+            merged[-1][1] = max(merged[-1][1], hi)
+        else:
+            merged.append([lo, hi])
+
+    kept = sum(hi - lo + 1 for lo, hi in merged)
+    note = (
+        f"[excerpt: {kept} of {total} lines - hunks +/-{context} context; "
+        "use read_file for the full file]"
+    )
+    segments = ["\n".join(lines[lo - 1 : hi]) for lo, hi in merged]
+    return note + "\n" + "\n...\n".join(segments)
+
+
+def _cap_lines(content: str, max_lines: int) -> str:
+    """Keep the first *max_lines* lines, noting the truncation when it happens."""
+    lines = content.splitlines()
+    if len(lines) <= max_lines:
+        return content
+    return "\n".join(lines[:max_lines]) + (
+        f"\n[... truncated to first {max_lines} lines - use read_file for the full file]"
+    )
+
+
 def _files_block(heading: str, files: dict[str, str]) -> str:
     if not files:
         return f"## {heading}\n\n(none)"
@@ -219,6 +298,10 @@ def _files_block(heading: str, files: dict[str, str]) -> str:
     return "\n".join(parts)
 
 
+# Neighbor cap (lines) in hunk mode: imports/signatures live near the top.
+_NEIGHBOR_HUNK_MODE_MAX_LINES = 40
+
+
 def build_user_blocks(
     pr_title: str,
     pr_body: str,
@@ -226,18 +309,47 @@ def build_user_blocks(
     changed_files: dict[str, str],
     neighbor_files: dict[str, str],
     max_total_chars: int = 600_000,
+    full_file_max_lines: int | None = None,
+    hunk_context_lines: int = 60,
+    trimmed_paths_out: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Assemble the user message for review.
 
     Truncation priority (lowest first): neighbors, changed files.
     The diff is never truncated.
+
+    When ``full_file_max_lines`` is set, changed files longer than it are sent as
+    hunk excerpts (+/- ``hunk_context_lines``) rather than full contents, and
+    neighbors are capped to their first lines - agents pull the rest via tools.
+    ``full_file_max_lines=None`` preserves the full-content behavior. Excerpted
+    paths are added to ``trimmed_paths_out`` when provided.
     """
     pr_meta = (
         f"## PR metadata\n\n**Title:** {pr_title}\n\n**Description:**\n\n{pr_body or '(empty)'}"
     )
     diff_block = f"## Diff\n\n```diff\n{diff}\n```"
-    changed_block = _files_block("Changed files (full contents)", changed_files)
-    neighbor_block = _files_block("Neighbor files (context)", neighbor_files)
+
+    if full_file_max_lines is None:
+        changed_for_block = changed_files
+        neighbor_for_block = neighbor_files
+    else:
+        changed_for_block = {}
+        for path, content in changed_files.items():
+            if len(content.splitlines()) > full_file_max_lines:
+                hunks = _hunk_windows_for_file(diff, path)
+                if hunks:
+                    changed_for_block[path] = _hunk_excerpt(content, hunks, hunk_context_lines)
+                    if trimmed_paths_out is not None:
+                        trimmed_paths_out.add(path)
+                    continue
+            changed_for_block[path] = content
+        neighbor_for_block = {
+            path: _cap_lines(content, _NEIGHBOR_HUNK_MODE_MAX_LINES)
+            for path, content in neighbor_files.items()
+        }
+
+    changed_block = _files_block("Changed files (full contents)", changed_for_block)
+    neighbor_block = _files_block("Neighbor files (context)", neighbor_for_block)
 
     assembled = "\n\n".join([pr_meta, diff_block, changed_block, neighbor_block])
     if len(assembled) <= max_total_chars:
@@ -252,7 +364,7 @@ def build_user_blocks(
 
     truncated: dict[str, str] = {}
     budget = max_total_chars - len(pr_meta) - len(diff_block) - len(neighbor_block) - 1000
-    for path, content in changed_files.items():
+    for path, content in changed_for_block.items():
         if budget <= 0:
             truncated[path] = "[... file omitted due to budget ...]"
             continue

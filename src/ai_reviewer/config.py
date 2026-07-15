@@ -51,6 +51,12 @@ class AnthropicApiConfig:
     per_file_max_bytes: int = 512 * 1024
     per_review_github_request_budget: int = 200
     max_tool_result_bytes: int = 16 * 1024
+    # Pull-based context: changed files longer than this are sent as hunk excerpts
+    # (agents pull the rest via read_file) instead of full contents.
+    full_file_max_lines: int = 300
+    hunk_context_lines: int = 60
+    # Aggregate cap on the concatenated project-conventions block.
+    conventions_max_chars: int = 16_000
 
 
 @dataclass
@@ -247,6 +253,9 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         per_file_max_bytes=anthropic_raw.get("per_file_max_bytes", 512 * 1024),
         per_review_github_request_budget=anthropic_raw.get("per_review_github_request_budget", 200),
         max_tool_result_bytes=anthropic_raw.get("max_tool_result_bytes", 16 * 1024),
+        full_file_max_lines=anthropic_raw.get("full_file_max_lines", 300),
+        hunk_context_lines=anthropic_raw.get("hunk_context_lines", 60),
+        conventions_max_chars=anthropic_raw.get("conventions_max_chars", 16_000),
     )
 
     # GitHub config

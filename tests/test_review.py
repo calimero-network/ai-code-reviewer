@@ -1576,7 +1576,7 @@ async def _run_review_pr_mocked(
     with (
         patch.object(rev, "GitHubClient", return_value=gh),
         patch.object(rev, "AnthropicClient", return_value=client),
-        patch.object(rev, "_prepare_shared_context", new=AsyncMock(return_value=([], []))),
+        patch.object(rev, "_prepare_shared_context", new=AsyncMock(return_value=([], [], set()))),
         patch.object(rev, "_run_agent_safe", new=AsyncMock(return_value=fake)) as safe,
         patch.object(rev, "_run_agent_sharded", new=AsyncMock(return_value=fake)) as sharded,
     ):
@@ -1588,6 +1588,67 @@ async def _run_review_pr_mocked(
             num_agents=num_agents,
         )
     return safe, sharded
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_receives_trimmed_paths():
+    """review_pr must pass the excerpted paths from _prepare_shared_context into ToolRegistry."""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import ai_reviewer.review as rev
+    from ai_reviewer.config import AnthropicApiConfig
+    from ai_reviewer.models.review import AgentReview
+
+    gh = MagicMock()
+    pr = MagicMock()
+    pr.head.sha = "sha"
+    pr.title = "t"
+    pr.body = "b"
+    gh.get_pull_request.return_value = pr
+    gh.get_repo.return_value = MagicMock()
+    gh.get_pr_diff.return_value = ""
+    gh.get_changed_files.return_value = {}
+    gh.load_repo_config.return_value = {}
+    gh.load_repo_conventions.return_value = ""
+    gh.build_review_context.return_value = ReviewContext(
+        repo_name="o/r",
+        pr_number=1,
+        pr_title="t",
+        pr_description="",
+        base_branch="main",
+        head_branch="f",
+        author="a",
+        changed_files_count=1,
+        additions=10,
+        deletions=10,
+    )
+
+    client = MagicMock()
+    client.__aenter__ = AsyncMock(return_value=client)
+    client.__aexit__ = AsyncMock(return_value=False)
+
+    fake = AgentReview(
+        agent_id="a", agent_type="t", focus_areas=[], findings=[], summary="ok", review_time_ms=0
+    )
+    trimmed = {"big.py"}
+
+    with (
+        patch.object(rev, "GitHubClient", return_value=gh),
+        patch.object(rev, "AnthropicClient", return_value=client),
+        patch.object(rev, "_prepare_shared_context", new=AsyncMock(return_value=([], [], trimmed))),
+        patch.object(rev, "_run_agent_safe", new=AsyncMock(return_value=fake)),
+        patch.object(rev, "ToolRegistry") as registry_cls,
+    ):
+        await rev.review_pr(
+            repo="o/r",
+            pr_number=1,
+            anthropic_cfg=AnthropicApiConfig(api_key="sk"),
+            github_token="tok",
+            num_agents=1,
+        )
+
+    registry_cls.assert_called()
+    assert registry_cls.call_args.kwargs["trimmed_paths"] == trimmed
 
 
 class TestShardGate:
