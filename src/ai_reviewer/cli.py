@@ -298,8 +298,16 @@ async def review_pr_async(
         # the author can tell the reviewer ran and failed, then re-trigger.
         if output == "github" and gh is not None and pr is not None:
             formatter = GitHubFormatter(reviewer_name)
-            gh.post_review(pr, formatter.format_all_agents_failed(review), "COMMENT")
-            console.print("[yellow]Posted 'review could not complete' notice to GitHub.[/yellow]")
+            if dry_run:
+                console.print(
+                    "\n[yellow]Dry run - would post 'review could not complete' notice[/yellow]"
+                )
+                print(formatter.format_all_agents_failed(review))
+            else:
+                gh.post_review(pr, formatter.format_all_agents_failed(review), "COMMENT")
+                console.print(
+                    "[yellow]Posted 'review could not complete' notice to GitHub.[/yellow]"
+                )
         else:
             console.print("\n[yellow]Not posting to GitHub - all agents failed.[/yellow]")
         console.print("\n[bold]Possible causes:[/bold]")

@@ -2,6 +2,7 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from click.testing import CliRunner
 
 
@@ -196,3 +197,63 @@ class TestDocGenerationSettings:
 
         cfg = _parse_config({"anthropic": {"api_key": "sk-test"}, "github": {"token": "ghp_test"}})
         assert cfg.doc_generation.enabled is False
+
+
+class TestAllAgentsFailedDryRun:
+    """The all-agents-failed notice must respect --dry-run (self-review catch)."""
+
+    def _run(self, dry_run: bool):
+        import asyncio
+        from datetime import datetime
+
+        from ai_reviewer.cli import review_pr_async
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        review = ConsolidatedReview(
+            id="r-fail",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[],
+            summary="Agent failed: boom",
+            agent_count=2,
+            review_quality_score=0.0,
+            total_review_time_ms=1000,
+            failed_agents=["security-reviewer", "logic-reviewer"],
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.head.sha = "abc123"
+
+        with (
+            patch("ai_reviewer.cli.load_config") as mock_load,
+            patch("ai_reviewer.cli.validate_config", return_value=[]),
+            patch("ai_reviewer.cli.run_review", return_value=review),
+            patch("ai_reviewer.cli.GitHubClient") as mock_gh_cls,
+        ):
+            mock_load.return_value = MagicMock()
+            mock_gh = MagicMock()
+            mock_gh_cls.return_value = mock_gh
+            mock_gh.get_pull_request.return_value = mock_pr
+            mock_gh.get_review_metadata.return_value = None
+
+            with pytest.raises(SystemExit):
+                asyncio.run(
+                    review_pr_async(
+                        repo="test/repo",
+                        pr_number=42,
+                        output="github",
+                        dry_run=dry_run,
+                    )
+                )
+            return mock_gh
+
+    def test_dry_run_does_not_post(self):
+        gh = self._run(dry_run=True)
+        gh.post_review.assert_not_called()
+
+    def test_wet_run_posts_notice(self):
+        gh = self._run(dry_run=False)
+        gh.post_review.assert_called_once()
+        body = gh.post_review.call_args.args[1]
+        assert "Review could not complete" in body
