@@ -47,7 +47,13 @@ def enqueue_review(payload: dict) -> str:
             "url": f"{target_url.rstrip('/')}/process-review",
             "headers": headers,
             "body": json.dumps(payload).encode(),
-        }
+        },
+        # A review runs inside the /process-review request and can take 15+ min.
+        # The default 600s dispatch deadline made Cloud Tasks abandon every
+        # dispatch mid-review (504 -> retry from scratch -> dead-letter). 1800s
+        # is the Cloud Tasks maximum; the Cloud Run service timeout must be
+        # raised to match (gcloud run services update --timeout=1800).
+        "dispatch_deadline": {"seconds": 1800},
     }
 
     client = tasks_v2.CloudTasksClient()
