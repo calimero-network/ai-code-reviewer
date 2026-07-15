@@ -366,6 +366,27 @@ class GitHubFormatter:
 
         return "\n".join(lines)
 
+    def format_all_agents_failed(self, review: ConsolidatedReview) -> str:
+        """Body posted when EVERY agent failed (infrastructure error).
+
+        Callers must never stay silent in this case - an author who sees no
+        comment cannot tell the reviewer even ran. The action must be COMMENT
+        (never APPROVE), which the get_review_action guards already enforce for
+        a findings-empty, failed-agents review.
+        """
+        return "\n".join(
+            [
+                f"## 🤖 {self.reviewer_name}",
+                "",
+                "### ⚠️ Review could not complete",
+                "",
+                f"Review could not complete: all {review.agent_count} agent(s) failed "
+                "(infrastructure error). No code has been reviewed. Re-trigger with "
+                "`/ai-review` or by reopening the PR.",
+                "",
+            ]
+        )
+
     @staticmethod
     def _format_incomplete_block(review: ConsolidatedReview) -> list[str]:
         """Render the "Review Incomplete" body used when no findings were produced."""

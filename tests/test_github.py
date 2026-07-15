@@ -2955,3 +2955,41 @@ class TestPartialReviewHonesty:
         assert "Partial review" in comment
         assert "security-reviewer-0" in comment
         assert "Issue" in comment  # findings still rendered
+
+
+class TestReviewConcurrencyCap:
+    """The webhook App caps simultaneous reviews so a burst queues instead of
+    overloading Cloud Run (concurrency drops streaming connections)."""
+
+    @pytest.mark.asyncio
+    async def test_second_review_waits_until_first_releases(self, monkeypatch):
+        import asyncio
+
+        from ai_reviewer.github import webhook
+
+        monkeypatch.setenv("MAX_CONCURRENT_REVIEWS", "1")
+        monkeypatch.setattr(webhook, "_review_semaphore", None)  # force fresh cap
+
+        order: list[str] = []
+        first_running = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def fake_review(name: str) -> None:
+            sem = webhook._get_review_semaphore()
+            async with sem:
+                order.append(f"{name}:start")
+                if name == "first":
+                    first_running.set()
+                    await release_first.wait()
+                order.append(f"{name}:end")
+
+        t1 = asyncio.create_task(fake_review("first"))
+        await first_running.wait()  # first holds the only permit
+        t2 = asyncio.create_task(fake_review("second"))
+        await asyncio.sleep(0)  # give the second a chance to run if uncapped
+
+        assert order == ["first:start"]  # second is blocked, not started
+
+        release_first.set()
+        await asyncio.gather(t1, t2)
+        assert order == ["first:start", "first:end", "second:start", "second:end"]

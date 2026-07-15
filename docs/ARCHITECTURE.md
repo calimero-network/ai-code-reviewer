@@ -96,8 +96,26 @@ flowchart LR
 | Entry | Function | Path |
 |-------|----------|------|
 | **CLI** | `review_pr` → `review_pr_async()` | `cli.py` |
-| **Webhook** | `handle_pr_event` → `default_review_handler` | `github/webhook.py` |
+| **Webhook** | `handle_pr_event` → `run_review` (inline) or Cloud Tasks | `github/webhook.py` |
 | **Serve** | `cli serve` starts uvicorn with the webhook app | `cli.py` |
+
+#### Durable review jobs (Cloud Tasks)
+
+Running reviews inline in the webhook request collapses the instance's streaming connections under bursts of PRs across repos.
+When `TASK_QUEUE_PATH` and `TASK_TARGET_URL` are set the webhook becomes a thin enqueuer and reviews run as durable, retryable Cloud Tasks jobs (unset = inline mode, the local/CI fallback).
+
+Flow: `webhook -> enqueue_review -> Cloud Tasks (retry/backoff, max-concurrent-dispatches) -> POST /process-review -> run_review`.
+
+`/process-review` authenticates via `X-Task-Auth` (fails closed if `TASK_AUTH_TOKEN` is unset), dedups on `head_sha` against the last posted review metadata, and returns 500 to trigger a retry on transient failure.
+On the final attempt (`TASK_MAX_ATTEMPTS`, default 4) it posts a visible "Review could not complete" comment and emits a `review-job-dead repo=... pr=... sha=... error=...` log line for replay, then returns 200 to terminate the task.
+
+Provision the queue:
+
+```bash
+gcloud tasks queues create ai-review-jobs --location=europe-west3 --max-concurrent-dispatches=2 --max-attempts=4 --min-backoff=60s --max-backoff=600s
+```
+
+Then set on the service (in addition to the existing review env): `TASK_QUEUE_PATH=projects/<P>/locations/<L>/queues/ai-review-jobs`, `TASK_TARGET_URL=https://<this-service-url>`, `TASK_AUTH_TOKEN=<shared secret>`, and optionally `TASK_MAX_ATTEMPTS=4` (match the queue's `--max-attempts`).
 
 ### Sequence Diagram
 
@@ -146,7 +164,7 @@ sequenceDiagram
 - **`review_pr()`** (`review.py`): Core orchestration. Fetches PR data, builds context, spawns agents in parallel, aggregates, cross-reviews, prepends secret findings, returns `ConsolidatedReview`. On large PRs (additions + deletions > 1000 or changed files > 20), agents run through the sharded map-reduce path (`_run_agent_sharded`) instead of a single conversation - see [Large-PR Sharded Review](#large-pr-sharded-review) below.
 - **`ReviewAgent.review()`** (`agents/base.py`): Runs one agent via `AnthropicClient.run_review` (tool-use loop + structured output), returns an `AgentReview`. The model is the configured `AgentConfig.model`, falling back to the agent class's `MODEL`.
 - **`aggregate_findings()`** (`review.py`): Clusters raw findings by similarity, computes consensus scores, applies confidence filtering, cross-file dedup, and an adaptive per-review finding cap (`_cap_findings`).
-- **`default_review_handler()`** (`webhook.py`): Webhook's async handler — includes pre-agent skip checks, LGTM fast path, metadata embedding, and the full post flow.
+- **`run_review()`** (`webhook.py`): The webhook's review flow — pre-agent skip checks, LGTM fast path, metadata embedding, and the full post flow. Raises on failure so the Cloud Tasks worker (`/process-review`) can retry; the inline path wraps it in `default_review_handler` and swallows exceptions for best-effort behavior.
 
 ---
 

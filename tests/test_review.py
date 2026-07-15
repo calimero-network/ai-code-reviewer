@@ -1811,3 +1811,30 @@ def test_aggregate_findings_marks_incomplete_agent_as_failed():
     assert "security-reviewer" in review.failed_agents
     assert "logic-reviewer" in review.failed_agents
     assert "patterns-reviewer" not in review.failed_agents
+
+
+def test_all_agents_failed_posts_honest_block_never_approve():
+    """When every agent fails, the formatter must produce a visible 'could not
+    complete' body and the review action must never be APPROVE."""
+    from ai_reviewer.github.formatter import GitHubFormatter
+
+    review = ConsolidatedReview(
+        id="review-x",
+        created_at=datetime.now(),
+        repo="test/repo",
+        pr_number=7,
+        findings=[],
+        summary="all failed",
+        agent_count=3,
+        review_quality_score=0.0,
+        total_review_time_ms=0,
+        failed_agents=["security-reviewer", "logic-reviewer", "patterns-reviewer"],
+    )
+    assert review.all_agents_failed
+
+    formatter = GitHubFormatter("AI Code Reviewer")
+    body = formatter.format_all_agents_failed(review)
+    assert "Review could not complete" in body
+    assert "all 3 agent(s) failed" in body
+
+    assert formatter.get_review_action(review, allow_approve=True) != "APPROVE"

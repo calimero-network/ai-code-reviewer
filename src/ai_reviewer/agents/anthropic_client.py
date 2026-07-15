@@ -6,6 +6,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
@@ -52,6 +53,13 @@ _GRAMMAR_TIMEOUT_MARKER = "Grammar compilation timed out"
 _GRAMMAR_TIMEOUT_MAX_RETRIES = 2
 
 
+# A dropped streaming connection surfaces as anthropic.APIConnectionError only AFTER
+# the SDK's own max_retries are exhausted. Retry a bounded couple more times with
+# short backoff so a transient network blip is rescued in seconds; the review
+# deadline (below) is the real backstop against a persistently dead connection.
+_CONNECTION_ERROR_MAX_RETRIES = 2
+
+
 # Summary markers for reviews that did NOT complete. aggregate_findings() treats
 # any summary containing one of these as a failed agent — a give-up must never
 # be indistinguishable from a genuinely clean review.
@@ -59,11 +67,13 @@ TOOL_LOOP_CAP_MARKER = "[tool loop cap]"
 PARSE_ERROR_MARKER = "[parse error]"
 CIRCUIT_BREAKER_MARKER = "[circuit breaker: context limit exceeded]"
 TRUNCATED_MARKER = "[truncated at max_tokens]"
+DEADLINE_MARKER = "[deadline exceeded]"
 INCOMPLETE_SUMMARY_MARKERS: tuple[str, ...] = (
     TOOL_LOOP_CAP_MARKER,
     PARSE_ERROR_MARKER,
     "[circuit breaker",
     TRUNCATED_MARKER,
+    DEADLINE_MARKER,
 )
 
 
@@ -131,7 +141,27 @@ class AnthropicClient:
             max_retries=config.max_retries,
         )
 
-    async def _create_message(self, **kwargs: Any) -> Any:
+    async def _stream_once(self, deadline: float | None, **kwargs: Any) -> Any:
+        """One streaming request, hard-bounded by the review deadline when set.
+
+        wait_for makes the deadline a real ceiling on a single call: without it a
+        hung/half-open stream would sit on the SDK's per-attempt read timeout
+        (x max_retries) regardless of any round-level check. On expiry it raises
+        TimeoutError, which run_review turns into a DEADLINE_MARKER result.
+        """
+
+        async def _run() -> Any:
+            async with self._sdk.messages.stream(**kwargs) as stream:
+                return await stream.get_final_message()
+
+        if deadline is None:
+            return await _run()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("review deadline exceeded before request")
+        return await asyncio.wait_for(_run(), timeout=remaining)
+
+    async def _create_message(self, *, deadline: float | None = None, **kwargs: Any) -> Any:
         """Send one Messages request via streaming and return the final Message.
 
         Streaming keeps the connection active for the whole generation. Long
@@ -141,23 +171,50 @@ class AnthropicClient:
         stream helper accumulates the response cleanly and returns the same
         Message object messages.create() would, so callers are unchanged.
 
-        A "Grammar compilation timed out" 400 is retried here (see
-        _GRAMMAR_TIMEOUT_MARKER); any other error propagates immediately.
+        Two errors are retried here with short, bounded backoff: a dropped
+        connection (anthropic.APIConnectionError) and a "Grammar compilation
+        timed out" 400 (see _GRAMMAR_TIMEOUT_MARKER). Every retry is skipped once
+        it would run past `deadline`. Any other error propagates immediately.
         """
-        for attempt in range(1, _GRAMMAR_TIMEOUT_MAX_RETRIES + 2):
+        grammar_retries = 0
+        conn_retries = 0
+        while True:
             try:
-                async with self._sdk.messages.stream(**kwargs) as stream:
-                    return await stream.get_final_message()
+                return await self._stream_once(deadline, **kwargs)
+            except anthropic.APIConnectionError as exc:
+                if conn_retries >= _CONNECTION_ERROR_MAX_RETRIES:
+                    raise
+                conn_retries += 1
+                backoff = 2 * conn_retries  # 2s, 4s
+                if deadline is not None and time.monotonic() + backoff >= deadline:
+                    # Deadline exhausted: raise TimeoutError so it funnels through
+                    # the same DEADLINE_MARKER path as a hung stream, not as a raw
+                    # SDK error that escapes run_review's except TimeoutError.
+                    raise TimeoutError(
+                        "review deadline reached before connection-error retry"
+                    ) from exc
+                logger.warning(
+                    "APIConnectionError, retrying (%d/%d)",
+                    conn_retries,
+                    _CONNECTION_ERROR_MAX_RETRIES,
+                )
+                await asyncio.sleep(backoff)
             except anthropic.BadRequestError as exc:
                 retriable = _GRAMMAR_TIMEOUT_MARKER in str(exc)
-                if not retriable or attempt > _GRAMMAR_TIMEOUT_MAX_RETRIES:
+                if not retriable or grammar_retries >= _GRAMMAR_TIMEOUT_MAX_RETRIES:
                     raise
+                grammar_retries += 1
+                grammar_backoff = grammar_retries  # 1s, 2s backoff
+                if deadline is not None and time.monotonic() + grammar_backoff >= deadline:
+                    raise TimeoutError(
+                        "review deadline reached before grammar-timeout retry"
+                    ) from exc
                 logger.warning(
                     "Grammar compilation timed out, retrying (%d/%d)",
-                    attempt,
+                    grammar_retries,
                     _GRAMMAR_TIMEOUT_MAX_RETRIES,
                 )
-                await asyncio.sleep(attempt)  # 1s, 2s backoff
+                await asyncio.sleep(grammar_backoff)
 
     async def run_completion(
         self,
@@ -251,10 +308,25 @@ class AnthropicClient:
         # budget is the binding cap; an 8-round loop cap below it made the last
         # 12 calls unreachable and silently truncated agentic reviews on Sonnet 5.
         max_tool_rounds: int = 20,
+        # Wall-clock budget for this whole call (all tool rounds + in-call retries).
+        # None -> take AnthropicApiConfig.agent_review_deadline_seconds.
+        max_review_seconds: float | None = None,
     ) -> AnthropicReviewResult:
         messages: list[dict[str, Any]] = [{"role": "user", "content": user_blocks}]
         usage = UsageStats()
         tool_calls: list[dict[str, Any]] = []
+
+        if max_review_seconds is None:
+            max_review_seconds = self.config.agent_review_deadline_seconds
+        deadline = time.monotonic() + max_review_seconds
+
+        def _incomplete(marker: str) -> AnthropicReviewResult:
+            return AnthropicReviewResult(
+                parsed={"findings": [], "summary": marker},
+                raw_text="",
+                usage=usage,
+                tool_calls=tool_calls,
+            )
 
         tools = tool_registry.tool_specs() if tool_registry else None
         # Once the registry's tool-call budget is exhausted, drop `tools` from
@@ -282,6 +354,15 @@ class AnthropicClient:
             # the whole PR to "Review Incomplete". Same salvage as tool-budget
             # exhaustion, applied to the round cap.
             last_round = round_idx == max_tool_rounds
+            # Deadline backstop: stop before starting another round once the wall-clock
+            # budget for this agent is spent. Marks the review incomplete rather than
+            # letting retries x tool rounds compound into a many-minute hang.
+            if time.monotonic() >= deadline:
+                logger.warning(
+                    "Agent review deadline (%.0fs) exceeded — returning incomplete",
+                    max_review_seconds,
+                )
+                return _incomplete(DEADLINE_MARKER)
             # Circuit breaker: abort before sending if the last request's real context
             # already exceeded twice the limit. We use the API's per-response size
             # (input + cache_read + cache_creation) — usage.input_tokens alone excludes
@@ -317,7 +398,11 @@ class AnthropicClient:
             if tools and not tool_budget_exhausted and not last_round:
                 kwargs["tools"] = tools
 
-            response = await self._create_message(**kwargs)
+            try:
+                response = await self._create_message(deadline=deadline, **kwargs)
+            except TimeoutError:
+                logger.warning("Agent review deadline exceeded mid-request — returning incomplete")
+                return _incomplete(DEADLINE_MARKER)
             _accumulate_usage(usage, response)
             ru = getattr(response, "usage", None)
             last_request_context = (

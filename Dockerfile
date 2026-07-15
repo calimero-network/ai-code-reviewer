@@ -20,9 +20,9 @@ COPY pyproject.toml .
 COPY README.md .
 COPY src/ src/
 
-# Install the package
+# Install the package with the gcp extra (Cloud Tasks enqueue for the webhook App)
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir .
+    pip install --no-cache-dir ".[gcp]"
 
 # ============== Runtime Stage ==============
 FROM python:3.11-slim as runtime
