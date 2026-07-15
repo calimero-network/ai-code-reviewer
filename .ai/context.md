@@ -152,3 +152,10 @@ orchestrator:
 - `complete_simple(model, system, user, max_tokens, temperature)` → Lightweight completion with caching but no tools or schema; used for cross-review and other internal calls
 
 Both methods log token usage and support prompt caching when `enable_prompt_caching` is true.
+
+**Error handling & retries:**
+- Grammar-timeout errors (implicit `BadRequestError`) are retried immediately
+- HTTP 529 Overloaded responses are retried up to 3 times with escalating backoff: 15s, 30s, 60s (`_OVERLOADED_MAX_RETRIES`, `_OVERLOADED_BACKOFF_SECONDS`)
+- 529 retries respect the review deadline; if backoff would exceed it, `TimeoutError` is raised instead of sleeping (funnels to `DEADLINE_MARKER`)
+- Other `APIStatusError` (auth, validation) are immediately re-raised without retry
+- Connection errors use the configured `max_retries` setting
