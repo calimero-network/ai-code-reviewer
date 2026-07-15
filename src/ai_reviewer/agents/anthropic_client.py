@@ -60,6 +60,14 @@ _GRAMMAR_TIMEOUT_MAX_RETRIES = 2
 _CONNECTION_ERROR_MAX_RETRIES = 2
 
 
+# Anthropic 529 "Overloaded" is server-side capacity pressure that can persist
+# for tens of seconds - longer than the SDK's fast built-in retries. Ride it out
+# with a few long-backoff attempts (bounded by the review deadline). The App's
+# queue path also retries the whole job, but the CI path has no such backstop.
+_OVERLOADED_MAX_RETRIES = 3
+_OVERLOADED_BACKOFF_SECONDS = (15, 30, 60)
+
+
 # Summary markers for reviews that did NOT complete. aggregate_findings() treats
 # any summary containing one of these as a failed agent — a give-up must never
 # be indistinguishable from a genuinely clean review.
@@ -178,6 +186,7 @@ class AnthropicClient:
         """
         grammar_retries = 0
         conn_retries = 0
+        overloaded_retries = 0
         while True:
             try:
                 return await self._stream_once(deadline, **kwargs)
@@ -215,6 +224,28 @@ class AnthropicClient:
                     _GRAMMAR_TIMEOUT_MAX_RETRIES,
                 )
                 await asyncio.sleep(grammar_backoff)
+            except anthropic.APIStatusError as exc:
+                # 529 Overloaded is Anthropic-side capacity pressure that can
+                # persist past the SDK's fast built-in retries. Retry with long
+                # backoff to ride out the window, bounded by the deadline. Kept
+                # after BadRequestError (a 400 subclass) so grammar-timeout retry
+                # still wins; other status errors (auth/validation) are not
+                # retried here.
+                if getattr(exc, "status_code", None) != 529:
+                    raise
+                if overloaded_retries >= _OVERLOADED_MAX_RETRIES:
+                    raise
+                overloaded_retries += 1
+                backoff = _OVERLOADED_BACKOFF_SECONDS[overloaded_retries - 1]
+                if deadline is not None and time.monotonic() + backoff >= deadline:
+                    raise TimeoutError("review deadline reached before overloaded retry") from exc
+                logger.warning(
+                    "Anthropic overloaded (529), retrying in %ds (%d/%d)",
+                    backoff,
+                    overloaded_retries,
+                    _OVERLOADED_MAX_RETRIES,
+                )
+                await asyncio.sleep(backoff)
 
     async def run_completion(
         self,

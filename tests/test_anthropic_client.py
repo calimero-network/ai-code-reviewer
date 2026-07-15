@@ -1103,6 +1103,43 @@ async def test_create_message_connection_error_recovers_on_retry(monkeypatch):
     assert calls["n"] == 2
 
 
+def _overloaded_error() -> "ac.anthropic.APIStatusError":
+    resp = httpx.Response(529, request=httpx.Request("POST", "http://x"))
+    return ac.anthropic.APIStatusError("Error code: 529 - Overloaded", response=resp, body=None)
+
+
+@pytest.mark.asyncio
+async def test_create_message_retries_overloaded_then_succeeds(monkeypatch):
+    """A 529 Overloaded is retried with backoff; the recovered response is returned."""
+    monkeypatch.setattr(ac.asyncio, "sleep", AsyncMock())
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    final = _fake_response('{"findings": [], "summary": "ok"}')
+    _, calls = _mock_stream_boundary(client, [_overloaded_error(), final])
+
+    result = await client._create_message(model="claude-sonnet-5", max_tokens=8192)
+
+    assert result is final
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_create_message_bounds_overloaded_retries(monkeypatch):
+    """A sustained 529 is retried a bounded number of times, then re-raised."""
+    from ai_reviewer.agents.anthropic_client import _OVERLOADED_MAX_RETRIES
+
+    monkeypatch.setattr(ac.asyncio, "sleep", AsyncMock())
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    total = _OVERLOADED_MAX_RETRIES + 1
+    _, calls = _mock_stream_boundary(client, [_overloaded_error() for _ in range(total)])
+
+    with pytest.raises(ac.anthropic.APIStatusError):
+        await client._create_message(model="claude-sonnet-5", max_tokens=8192)
+
+    assert calls["n"] == total
+
+
 @pytest.mark.asyncio
 async def test_run_review_returns_deadline_marker_when_budget_exceeded():
     """An agent that keeps requesting tools past its wall-clock budget must stop
