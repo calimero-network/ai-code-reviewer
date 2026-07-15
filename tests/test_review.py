@@ -1838,3 +1838,32 @@ def test_all_agents_failed_posts_honest_block_never_approve():
     assert "all 3 agent(s) failed" in body
 
     assert formatter.get_review_action(review, allow_approve=True) != "APPROVE"
+
+
+class TestExtraReviewerUsersWiring:
+    """config.github.extra_reviewer_users must reach the GitHubClient (was dead config)."""
+
+    @pytest.mark.asyncio
+    async def test_review_pr_passes_extra_reviewer_users(self):
+        from unittest.mock import MagicMock, patch
+
+        from ai_reviewer.config import AnthropicApiConfig
+        from ai_reviewer.review import review_pr
+
+        config = MagicMock()
+        config.github.extra_reviewer_users = ["meroreviewer[bot]"]
+
+        class _Stop(Exception):
+            pass
+
+        with patch("ai_reviewer.review.GitHubClient") as gh_cls:
+            gh_cls.return_value.get_pull_request.side_effect = _Stop()
+            with pytest.raises(_Stop):
+                await review_pr(
+                    repo="o/r",
+                    pr_number=1,
+                    anthropic_cfg=AnthropicApiConfig(api_key="sk-test"),
+                    github_token="ghp_x",
+                    config=config,
+                )
+            assert gh_cls.call_args.kwargs["extra_reviewer_users"] == ["meroreviewer[bot]"]
