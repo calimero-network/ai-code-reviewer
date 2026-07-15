@@ -119,6 +119,16 @@ agent = MyAgent(
 review = await agent.review(diff="", file_contents={}, context=ctx)
 ```
 
+### Review Deadlines and Incomplete Results
+
+Each agent review is bounded by a per-agent wall-clock deadline configured via `agent_review_deadline_seconds` (default: 900 seconds). If a review exceeds this deadline:
+
+- `AnthropicClient.run_review()` returns an incomplete `AnthropicReviewResult` with summary set to `DEADLINE_MARKER` (`'[deadline exceeded]'`)
+- All streaming calls and tool rounds are wrapped with `asyncio.wait_for()` to enforce the deadline
+- Connection retries in `_create_message()` (up to 2 retries with 2s/4s backoff) will raise `TimeoutError` if a retry would exceed the deadline, ensuring the deadline path is taken rather than hanging indefinitely
+
+This prevents reviews from hanging on network issues or slow LLM responses.
+
 ### Simple Completions
 
 For lightweight single-turn completions without tools or JSON schema (e.g., cross-review summarization), use `AnthropicClient.complete_simple()`:
@@ -139,6 +149,7 @@ This method:
 - Logs token usage on every call
 - Respects prompt caching configuration (cache_control breakpoint on last system block)
 - Is useful for operations that must go through `AnthropicClient` for invariant I1 compliance but don't need full agent infrastructure
+- Is **not** subject to the agent review deadline; it is a lightweight one-shot operation
 
 ## Tool Registry Interface
 
