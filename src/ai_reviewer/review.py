@@ -1470,8 +1470,11 @@ async def review_pr(
 
     start_time = time.time()
 
-    # Get PR information
-    gh = GitHubClient(github_token)
+    # Get PR information. extra_reviewer_users lets delta tracking recognize
+    # reviews posted under a different bot identity (e.g. past meroreviewer[bot]
+    # reviews after a repo switches to the github-actions token).
+    extra_users = config.github.extra_reviewer_users if config and config.github else None
+    gh = GitHubClient(github_token, extra_reviewer_users=extra_users)
     pr = gh.get_pull_request(repo, pr_number)
     repo_obj = gh.get_repo(repo)
 
