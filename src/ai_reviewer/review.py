@@ -46,6 +46,7 @@ from ai_reviewer.models.review import AgentReview, ConsolidatedReview, ScoreBrea
 from ai_reviewer.security.scanner import scan_for_secrets
 from ai_reviewer.session import ReviewSession
 from ai_reviewer.tools.repo_tools import ToolRegistry
+from ai_reviewer.validation.fix_check import validate_finding_fixes
 
 logger = logging.getLogger(__name__)
 
@@ -899,6 +900,7 @@ def aggregate_findings(
             consensus_score=consensus_score,
             agreeing_agents=agreeing_agents,
             confidence=float(raw.get("confidence", 0.8)),
+            suggested_replacement=raw.get("suggested_replacement"),
         )
         consolidated.append(finding)
 
@@ -996,6 +998,7 @@ def _review_finding_to_dict(f: ReviewFinding) -> dict[str, Any]:
         "title": f.title,
         "description": f.description,
         "suggested_fix": f.suggested_fix,
+        "suggested_replacement": f.suggested_replacement,
         "confidence": f.confidence,
     }
 
@@ -1331,6 +1334,7 @@ def _raw_to_review_finding(raw: dict[str, Any]) -> ReviewFinding | None:
             description=raw.get("description", ""),
             suggested_fix=raw.get("suggested_fix"),
             confidence=float(raw.get("confidence", 0.6)),
+            suggested_replacement=raw.get("suggested_replacement"),
         )
     except (KeyError, ValueError) as e:
         logger.warning("Failed to parse cross-shard finding: %s, raw=%r", e, raw)
@@ -1793,6 +1797,35 @@ async def review_pr(
             if cross_results:
                 review = apply_cross_review(review, cross_results, min_validation_agreement)
                 logger.info(f"Cross-review done: {len(review.findings)} findings after validation")
+
+    # Validate structured replacements so only fixes that apply cleanly (and keep
+    # the file parseable) survive as blind-apply GitHub suggestions; the rest fall
+    # back to prose. Fetch content the same way the tools do: session cache first,
+    # then the Contents API at the PR head SHA. Never let this fail the review.
+    try:
+        import base64 as _b64
+
+        def _fix_content(path: str) -> str | None:
+            cached = session.cached_file(path)
+            if cached is not None:
+                return cached
+            if session.is_github_budget_exhausted():
+                return None
+            try:
+                session.consume_github_request()
+                contents = gh.get_file_contents(repo, path, ref=pr.head.sha)
+                text = _b64.b64decode(getattr(contents, "content", "") or "").decode(
+                    "utf-8", errors="replace"
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.debug("fix-check content fetch failed %s: %s", path, e)
+                return None
+            session.store_file(path, text)
+            return text
+
+        validate_finding_fixes(review.findings, _fix_content)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Fix validation step failed (non-fatal): %s", e)
 
     if secret_findings:
         review.findings = secret_findings + review.findings

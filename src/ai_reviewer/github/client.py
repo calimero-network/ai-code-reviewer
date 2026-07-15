@@ -218,6 +218,24 @@ def apply_comment_limits(
     return result
 
 
+def _suggestion_block(finding: ConsolidatedFinding) -> str | None:
+    """Render a GitHub ```suggestion block for a validated replacement, else None.
+
+    Only single-line ranges qualify: the inline comment anchors ``line`` alone, so
+    GitHub would apply a suggestion to that one line only - a multi-line range
+    (line_end > line_start) cannot be applied correctly and falls back to prose.
+    A replacement containing triple backticks would break the fence, so it also
+    falls back. Never emit a suggestion for an unvalidated fix.
+    """
+    if not (finding.fix_validated and finding.suggested_replacement):
+        return None
+    if finding.line_end is not None and finding.line_end != finding.line_start:
+        return None
+    if "```" in finding.suggested_replacement:
+        return None
+    return f"```suggestion\n{finding.suggested_replacement}\n```"
+
+
 @dataclass
 class GitHubConfig:
     """Configuration for GitHub client."""
@@ -760,6 +778,9 @@ class GitHubClient:
             comment_body = f"{emoji} **{finding.title}**\n\n{finding.description}"
             if finding.suggested_fix:
                 comment_body += f"\n\n**Suggested fix:**\n```\n{finding.suggested_fix}\n```"
+            suggestion = _suggestion_block(finding)
+            if suggestion:
+                comment_body += "\n\n" + suggestion
             comment_body += f"\n\n<!-- ai-reviewer-id: {finding.finding_hash} -->"
 
             entry: ReviewComment = {
