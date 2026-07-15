@@ -5,10 +5,10 @@ name: MeroReviewer
 
 on:
   pull_request:
-    # `synchronize` (re-run on every push) deliberately omitted to control
-    # cost — a review fires on PR open / reopen / draft→ready, not on each
-    # push. Re-trigger a review by toggling draft or via workflow_dispatch.
-    types: [opened, reopened, ready_for_review]
+    # `synchronize` included: reviews run on every push, dogfooding the PR
+    # branch's own code. Delta tracking + convergence keep repeat passes cheap
+    # (incremental review, LGTM fast-path, skip once findings stabilize).
+    types: [opened, reopened, ready_for_review, synchronize]
     # Doc-only PRs are owned by the `Doc Auto-Update` workflow; skipping
     # them here avoids paying twice for the same diff.
     paths-ignore:
