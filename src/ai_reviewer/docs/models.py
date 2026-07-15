@@ -8,6 +8,15 @@ from dataclasses import dataclass, field
 
 CONFIDENCE_RANK: dict[str, int] = {"low": 0, "medium": 1, "high": 2}
 
+# FIND/REPLACE delimiters the HTML patcher uses to frame model edits. They are
+# structural tokens, never document text; if one survives into finalized content
+# a patch leaked its raw markers, so that file must not be committed.
+DOC_PATCH_MARKERS: tuple[str, ...] = ("<<<FIND", "FIND>>>", "<<<REPLACE", "REPLACE>>>")
+
+
+def contains_patch_marker(content: str) -> bool:
+    return any(marker in content for marker in DOC_PATCH_MARKERS)
+
 
 def meets_threshold(confidence: str, threshold: str) -> bool:
     """True if *confidence* is at least *threshold* on the low<medium<high scale."""

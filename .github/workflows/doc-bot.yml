@@ -43,6 +43,26 @@ jobs:
           # Fetch enough history for merge scenarios, rebases, and long-running PRs
           fetch-depth: 100
       
+      - name: Guard against leaked FIND/REPLACE markers in docs
+        # Fails if the doc-update pipeline ever committed raw patch delimiters
+        # into documentation content (see calimero-network/ai-code-reviewer PRs #92/#108/#110).
+        run: |
+          set -o pipefail
+          PATHS=""
+          for p in .ai README.md docs architecture; do
+            [ -e "$p" ] && PATHS="$PATHS $p"
+          done
+          if [ -z "$PATHS" ]; then
+            echo "No documentation paths present; nothing to scan."
+            exit 0
+          fi
+          # -F fixed strings, -w not used (tokens contain punctuation). Any hit fails.
+          if grep -RnF -e '<<<FIND' -e 'FIND>>>' -e '<<<REPLACE' -e 'REPLACE>>>' $PATHS; then
+            echo "::error::Leaked FIND/REPLACE patch marker found in documentation content."
+            exit 1
+          fi
+          echo "No leaked FIND/REPLACE markers in docs."
+
       - name: Fetch base branch for comparison
         env:
           # Pass through env var to avoid shell interpolation issues

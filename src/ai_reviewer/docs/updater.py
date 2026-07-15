@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ai_reviewer.docs.apply import apply_add_section, apply_update_section
-from ai_reviewer.docs.models import DocDraft, FileWrite
+from ai_reviewer.docs.models import DocDraft, FileWrite, contains_patch_marker
 from ai_reviewer.docs.page_builder import apply_create_page, wire_new_pages
 from ai_reviewer.docs.router import build_doc_index, route_changes
 from ai_reviewer.docs.understanding import summarize_pr_changes
@@ -393,6 +393,19 @@ async def run_doc_update(
             file_writes.append(FileWrite(path=f"{prefix}nav.js", content=nav_content))
         if index_content is not None:
             file_writes.append(FileWrite(path=f"{prefix}index.html", content=index_content))
+
+    # Marker leak guard: never commit doc content that still carries raw FIND/REPLACE
+    # delimiters (a patch that spliced its own markers into the page). Drop those files.
+    clean_writes: list[FileWrite] = []
+    for fw in file_writes:
+        if contains_patch_marker(fw.content):
+            logger.warning(
+                "Dropping %s from doc-update PR: content still contains a FIND/REPLACE marker",
+                fw.path,
+            )
+            continue
+        clean_writes.append(fw)
+    file_writes = clean_writes
 
     if not file_writes:
         return DocUpdateResult(
