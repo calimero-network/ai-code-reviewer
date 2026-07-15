@@ -62,7 +62,10 @@ steps:
       - '--cpu'
       - '1'
       - '--timeout'
-      - '300s'  # 5 min for long reviews
+      # Reviews run inside a single /process-review request and take 5-20 min;
+      # must be >= the Cloud Tasks dispatch deadline (1800s) or Cloud Run kills
+      # every queued dispatch mid-review with a 504.
+      - '1800s'
       - '--concurrency'
       - '10'
       - '--min-instances'
