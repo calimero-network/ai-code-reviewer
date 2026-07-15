@@ -252,6 +252,27 @@ def test_hunk_mode_trimmed_paths_out_records_only_excerpted():
     assert trimmed == {"big.py"}
 
 
+def test_hunk_mode_large_file_without_hunks_is_capped_not_full():
+    content = _numbered(400)
+    # Diff references a different path, so big.py has no discoverable hunks.
+    diff = "diff --git a/other.py b/other.py\n@@ -1,1 +1,1 @@\n+x\n"
+    trimmed: set[str] = set()
+    blocks = build_user_blocks(
+        pr_title="t",
+        pr_body="",
+        diff=diff,
+        changed_files={"big.py": content},
+        neighbor_files={},
+        full_file_max_lines=300,
+        trimmed_paths_out=trimmed,
+    )
+    combined = "\n".join(b["text"] for b in blocks)
+    assert "truncated to first 300 lines" in combined
+    assert "L0300" in combined
+    assert "L0301" not in combined  # full content must not leak through
+    assert trimmed == {"big.py"}
+
+
 def test_hunk_mode_caps_neighbors_to_first_lines():
     blocks = build_user_blocks(
         pr_title="t",

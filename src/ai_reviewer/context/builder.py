@@ -337,11 +337,17 @@ def build_user_blocks(
         for path, content in changed_files.items():
             if len(content.splitlines()) > full_file_max_lines:
                 hunks = _hunk_windows_for_file(diff, path)
-                if hunks:
-                    changed_for_block[path] = _hunk_excerpt(content, hunks, hunk_context_lines)
-                    if trimmed_paths_out is not None:
-                        trimmed_paths_out.add(path)
-                    continue
+                # No discoverable hunks for an over-limit file (binary diff, path
+                # mismatch, or a diff slice that omits this file's hunks) must still
+                # be trimmed, or the per-file token cap silently leaks a full file.
+                changed_for_block[path] = (
+                    _hunk_excerpt(content, hunks, hunk_context_lines)
+                    if hunks
+                    else _cap_lines(content, full_file_max_lines)
+                )
+                if trimmed_paths_out is not None:
+                    trimmed_paths_out.add(path)
+                continue
             changed_for_block[path] = content
         neighbor_for_block = {
             path: _cap_lines(content, _NEIGHBOR_HUNK_MODE_MAX_LINES)
