@@ -119,6 +119,16 @@ agent = MyAgent(
 review = await agent.review(diff="", file_contents={}, context=ctx)
 ```
 
+### Retry Behavior
+
+`AnthropicClient` automatically retries transient failures:
+
+- **Grammar timeouts** (400 BadRequestError): Retried with exponential backoff
+- **Connection errors** (network I/O): Retried with exponential backoff
+- **HTTP 529 Overloaded**: Retried up to 3 times with escalating backoff of 15s, 30s, and 60s (configurable via `_OVERLOADED_MAX_RETRIES` and `_OVERLOADED_BACKOFF_SECONDS`). Retries are bounded by the review deadline — if a backoff would cross the deadline, a `TimeoutError` is raised instead of sleeping, which funnels to timeout handling elsewhere.
+
+All other API errors (auth, validation, etc.) are raised immediately without retry.
+
 ### Simple Completions
 
 For lightweight single-turn completions without tools or JSON schema (e.g., cross-review summarization), use `AnthropicClient.complete_simple()`:
