@@ -166,7 +166,46 @@ github:
   # Optional: GitHub App auth (for higher rate limits)
   app_id: ${GITHUB_APP_ID}
   private_key_path: ./github-app.pem
+
+# Cloud Tasks configuration (for enqueued review tasks)
+cloud_tasks:
+  # dispatch_deadline is set to 1800s (Cloud Tasks maximum)
+  # Ensure Cloud Run service timeout matches: gcloud run services update --timeout=1800
+  dispatch_deadline_seconds: 1800
 ```
+FIND>>>
+<<<REPLACE
+## Error Handling
+
+```python
+async def post_review_safely(repo: str, pr: int, review: ConsolidatedReview):
+    try:
+        await self.post_review(repo, pr, review)
+    except RateLimitExceeded:
+        # Wait and retry
+        await asyncio.sleep(60)
+        await self.post_review(repo, pr, review)
+    except PermissionDenied:
+        # Log but don't crash
+        logger.error(f"No permission to post review to {repo}#{pr}")
+    except Exception as e:
+        # Post error comment as fallback
+        await self.post_comment(
+            repo, pr, 
+            f"⚠️ AI Review failed: {e}\n\nPlease check logs."
+        )
+```
+
+## Task Enqueueing
+
+When enqueueing review tasks via Cloud Tasks, set the `dispatch_deadline` to 1800 seconds (the maximum allowed by Cloud Tasks). Ensure the Cloud Run service timeout is configured to match:
+
+```bash
+gcloud run services update <service-name> --timeout=1800
+```
+
+This ensures enqueued review tasks have sufficient time to complete before timing out.
+FIND>>>
 
 ## Anti-Patterns
 
