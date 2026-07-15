@@ -178,6 +178,20 @@ policy:
 
 ---
 
+## Deployment & Operations
+
+### Cloud Run Service Configuration
+
+When deploying AI Code Reviewer with Cloud Tasks for queued review processing, configure the Cloud Run service timeout to match the task dispatch deadline:
+
+```bash
+gcloud run services update ai-code-reviewer --timeout=1800 --region=us-central1
+```
+
+The `enqueue_review` function sets a dispatch deadline of 1800 seconds (Cloud Tasks maximum) on enqueued review tasks. The Cloud Run service timeout must be at least 1800 seconds to allow queued review tasks to complete successfully before being terminated.
+
+---
+
 ## GitHub Actions Setup
 
 ### Basic Setup (`GITHUB_TOKEN`)
