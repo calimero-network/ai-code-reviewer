@@ -199,14 +199,15 @@ class AnthropicClient:
                 if not retriable or grammar_retries >= _GRAMMAR_TIMEOUT_MAX_RETRIES:
                     raise
                 grammar_retries += 1
-                if deadline is not None and time.monotonic() + grammar_retries >= deadline:
+                grammar_backoff = grammar_retries  # 1s, 2s backoff
+                if deadline is not None and time.monotonic() + grammar_backoff >= deadline:
                     raise
                 logger.warning(
                     "Grammar compilation timed out, retrying (%d/%d)",
                     grammar_retries,
                     _GRAMMAR_TIMEOUT_MAX_RETRIES,
                 )
-                await asyncio.sleep(grammar_retries)  # 1s, 2s backoff
+                await asyncio.sleep(grammar_backoff)
 
     async def run_completion(
         self,

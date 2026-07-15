@@ -170,7 +170,14 @@ def _resolve_github_token(repo: str) -> str | None:
 
     if github_app_id and github_app_private_key:
         logger.info(f"Using GitHub App authentication for {repo}")
-        github_token = _get_github_app_token(github_app_id, github_app_private_key, repo)
+        app_token = _get_github_app_token(github_app_id, github_app_private_key, repo)
+        if app_token is None and github_token:
+            logger.warning(
+                "GitHub App token minting failed for %s; falling back to GITHUB_TOKEN", repo
+            )
+        # Keep the PAT as a fallback so a transient App-auth failure does not
+        # silently disable reviews when a valid GITHUB_TOKEN is also configured.
+        github_token = app_token or github_token
 
     return github_token
 
@@ -326,16 +333,20 @@ async def run_review(repo: str, pr_number: int) -> None:
                 pr_number,
             )
             try:
-                recheck_review = await review_pr(
-                    repo=repo,
-                    pr_number=pr_number,
-                    anthropic_cfg=anthropic_cfg,
-                    github_token=github_token,
-                    num_agents=1,
-                    enable_cross_review=False,
-                    min_validation_agreement=min_agreement,
-                    config=webhook_config,
-                )
+                # Bound by the same concurrency cap as the full review: the
+                # recheck is also a streaming Anthropic call and must not
+                # oversaturate connections under an LGTM-eligible burst.
+                async with _get_review_semaphore():
+                    recheck_review = await review_pr(
+                        repo=repo,
+                        pr_number=pr_number,
+                        anthropic_cfg=anthropic_cfg,
+                        github_token=github_token,
+                        num_agents=1,
+                        enable_cross_review=False,
+                        min_validation_agreement=min_agreement,
+                        config=webhook_config,
+                    )
             except Exception as e:
                 logger.warning(
                     "LGTM re-check failed for %s PR #%d; falling back to normal review: %s",
