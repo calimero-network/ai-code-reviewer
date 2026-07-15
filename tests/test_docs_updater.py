@@ -666,6 +666,80 @@ async def test_pr_body_excludes_orphan_skipped_page():
 
 
 @pytest.mark.asyncio
+async def test_marker_leak_content_dropped_clean_content_ships():
+    """A draft whose finalized content still contains a FIND/REPLACE marker is
+    dropped from the PR; a clean sibling draft still ships."""
+    gh, _ = _gh_for("diff", ["architecture/auto-follow.html", "architecture/concepts.html"])
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    dg = DocGenerationSettings(enabled=True)
+    c1 = Change("fix", "A", "wa", "y", [], ["crates/gov/a.rs"], "i")
+    c2 = Change("fix", "B", "wb", "y", [], ["crates/gov/b.rs"], "i")
+    summary = ChangeSummary(pr_intent="i", changes=[c1, c2])
+    a1 = DocAction(change=c1, action="update_section", target_path="architecture/auto-follow.html")
+    a2 = DocAction(change=c2, action="update_section", target_path="architecture/concepts.html")
+    leaked = DocDraft(
+        action="update_section",
+        target_path="architecture/auto-follow.html",
+        updated_content="<p>oops FIND>>> leaked</p>",
+        change=c1,
+    )
+    clean = DocDraft(
+        action="update_section",
+        target_path="architecture/concepts.html",
+        updated_content="<p>clean update</p>",
+        change=c2,
+    )
+    with (
+        patch("ai_reviewer.docs.updater.summarize_pr_changes", AsyncMock(return_value=summary)),
+        patch("ai_reviewer.docs.updater.route_changes", AsyncMock(return_value=[a1, a2])),
+        patch("ai_reviewer.docs.updater._apply_one", AsyncMock(side_effect=[leaked, clean])),
+        patch(
+            "ai_reviewer.docs.updater.verify_draft", AsyncMock(side_effect=lambda **kw: kw["draft"])
+        ),
+    ):
+        result = await run_doc_update(
+            repo="o/r", pr_number=1, gh=gh, anthropic_cfg=cfg, doc_generation=dg
+        )
+    assert gh.create_doc_update_pr.called
+    written = {fw.path for fw in gh.create_doc_update_pr.call_args.kwargs["file_writes"]}
+    assert "architecture/concepts.html" in written  # clean content ships
+    assert "architecture/auto-follow.html" not in written  # marker-leaking file dropped
+    shipped = {d.target_path for d in result.successful}
+    assert "architecture/auto-follow.html" not in shipped
+
+
+@pytest.mark.asyncio
+async def test_marker_leak_only_draft_skips_pr():
+    """If the only doc update leaks a marker, no PR is opened."""
+    gh, _ = _gh_for("diff", ["architecture/auto-follow.html"])
+    cfg = AnthropicApiConfig(api_key="sk-test")
+    dg = DocGenerationSettings(enabled=True)
+    change = Change("fix", "t", "w", "y", [], ["crates/gov/src/lib.rs"], "i")
+    summary = ChangeSummary(pr_intent="i", changes=[change])
+    action = DocAction(
+        change=change, action="update_section", target_path="architecture/auto-follow.html"
+    )
+    leaked = DocDraft(
+        action="update_section",
+        target_path="architecture/auto-follow.html",
+        updated_content="<p>uses <<<FIND ... FIND>>> markers</p>",
+        change=change,
+    )
+    with (
+        patch("ai_reviewer.docs.updater.summarize_pr_changes", AsyncMock(return_value=summary)),
+        patch("ai_reviewer.docs.updater.route_changes", AsyncMock(return_value=[action])),
+        patch("ai_reviewer.docs.updater.apply_update_section", AsyncMock(return_value=leaked)),
+        patch("ai_reviewer.docs.updater.verify_draft", AsyncMock(return_value=leaked)),
+    ):
+        gh.get_file_contents.return_value = MagicMock(decoded_content=b"<html>old</html>")
+        result = await run_doc_update(
+            repo="o/r", pr_number=1, gh=gh, anthropic_cfg=cfg, doc_generation=dg
+        )
+    assert result.skipped
+    assert not gh.create_doc_update_pr.called
+
+
+@pytest.mark.asyncio
 async def test_empty_static_docs_dirs_override_honored():
     """An explicit static_docs_dirs: [] disables the HTML scan (not overridden by defaults)."""
     gh, _ = _gh_for("diff", [])
