@@ -12,6 +12,7 @@ anthropic:
   default_model: claude-sonnet-5
   timeout_seconds: 600  # long review generations; below this the connection can be dropped
   max_retries: 3  # transient APIConnectionError/ReadError on long calls are retryable
+  agent_review_deadline_seconds: 900  # wall-clock budget per agent review; backstops retry x timeout hangs
   enable_prompt_caching: true
   max_combined_context_tokens: 80000
   per_file_max_bytes: 524288

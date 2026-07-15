@@ -294,7 +294,14 @@ async def review_pr_async(
     if review.all_agents_failed:
         console.print(f"[red]❌ All {review.agent_count} agents failed![/red]")
         console.print(f"   Time: {review.total_review_time_ms / 1000:.1f}s")
-        console.print("\n[yellow]Not posting to GitHub - all agents failed.[/yellow]")
+        # Never stay silent on GitHub: post an honest "could not complete" comment so
+        # the author can tell the reviewer ran and failed, then re-trigger.
+        if output == "github" and gh is not None and pr is not None:
+            formatter = GitHubFormatter(reviewer_name)
+            gh.post_review(pr, formatter.format_all_agents_failed(review), "COMMENT")
+            console.print("[yellow]Posted 'review could not complete' notice to GitHub.[/yellow]")
+        else:
+            console.print("\n[yellow]Not posting to GitHub - all agents failed.[/yellow]")
         console.print("\n[bold]Possible causes:[/bold]")
         console.print("  • Invalid or expired Anthropic API key")
         console.print("  • Rate limit exceeded")

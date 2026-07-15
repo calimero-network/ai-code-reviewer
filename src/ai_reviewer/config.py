@@ -41,6 +41,10 @@ class AnthropicApiConfig:
     # and retryable; 1 retry was too few (one of N parallel agents reliably
     # failed and the whole review posted "incomplete"). 3 rescues the vast majority.
     max_retries: int = 3
+    # Wall-clock budget for one agent's whole run_review call (all tool rounds and
+    # in-call retries). Backstops the SDK retry x per-attempt-timeout product that
+    # let a single dead streaming connection burn ~20 minutes.
+    agent_review_deadline_seconds: int = 900
     default_model: str = DEFAULT_SONNET_MODEL
     enable_prompt_caching: bool = True
     max_combined_context_tokens: int = 80_000
@@ -236,6 +240,7 @@ def _parse_config(raw: dict[str, Any]) -> Config:
         base_url=anthropic_raw.get("base_url", "https://api.anthropic.com"),
         timeout_seconds=anthropic_raw.get("timeout_seconds", 300),
         max_retries=anthropic_raw.get("max_retries", 3),
+        agent_review_deadline_seconds=anthropic_raw.get("agent_review_deadline_seconds", 900),
         default_model=anthropic_raw.get("default_model", DEFAULT_SONNET_MODEL),
         enable_prompt_caching=anthropic_raw.get("enable_prompt_caching", True),
         max_combined_context_tokens=anthropic_raw.get("max_combined_context_tokens", 80_000),

@@ -54,6 +54,20 @@ class PREvent:
     installation_id: int | None = None
 
 
+# Cloud Run degrades and drops streaming connections when too many reviews run at
+# once (concurrency, not size, triggered the "Review Incomplete" storms). Cap
+# simultaneous reviews so a webhook burst queues instead of overloading the App.
+# Lazily created so MAX_CONCURRENT_REVIEWS is read after the process env is set.
+_review_semaphore: asyncio.Semaphore | None = None
+
+
+def _get_review_semaphore() -> asyncio.Semaphore:
+    global _review_semaphore
+    if _review_semaphore is None:
+        _review_semaphore = asyncio.Semaphore(_get_env_int("MAX_CONCURRENT_REVIEWS", 2))
+    return _review_semaphore
+
+
 # Review trigger - will be set by the application
 _review_handler: Callable | None = None
 # Push trigger for doc-update-on-merge - will be set by the application
@@ -297,19 +311,32 @@ def _setup_default_review_handler() -> Callable:
                             pr_number,
                         )
 
-            review = await review_pr(
-                repo=repo,
-                pr_number=pr_number,
-                anthropic_cfg=anthropic_cfg,
-                github_token=github_token,
-                num_agents=num_agents,
-                enable_cross_review=enable_cross_review,
-                min_validation_agreement=min_agreement,
-                config=webhook_config,
-            )
+            semaphore = _get_review_semaphore()
+            if semaphore.locked():
+                logger.info(
+                    "Review for %s PR #%d queued behind %d in-flight review(s)",
+                    repo,
+                    pr_number,
+                    _get_env_int("MAX_CONCURRENT_REVIEWS", 2),
+                )
+            async with semaphore:
+                review = await review_pr(
+                    repo=repo,
+                    pr_number=pr_number,
+                    anthropic_cfg=anthropic_cfg,
+                    github_token=github_token,
+                    num_agents=num_agents,
+                    enable_cross_review=enable_cross_review,
+                    min_validation_agreement=min_agreement,
+                    config=webhook_config,
+                )
 
             if review.all_agents_failed:
                 logger.error(f"All agents failed for {repo} PR #{pr_number}")
+                gh.post_review(pr, formatter.format_all_agents_failed(review), "COMMENT")
+                logger.info(
+                    "Posted 'review could not complete' notice to %s PR #%d", repo, pr_number
+                )
                 return
 
             meta_review_count = (meta.review_count + 1) if meta is not None else None

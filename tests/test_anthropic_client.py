@@ -1063,3 +1063,74 @@ def test_run_review_default_tool_rounds_matches_tool_call_budget():
 
     sig = inspect.signature(AnthropicClient.run_review)
     assert sig.parameters["max_tool_rounds"].default == 20
+
+
+def _api_connection_error() -> "ac.anthropic.APIConnectionError":
+    return ac.anthropic.APIConnectionError(
+        message="Server disconnected without sending a response",
+        request=httpx.Request("POST", "http://x"),
+    )
+
+
+@pytest.mark.asyncio
+async def test_create_message_bounds_connection_error_retries(monkeypatch):
+    """A persistently dropped connection is retried at most twice (1 + 2) then
+    re-raised — seconds-scale failure, not a multi-minute retry storm."""
+    monkeypatch.setattr(ac.asyncio, "sleep", AsyncMock())
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    _, calls = _mock_stream_boundary(client, [_api_connection_error() for _ in range(3)])
+
+    with pytest.raises(ac.anthropic.APIConnectionError):
+        await client._create_message(model="claude-sonnet-5", max_tokens=8192)
+
+    assert calls["n"] == 3  # initial attempt + 2 bounded retries
+
+
+@pytest.mark.asyncio
+async def test_create_message_connection_error_recovers_on_retry(monkeypatch):
+    """A transient connection drop that clears on the second attempt returns the
+    response instead of failing the review."""
+    monkeypatch.setattr(ac.asyncio, "sleep", AsyncMock())
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    final = _fake_response('{"findings": [], "summary": "ok"}')
+    _, calls = _mock_stream_boundary(client, [_api_connection_error(), final])
+
+    result = await client._create_message(model="claude-sonnet-5", max_tokens=8192)
+
+    assert result is final
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_run_review_returns_deadline_marker_when_budget_exceeded():
+    """An agent that keeps requesting tools past its wall-clock budget must stop
+    with DEADLINE_MARKER (a recognized incomplete marker), not loop for minutes."""
+    from ai_reviewer.agents.anthropic_client import DEADLINE_MARKER, INCOMPLETE_SUMMARY_MARKERS
+
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    client._sdk = MagicMock()
+    # Always ask for another tool, so only the deadline can end the loop.
+    client._create_message = AsyncMock(
+        return_value=_tool_use_response("t1", "read_file", {"path": "a.py"})
+    )
+    registry = MagicMock()
+    registry.tool_specs.return_value = [{"name": "read_file", "input_schema": {}}]
+    registry.execute = AsyncMock(return_value="contents")
+
+    result = await client.run_review(
+        model="claude-sonnet-4-6",
+        system_blocks=[{"type": "text", "text": "s"}],
+        user_blocks=[{"type": "text", "text": "u"}],
+        output_schema={"type": "object"},
+        tool_registry=registry,
+        max_tool_rounds=1000,
+        max_review_seconds=0,
+    )
+
+    assert result.parsed["summary"] == DEADLINE_MARKER
+    assert DEADLINE_MARKER in INCOMPLETE_SUMMARY_MARKERS
+    # Deadline tripped before an unbounded number of rounds ran.
+    assert client._create_message.await_count < 1000
