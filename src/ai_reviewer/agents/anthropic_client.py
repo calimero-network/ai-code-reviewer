@@ -181,13 +181,18 @@ class AnthropicClient:
         while True:
             try:
                 return await self._stream_once(deadline, **kwargs)
-            except anthropic.APIConnectionError:
+            except anthropic.APIConnectionError as exc:
                 if conn_retries >= _CONNECTION_ERROR_MAX_RETRIES:
                     raise
                 conn_retries += 1
                 backoff = 2 * conn_retries  # 2s, 4s
                 if deadline is not None and time.monotonic() + backoff >= deadline:
-                    raise
+                    # Deadline exhausted: raise TimeoutError so it funnels through
+                    # the same DEADLINE_MARKER path as a hung stream, not as a raw
+                    # SDK error that escapes run_review's except TimeoutError.
+                    raise TimeoutError(
+                        "review deadline reached before connection-error retry"
+                    ) from exc
                 logger.warning(
                     "APIConnectionError, retrying (%d/%d)",
                     conn_retries,
@@ -201,7 +206,9 @@ class AnthropicClient:
                 grammar_retries += 1
                 grammar_backoff = grammar_retries  # 1s, 2s backoff
                 if deadline is not None and time.monotonic() + grammar_backoff >= deadline:
-                    raise
+                    raise TimeoutError(
+                        "review deadline reached before grammar-timeout retry"
+                    ) from exc
                 logger.warning(
                     "Grammar compilation timed out, retrying (%d/%d)",
                     grammar_retries,

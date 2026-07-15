@@ -270,12 +270,14 @@ async def run_review(repo: str, pr_number: int) -> None:
     anthropic_api_key = os.environ.get("ANTHROPIC_API_KEY")
     github_token = _resolve_github_token(repo)
 
+    # Raise (not return) so a missing credential propagates to the Cloud Tasks
+    # worker's retry/dead-letter path — a silent return would let /process-review
+    # mark the job "ok" and drop it, recreating the exact total-silence outage
+    # this PR fixes.
     if not anthropic_api_key:
-        logger.error("ANTHROPIC_API_KEY not set")
-        return
+        raise RuntimeError("ANTHROPIC_API_KEY not set")
     if not github_token:
-        logger.error("GITHUB_TOKEN not set")
-        return
+        raise RuntimeError("GITHUB_TOKEN not set")
 
     anthropic_timeout = _get_env_int("ANTHROPIC_TIMEOUT", 600)
     num_agents = _get_env_int("NUM_AGENTS", 3)
@@ -409,6 +411,11 @@ async def run_review(repo: str, pr_number: int) -> None:
             config=webhook_config,
         )
 
+    # all_agents_failed is a terminal, non-retryable outcome: we ran, every agent
+    # produced a failure result, and we post an honest visible notice right here.
+    # Deliberately return (not raise) so the Cloud Tasks worker does not retry and
+    # the inline handler still surfaces the notice — retry/dead-letter is reserved
+    # for unexpected exceptions that posted nothing.
     if review.all_agents_failed:
         logger.error(f"All agents failed for {repo} PR #{pr_number}")
         gh.post_review(pr, formatter.format_all_agents_failed(review), "COMMENT")
