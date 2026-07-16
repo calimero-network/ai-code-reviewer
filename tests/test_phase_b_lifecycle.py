@@ -27,6 +27,7 @@ def _finding(
     file_path: str = "src/foo.py",
     line_start: int = 10,
     confidence: float = 0.9,
+    category: Category = Category.LOGIC,
 ) -> ConsolidatedFinding:
     return ConsolidatedFinding(
         id="f1",
@@ -34,7 +35,7 @@ def _finding(
         line_start=line_start,
         line_end=None,
         severity=severity,
-        category=Category.LOGIC,
+        category=category,
         title=title,
         description="desc",
         suggested_fix=None,
@@ -403,6 +404,18 @@ class TestDismissalPrefilter:
         f = _finding(confidence=0.5)
         assert _apply_dismissal_prefilter([f], []) == [f]
         assert _apply_dismissal_prefilter([f], None) == [f]
+
+    def test_critical_security_reraise_never_dropped(self):
+        # CRITICAL+SECURITY findings bypass the hard pre-filter (like apply_cross_review)
+        # so a fuzzy fingerprint match can never silently suppress them.
+        f = _finding(
+            title="SQL injection risk",
+            confidence=0.5,
+            severity=Severity.CRITICAL,
+            category=Category.SECURITY,
+        )
+        result = _apply_dismissal_prefilter([f], [self._dismissed()])
+        assert result == [f]
 
 
 class TestCrossReviewDismissedSection:

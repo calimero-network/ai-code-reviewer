@@ -542,7 +542,9 @@ def _apply_dismissal_prefilter(
     A current finding is dropped when its fuzzy hash matches a dismissed finding's
     fingerprint, that dismissal carried a non-empty human rationale, and the finding's
     confidence is below ``_DISMISSAL_RERAISE_CONFIDENCE``. Silent dismissals (empty
-    rationale) and high-confidence re-raises are left in place.
+    rationale) and high-confidence re-raises are left in place. CRITICAL+SECURITY
+    findings are never dropped here - like ``apply_cross_review``, they flow through
+    so the cross-review round (not a fuzzy fingerprint) decides their fate.
     """
     if not dismissed or not findings:
         return findings
@@ -553,6 +555,9 @@ def _apply_dismissal_prefilter(
         return findings
     kept: list[ConsolidatedFinding] = []
     for f in findings:
+        if f.severity == Severity.CRITICAL and f.category == Category.SECURITY:
+            kept.append(f)
+            continue
         fp = f.finding_hash_fuzzy
         match = by_fingerprint.get(fp) if fp else None
         if match is not None and f.confidence < _DISMISSAL_RERAISE_CONFIDENCE:
