@@ -296,25 +296,25 @@ class AnthropicClient:
                 if overloaded_retries >= _OVERLOADED_MAX_RETRIES:
                     raise
                 overloaded_retries += 1
-                backoff = _OVERLOADED_BACKOFF_SECONDS[overloaded_retries - 1]
+                overload_backoff = float(_OVERLOADED_BACKOFF_SECONDS[overloaded_retries - 1])
                 # Server-advised wait wins when it is longer than ours: retrying
                 # sooner than told just burns the remaining attempts.
                 retry_after = _retry_after_seconds(exc)
                 source = "our backoff"
-                if retry_after is not None and retry_after > backoff:
-                    backoff = retry_after
+                if retry_after is not None and retry_after > overload_backoff:
+                    overload_backoff = retry_after
                     source = "retry-after header"
-                if deadline is not None and time.monotonic() + backoff >= deadline:
+                if deadline is not None and time.monotonic() + overload_backoff >= deadline:
                     raise TimeoutError("review deadline reached before overloaded retry") from exc
                 logger.warning(
                     "Anthropic status %s, retrying in %.0fs per %s (%d/%d)",
                     exc.status_code,
-                    backoff,
+                    overload_backoff,
                     source,
                     overloaded_retries,
                     _OVERLOADED_MAX_RETRIES,
                 )
-                await asyncio.sleep(backoff)
+                await asyncio.sleep(overload_backoff)
 
     async def run_completion(
         self,
