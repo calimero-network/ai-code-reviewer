@@ -1293,6 +1293,17 @@ def _overloaded_error(retry_after: str | None = None) -> "ac.anthropic.APIStatus
     return ac.anthropic.APIStatusError("Error code: 529 - Overloaded", response=resp, body=None)
 
 
+def _mid_stream_overloaded_error() -> "ac.anthropic.APIStatusError":
+    """An overload that lands after the stream opens.
+
+    The SSE `error` event rides in on an already-200 response, so the SDK builds a
+    plain APIStatusError with status_code 200 - the 529 never reaches the client.
+    """
+    resp = httpx.Response(200, request=httpx.Request("POST", "http://x"))
+    body = {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
+    return ac.anthropic.APIStatusError(f"{body}", response=resp, body=body)
+
+
 def _rate_limit_error() -> "ac.anthropic.APIStatusError":
     resp = httpx.Response(429, request=httpx.Request("POST", "http://x"))
     return ac.anthropic.RateLimitError(
@@ -1330,6 +1341,37 @@ async def test_create_message_bounds_overloaded_retries(monkeypatch):
         await client._create_message(model="claude-sonnet-5", max_tokens=8192)
 
     assert calls["n"] == total
+
+
+@pytest.mark.asyncio
+async def test_create_message_retries_mid_stream_overload(monkeypatch):
+    """An overload delivered as an SSE error event on a 200 is still retried.
+
+    This is how a real overload window arrives once streaming has started; keying
+    the retry off status_code alone let it re-raise on the first failure.
+    """
+    monkeypatch.setattr(ac.asyncio, "sleep", AsyncMock())
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    final = _fake_response('{"findings": [], "summary": "ok"}')
+    _, calls = _mock_stream_boundary(client, [_mid_stream_overloaded_error(), final])
+
+    result = await client._create_message(model="claude-sonnet-5", max_tokens=8192)
+
+    assert result is final
+    assert calls["n"] == 2
+
+
+def test_mid_stream_overload_classifies_as_transient_infra():
+    """The queue path must see a 200-wrapped overload as retriable infra, not a code bug."""
+    assert ac.is_transient_infra_error(_mid_stream_overloaded_error())
+
+
+def test_non_overload_status_error_is_not_transient():
+    """A 401 is a real failure - retrying the whole review would fail identically."""
+    resp = httpx.Response(401, request=httpx.Request("POST", "http://x"))
+    err = ac.anthropic.AuthenticationError("401 Unauthorized", response=resp, body=None)
+    assert not ac.is_transient_infra_error(err)
 
 
 def test_overloaded_backoff_covers_every_retry():

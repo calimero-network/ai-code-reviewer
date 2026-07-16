@@ -81,6 +81,20 @@ _CONNECTION_ERROR_MAX_RETRIES = 2
 _OVERLOADED_MAX_RETRIES = 5
 _OVERLOADED_BACKOFF_SECONDS = (15, 30, 60, 120, 240)
 _RETRIABLE_STATUS_CODES = (429, 529)
+_OVERLOAD_BODY_MARKERS = ("overloaded_error", "rate_limit_error")
+
+
+def _is_overload_or_rate_limit(exc: anthropic.APIStatusError) -> bool:
+    """True for Anthropic capacity pressure in either shape it arrives in.
+
+    Once streaming has started the server reports an overload as an SSE `error`
+    event on an already-200 response, so the SDK raises a plain APIStatusError with
+    status_code 200. Keying off the status alone therefore misses the mid-stream
+    case - the exact one these retries exist for.
+    """
+    if getattr(exc, "status_code", None) in _RETRIABLE_STATUS_CODES:
+        return True
+    return any(marker in str(exc) for marker in _OVERLOAD_BODY_MARKERS)
 
 
 # Summary markers for reviews that did NOT complete. aggregate_findings() treats
@@ -127,7 +141,7 @@ def is_transient_infra_error(exc_or_summary: object) -> bool:
     if isinstance(exc_or_summary, anthropic.APIConnectionError):
         return True
     if isinstance(exc_or_summary, anthropic.APIStatusError):
-        return exc_or_summary.status_code in _RETRIABLE_STATUS_CODES
+        return _is_overload_or_rate_limit(exc_or_summary)
     if isinstance(exc_or_summary, TimeoutError):
         return True
     text = str(exc_or_summary)
@@ -291,7 +305,7 @@ class AnthropicClient:
                 # Kept after BadRequestError (a 400 subclass) so grammar-timeout
                 # retry still wins; other status errors (auth/validation) are not
                 # retried here.
-                if getattr(exc, "status_code", None) not in _RETRIABLE_STATUS_CODES:
+                if not _is_overload_or_rate_limit(exc):
                     raise
                 if overloaded_retries >= _OVERLOADED_MAX_RETRIES:
                     raise
@@ -307,7 +321,7 @@ class AnthropicClient:
                 if deadline is not None and time.monotonic() + overload_backoff >= deadline:
                     raise TimeoutError("review deadline reached before overloaded retry") from exc
                 logger.warning(
-                    "Anthropic status %s, retrying in %.0fs per %s (%d/%d)",
+                    "Anthropic overloaded/rate-limited (http %s), retrying in %.0fs per %s (%d/%d)",
                     exc.status_code,
                     overload_backoff,
                     source,
