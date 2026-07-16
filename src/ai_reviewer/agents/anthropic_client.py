@@ -25,6 +25,19 @@ _TOOL_BUDGET_EXHAUSTED_MSG = (
     "request more tools.]"
 )
 
+# Fed back when the per-request context nears the circuit breaker. Same salvage
+# as the tool-budget path, but distinct so logs/behaviour are attributable.
+_CONTEXT_BUDGET_MSG = (
+    "[context budget nearly exhausted - no more tool calls are available. "
+    "Produce your final JSON review now from the evidence you have already "
+    "gathered.]"
+)
+
+# Soft-finalize when a request's real context passes this fraction of the hard
+# circuit limit: stop offering tools and force the final emission, rather than
+# growing into the breaker and discarding the whole exploration.
+_SOFT_FINALIZE_RATIO = 0.75
+
 # Models that reject temperature/top_p/top_k outright (400 invalid_request_error).
 # ponytail: hardcoded set, add the next rejecting model here when it ships.
 _NO_SAMPLING_PARAMS_MODELS = {
@@ -365,6 +378,10 @@ class AnthropicClient:
         # instead of thrashing on tool calls that can only fail (which used to
         # burn the round cap and mark the review incomplete).
         tool_budget_exhausted = False
+        # Message used to answer pending tool_use once the loop must finalize.
+        # Defaults to the tool-budget wording; soft-finalize swaps in the
+        # context-budget wording so the two salvage paths stay distinguishable.
+        finalize_tool_msg = _TOOL_BUDGET_EXHAUSTED_MSG
 
         system_to_send = system_blocks
         if self.config.enable_prompt_caching and system_blocks:
@@ -478,6 +495,47 @@ class AnthropicClient:
                     tool_calls=tool_calls,
                 )
 
+            # Soft-finalize: once the real per-request context passes
+            # _SOFT_FINALIZE_RATIO of the hard breaker, stop offering tools and
+            # answer the pending tool_use with a finalize message so the model
+            # emits its JSON now - instead of growing into the breaker at
+            # circuit_limit and having the whole exploration discarded. Reuses
+            # the tool-budget mechanism (the flag + a finalize message).
+            if (
+                tools
+                and not tool_budget_exhausted
+                and last_request_context > circuit_limit * _SOFT_FINALIZE_RATIO
+            ):
+                logger.warning(
+                    "Context soft-finalize at %d tokens (%.0f%% of breaker) - forcing final emission",
+                    last_request_context,
+                    _SOFT_FINALIZE_RATIO * 100,
+                )
+                tool_budget_exhausted = True
+                finalize_tool_msg = _CONTEXT_BUDGET_MSG
+
+            # Thinking-preservation contract: with thinking enabled the API needs
+            # the signed thinking block ONLY on the last assistant turn (the one
+            # whose tool_use we answer); thinking on earlier turns is ignored and
+            # may be dropped. Strip it from the previous assistant turn before
+            # appending this one so stale thinking isn't re-sent every round.
+            # Cache: this only invalidates that turn's suffix; the moving
+            # breakpoint still covers everything before it - acceptable.
+            for prev in reversed(messages):
+                if prev.get("role") != "assistant":
+                    continue
+                content = prev.get("content")
+                if isinstance(content, list):
+                    prev["content"] = [
+                        b
+                        for b in content
+                        if not (
+                            isinstance(b, dict)
+                            and b.get("type") in ("thinking", "redacted_thinking")
+                        )
+                    ]
+                break
+
             assistant_blocks = list(getattr(response, "content", []) or [])
             messages.append({"role": "assistant", "content": _serialize_blocks(assistant_blocks)})
             tool_result_blocks: list[dict[str, Any]] = []
@@ -486,9 +544,9 @@ class AnthropicClient:
                     continue
                 tool_calls.append({"name": block.name, "input": block.input})
                 if tool_budget_exhausted:
-                    # Budget already blew earlier in this same turn — answer the
+                    # Budget already blew (tool-call or context) — answer the
                     # remaining tool_use blocks without attempting execution.
-                    tool_output = _TOOL_BUDGET_EXHAUSTED_MSG
+                    tool_output = finalize_tool_msg
                 else:
                     try:
                         tool_output = await tool_registry.execute(block.name, block.input)

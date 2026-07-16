@@ -165,6 +165,36 @@ async def test_tool_result_under_cap_is_unchanged(session, fake_gh):
     assert out == "print('hi')"
 
 
+@pytest.mark.asyncio
+async def test_read_file_logs_readback_for_trimmed_path(session, fake_gh, caplog):
+    reg = ToolRegistry(
+        session,
+        fake_gh,
+        agent_id="a1",
+        max_calls=10,
+        per_file_max_bytes=512 * 1024,
+        trimmed_paths={"a.py"},
+    )
+    with caplog.at_level("INFO", logger="ai_reviewer.tools.repo_tools"):
+        await reg.execute("read_file", {"path": "a.py"})
+    assert "context-trim readback: a.py" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_read_file_no_readback_log_for_untrimmed_path(session, fake_gh, caplog):
+    reg = ToolRegistry(
+        session,
+        fake_gh,
+        agent_id="a1",
+        max_calls=10,
+        per_file_max_bytes=512 * 1024,
+        trimmed_paths={"other.py"},
+    )
+    with caplog.at_level("INFO", logger="ai_reviewer.tools.repo_tools"):
+        await reg.execute("read_file", {"path": "a.py"})
+    assert "context-trim readback" not in caplog.text
+
+
 def test_max_tool_result_bytes_config_parses_and_defaults():
     from ai_reviewer.config import _parse_config
 

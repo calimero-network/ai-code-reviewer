@@ -960,8 +960,12 @@ async def _prepare_shared_context(
     pr_type: str | None = None,
     pr_size: str | None = None,
     language_rules: str = "",
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Fetch conventions + repo map + neighbors and build system/user blocks."""
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[str]]:
+    """Fetch conventions + repo map + neighbors and build system/user blocks.
+
+    Returns the system blocks, user blocks, and the set of changed-file paths that
+    were sent as hunk excerpts (so their tool readbacks can be instrumented).
+    """
     import base64 as _b64
 
     conventions = fetch_conventions(session, gh, CONVENTION_PATHS)
@@ -1013,7 +1017,9 @@ async def _prepare_shared_context(
         pr_type=pr_type,
         pr_size=pr_size,
         language_rules=language_rules,
+        conventions_max_chars=anthropic_cfg.conventions_max_chars,
     )
+    trimmed_paths: set[str] = set()
     user_blocks = build_user_blocks(
         pr_title=getattr(pr, "title", "") or "",
         pr_body=getattr(pr, "body", "") or "",
@@ -1021,8 +1027,11 @@ async def _prepare_shared_context(
         changed_files=changed_file_contents,
         neighbor_files=neighbors,
         max_total_chars=anthropic_cfg.max_combined_context_tokens * 4,
+        full_file_max_lines=anthropic_cfg.full_file_max_lines,
+        hunk_context_lines=anthropic_cfg.hunk_context_lines,
+        trimmed_paths_out=trimmed_paths,
     )
-    return system_blocks, user_blocks
+    return system_blocks, user_blocks, trimmed_paths
 
 
 async def _run_agent_safe(
@@ -1357,6 +1366,7 @@ async def _run_agent_sharded(
     pr_map_block = {"type": "text", "text": pr_map}
     for k, shard in enumerate(shards):
         shard_id = f"{agent_name}-{agent_index}-s{k}"
+        shard_trimmed: set[str] = set()
         user_blocks = build_user_blocks(
             pr_title=pr_title,
             pr_body=pr_body,
@@ -1364,6 +1374,9 @@ async def _run_agent_sharded(
             changed_files=shard.files,
             neighbor_files={},
             max_total_chars=max_total_chars,
+            full_file_max_lines=anthropic_cfg.full_file_max_lines,
+            hunk_context_lines=anthropic_cfg.hunk_context_lines,
+            trimmed_paths_out=shard_trimmed,
         )
         user_blocks.append(dict(pr_map_block))
         registry = (
@@ -1374,6 +1387,7 @@ async def _run_agent_sharded(
                 max_calls=_SHARD_TOOL_BUDGET,
                 per_file_max_bytes=anthropic_cfg.per_file_max_bytes,
                 max_tool_result_bytes=anthropic_cfg.max_tool_result_bytes,
+                trimmed_paths=shard_trimmed,
             )
             if allow_tools
             else None
@@ -1547,7 +1561,7 @@ async def review_pr(
     )
 
     async with AnthropicClient(anthropic_cfg) as client:
-        system_blocks, user_blocks = await _prepare_shared_context(
+        system_blocks, user_blocks, trimmed_paths = await _prepare_shared_context(
             session=session,
             gh=gh,
             pr=pr,
@@ -1635,6 +1649,7 @@ async def review_pr(
                     max_calls=max_tool_calls,
                     per_file_max_bytes=anthropic_cfg.per_file_max_bytes,
                     max_tool_result_bytes=anthropic_cfg.max_tool_result_bytes,
+                    trimmed_paths=trimmed_paths,
                 )
                 if allow_tools
                 else None

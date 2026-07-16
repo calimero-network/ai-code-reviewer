@@ -82,6 +82,7 @@ class ToolRegistry:
         max_calls: int,
         per_file_max_bytes: int,
         max_tool_result_bytes: int = 16 * 1024,
+        trimmed_paths: set[str] | None = None,
     ) -> None:
         self.session = session
         self.gh = github_client
@@ -89,6 +90,10 @@ class ToolRegistry:
         self.max_calls = max_calls
         self.per_file_max_bytes = per_file_max_bytes
         self.max_tool_result_bytes = max_tool_result_bytes
+        # Paths sent to the agent as hunk excerpts rather than full contents.
+        # Reading one back means the agent needed the trimmed context (tools
+        # compensating for the pull-based prompt) - logged so we can measure it.
+        self.trimmed_paths = trimmed_paths or set()
 
     def tool_specs(self) -> list[dict[str, Any]]:
         return TOOL_SPECS
@@ -101,7 +106,10 @@ class ToolRegistry:
         self.session.incr_tool_call(self.agent_id)
 
         if name == "read_file":
-            result = self._read_file(tool_input["path"])
+            path = tool_input["path"]
+            if path in self.trimmed_paths:
+                logger.info("context-trim readback: %s", path)
+            result = self._read_file(path)
         elif name == "glob":
             result = self._glob(tool_input["pattern"])
         elif name == "grep":

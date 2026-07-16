@@ -49,3 +49,30 @@ def test_anthropic_retries_default_is_resilient():
     from ai_reviewer.config import AnthropicApiConfig
 
     assert AnthropicApiConfig(api_key="x").max_retries == 3
+
+
+def test_pull_context_fields_default():
+    from ai_reviewer.config import _parse_config
+
+    cfg = _parse_config({"github": {"token": "t"}})
+    assert cfg.anthropic.full_file_max_lines == 300
+    assert cfg.anthropic.hunk_context_lines == 60
+    assert cfg.anthropic.conventions_max_chars == 16_000
+
+
+def test_pull_context_fields_parse_from_yaml():
+    from ai_reviewer.config import _parse_config
+
+    cfg = _parse_config(
+        {
+            "github": {"token": "t"},
+            "anthropic": {
+                "full_file_max_lines": 120,
+                "hunk_context_lines": 25,
+                "conventions_max_chars": 4096,
+            },
+        }
+    )
+    assert cfg.anthropic.full_file_max_lines == 120
+    assert cfg.anthropic.hunk_context_lines == 25
+    assert cfg.anthropic.conventions_max_chars == 4096
