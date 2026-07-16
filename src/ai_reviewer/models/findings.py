@@ -91,6 +91,9 @@ class ReviewFinding:
     description: str
     suggested_fix: str | None
     confidence: float  # 0.0 - 1.0
+    # Exact replacement source for line_start..line_end (whole lines, no diff
+    # syntax). Null when the fix is non-local; only prose lives in suggested_fix.
+    suggested_replacement: str | None = None
 
     def __post_init__(self) -> None:
         """Validate finding data."""
@@ -122,6 +125,12 @@ class ConsolidatedFinding:
     consensus_score: float  # 0.0 - 1.0 (% of agents that found this)
     agreeing_agents: list[str]
     confidence: float  # Average confidence across agents
+
+    # Exact replacement source for line_start..line_end, carried from the
+    # representative finding. fix_validated flips true only after fix_check
+    # confirms it applies cleanly and stays syntactically valid.
+    suggested_replacement: str | None = None
+    fix_validated: bool = False
 
     # Source tracking
     original_findings: list[ReviewFinding] = field(default_factory=list)
