@@ -196,7 +196,12 @@ class TestAutoResolveOnEveryPosting:
 
 
 def _graphql_thread(is_resolved, comments):
-    return {"isResolved": is_resolved, "comments": {"nodes": comments}}
+    # Mirrors the aliased GraphQL query: firstComment=first(1), recentComments=last(10).
+    return {
+        "isResolved": is_resolved,
+        "firstComment": {"nodes": comments[:1]},
+        "recentComments": {"nodes": comments[-10:]},
+    }
 
 
 def _c(login, body, path="src/foo.py", line=10, assoc="MEMBER"):
@@ -277,6 +282,24 @@ class TestGetDismissedFindings:
             result = client.get_dismissed_findings(self._pr())
         assert len(result) == 1
         assert result[0].rationale == ""
+
+    def test_long_thread_uses_most_recent_rationale(self):
+        # Bot finding + a long back-and-forth. The true last maintainer reply lives
+        # past the first 10 comments; last:10 must capture it, not a stale early one.
+        client = self._client()
+        comments = [_c("github-actions[bot]", "🟡 **SQL injection risk**\n\ndetail")]
+        comments.append(_c("maintainer", "STALE early rationale"))
+        comments += [_c("github-actions[bot]", "ping") for _ in range(9)]
+        comments.append(_c("maintainer", "FRESH final rationale"))
+        data = {
+            "repository": {
+                "pullRequest": {"reviewThreads": {"nodes": [_graphql_thread(True, comments)]}}
+            }
+        }
+        with patch.object(client, "_graphql_request", return_value=data):
+            result = client.get_dismissed_findings(self._pr())
+        assert len(result) == 1
+        assert result[0].rationale == "FRESH final rationale"
 
     def test_non_maintainer_rationale_not_trusted(self):
         # A PR author (CONTRIBUTOR) can resolve their own thread and reply, but that

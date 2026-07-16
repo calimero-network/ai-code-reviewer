@@ -1568,13 +1568,19 @@ class GitHubClient:
                   reviewThreads(first: 100) {
                     nodes {
                       isResolved
-                      comments(first: 10) {
+                      firstComment: comments(first: 1) {
+                        nodes {
+                          author { login }
+                          body
+                          path
+                          line
+                        }
+                      }
+                      recentComments: comments(last: 10) {
                         nodes {
                           author { login }
                           authorAssociation
                           body
-                          path
-                          line
                         }
                       }
                     }
@@ -1597,11 +1603,11 @@ class GitHubClient:
             for thread in threads:
                 if not thread.get("isResolved"):
                     continue
-                comments = (thread.get("comments") or {}).get("nodes") or []
-                if not comments:
+                first_nodes = (thread.get("firstComment") or {}).get("nodes") or []
+                if not first_nodes:
                     continue
 
-                first = comments[0]
+                first = first_nodes[0]
                 first_login = (first.get("author") or {}).get("login")
                 if first_login not in allowed_users:
                     continue  # not a bot-authored thread - never treat human threads as findings
@@ -1615,8 +1621,10 @@ class GitHubClient:
                 if fingerprint is None:
                     continue
 
+                # last: 10 keeps the newest replies, so the last match here is the
+                # most recent maintainer rationale even on a long back-and-forth thread.
                 rationale = ""
-                for comment in comments:
+                for comment in (thread.get("recentComments") or {}).get("nodes") or []:
                     login = (comment.get("author") or {}).get("login")
                     if (
                         login
