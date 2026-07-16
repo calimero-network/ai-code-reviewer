@@ -130,6 +130,7 @@ def _parse_findings(parsed: dict[str, Any]) -> list[ReviewFinding]:
                     description=raw["description"],
                     suggested_fix=raw.get("suggested_fix"),
                     confidence=float(raw.get("confidence", 0.8)),
+                    suggested_replacement=raw.get("suggested_replacement"),
                 )
             )
         except (KeyError, ValueError) as e:

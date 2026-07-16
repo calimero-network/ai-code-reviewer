@@ -366,6 +366,39 @@ class GitHubFormatter:
 
         return "\n".join(lines)
 
+    def format_all_clear(
+        self,
+        review: ConsolidatedReview,
+        delta: ReviewDelta,
+        meta: ReviewMeta | None = None,
+    ) -> str:
+        """Explicit convergence verdict: previous findings addressed, this pass clean.
+
+        Distinct from the first-pass "No Issues Found" body - this states that a
+        re-review converged. Callers gate this on ``is_convergence_all_clear``.
+        """
+        fixed_count = len(delta.fixed_findings)
+        noun = "finding" if fixed_count == 1 else "findings"
+        verdict = (
+            f"All previous findings addressed - {fixed_count} {noun} fixed since the "
+            "last review. LGTM."
+        )
+        return "\n".join(
+            [
+                f"## 🤖 {self.reviewer_name}",
+                "",
+                self._format_header(review),
+                "",
+                "### ✅ All clear",
+                "",
+                verdict,
+                "",
+                "---",
+                "",
+                self._format_footer(review, meta),
+            ]
+        )
+
     def format_all_agents_failed(self, review: ConsolidatedReview) -> str:
         """Body posted when EVERY agent failed (infrastructure error).
 

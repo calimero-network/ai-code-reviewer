@@ -1354,3 +1354,32 @@ async def test_run_review_returns_deadline_marker_when_budget_exceeded():
     assert DEADLINE_MARKER in INCOMPLETE_SUMMARY_MARKERS
     # Deadline tripped before an unbounded number of rounds ran.
     assert client._create_message.await_count < 1000
+
+
+_FENCE = "`" * 3
+
+
+def test_parse_json_ignores_stray_suggestion_fence_in_prose():
+    # Regression: a ```suggestion``` fence mentioned in prose must not hijack
+    # extraction and discard the real findings JSON that follows (PR #118).
+    resp = (
+        "For style issues, wrap the change in a " + _FENCE + "suggestion" + _FENCE + " block.\n\n"
+        '{"findings": [{"file_path": "a.py", "line_start": 1, '
+        '"severity": "warning", "description": "x"}], "summary": "ok"}\n'
+    )
+    out = ac._parse_json(resp)
+    assert out["summary"] == "ok"
+    assert len(out["findings"]) == 1
+
+
+def test_parse_json_handles_json_fence_and_plain_fence():
+    wrapped_json = _FENCE + 'json\n{"findings": [], "summary": "a"}\n' + _FENCE
+    assert ac._parse_json(wrapped_json)["summary"] == "a"
+    wrapped_plain = _FENCE + '\n{"findings": [], "summary": "b"}\n' + _FENCE
+    assert ac._parse_json(wrapped_plain)["summary"] == "b"
+
+
+def test_parse_json_unparseable_demotes_to_marker():
+    out = ac._parse_json("no json here at all")
+    assert out["summary"] == ac.PARSE_ERROR_MARKER
+    assert out["findings"] == []

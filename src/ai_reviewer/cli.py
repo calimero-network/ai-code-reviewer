@@ -22,6 +22,7 @@ from ai_reviewer.github.client import (
     GitHubClient,
     ReviewMeta,
     estimate_review_count,
+    is_convergence_all_clear,
     lgtm_placeholder_review,
     should_skip_before_agents,
     should_skip_review,
@@ -179,6 +180,7 @@ async def review_pr_async(
     pr: PullRequest | None = None
     meta: ReviewMeta | None = None
     recheck_review: ConsolidatedReview | None = None
+    dismissed: list = []
 
     if output == "github":
         gh = GitHubClient(config.github.token)
@@ -186,6 +188,9 @@ async def review_pr_async(
         current_sha = pr.head.sha
 
         meta = gh.get_review_metadata(pr)
+        # Dismissal ledger only matters once a prior review exists to have been resolved.
+        if meta is not None:
+            dismissed = gh.get_dismissed_findings(pr)
         diff_files = {f.filename for f in pr.get_files()}
         previous_comments = gh.get_previous_review_comments(pr) if meta else []
         skip_reason = should_skip_before_agents(
@@ -285,6 +290,7 @@ async def review_pr_async(
             enable_cross_review=enable_cross_review,
             min_validation_agreement=min_validation_agreement,
             config=config,
+            dismissed=dismissed,
         )
     except Exception as e:
         console.print(f"[red]Error:[/red] {e}")
@@ -404,9 +410,13 @@ async def review_pr_async(
             finding_hashes=finding_hashes,
         )
 
+        all_clear = is_convergence_all_clear(review, delta)
+
         if dry_run:
             console.print("\n[yellow]Dry run - not posting to GitHub[/yellow]")
-            if delta.previous_comments:
+            if all_clear:
+                print(formatter.format_all_clear(review, delta, meta=new_meta))
+            elif delta.previous_comments:
                 print(formatter.format_review_with_delta(review, delta, meta=new_meta))
             else:
                 print(formatter.format_review(review, meta=new_meta))
@@ -414,41 +424,52 @@ async def review_pr_async(
             max_total = config.output.max_total_findings
             max_per_file = config.output.max_findings_per_file
 
-            # Pre-filter inline findings so the compact body matches what GitHub will accept.
-            candidate_inline_findings = (
-                delta.new_findings if delta.previous_comments else review.findings
-            )
-            postable_inline_findings = gh.get_postable_inline_findings(
-                pr,
-                inline_findings=candidate_inline_findings,
-                max_total=max_total,
-                max_per_file=max_per_file,
-            )
-            use_compact_body = len(postable_inline_findings) > 0
-
-            if delta.previous_comments:
-                body = (
-                    formatter.format_review_with_delta_compact(
-                        review,
-                        delta,
-                        meta=new_meta,
-                        inline_new_findings=postable_inline_findings,
-                    )
-                    if use_compact_body
-                    else formatter.format_review_with_delta(review, delta, meta=new_meta)
+            if all_clear:
+                # Explicit convergence verdict; never APPROVE unless policy opts in.
+                body = formatter.format_all_clear(review, delta, meta=new_meta)
+                auto_approve = config.review_policy.auto_approve_if_no_findings
+                action = (
+                    "APPROVE"
+                    if (allow_approve and auto_approve and not review.failed_agents)
+                    else "COMMENT"
                 )
-                action = formatter.get_review_action_with_delta(review, delta, allow_approve)
+                postable_inline_findings = []
             else:
-                body = (
-                    formatter.format_review_compact(
-                        review,
-                        meta=new_meta,
-                        inline_findings=postable_inline_findings,
-                    )
-                    if use_compact_body
-                    else formatter.format_review(review, meta=new_meta)
+                # Pre-filter inline findings so the compact body matches what GitHub will accept.
+                candidate_inline_findings = (
+                    delta.new_findings if delta.previous_comments else review.findings
                 )
-                action = formatter.get_review_action(review, allow_approve=allow_approve)
+                postable_inline_findings = gh.get_postable_inline_findings(
+                    pr,
+                    inline_findings=candidate_inline_findings,
+                    max_total=max_total,
+                    max_per_file=max_per_file,
+                )
+                use_compact_body = len(postable_inline_findings) > 0
+
+                if delta.previous_comments:
+                    body = (
+                        formatter.format_review_with_delta_compact(
+                            review,
+                            delta,
+                            meta=new_meta,
+                            inline_new_findings=postable_inline_findings,
+                        )
+                        if use_compact_body
+                        else formatter.format_review_with_delta(review, delta, meta=new_meta)
+                    )
+                    action = formatter.get_review_action_with_delta(review, delta, allow_approve)
+                else:
+                    body = (
+                        formatter.format_review_compact(
+                            review,
+                            meta=new_meta,
+                            inline_findings=postable_inline_findings,
+                        )
+                        if use_compact_body
+                        else formatter.format_review(review, meta=new_meta)
+                    )
+                    action = formatter.get_review_action(review, allow_approve=allow_approve)
 
             posted = gh.post_review(
                 pr,

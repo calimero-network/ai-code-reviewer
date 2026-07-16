@@ -49,6 +49,7 @@ FINDINGS_SCHEMA: dict[str, Any] = {
                 "title": {"type": "string"},
                 "description": {"type": "string"},
                 "suggested_fix": {"type": ["string", "null"]},
+                "suggested_replacement": {"type": ["string", "null"]},
                 "confidence": {"type": "number"},
             },
         },
@@ -109,8 +110,16 @@ FEW_SHOT_BLOCK: dict[str, Any] = {
         '{"file_path": "auth.py", "line_start": 45, "severity": "critical", '
         '"category": "security", "title": "SQL injection via string interpolation", '
         '"description": "User input is interpolated directly into the query without '
-        'parameterization.", "suggested_fix": "Use a parameterized query: '
-        'cursor.execute(\'… WHERE id = ?\', (user_id,))", "confidence": 0.95}\n\n'
+        'parameterization.", "suggested_fix": "Use a parameterized query.", '
+        '"suggested_replacement": "cursor.execute(\'SELECT * FROM users WHERE id = ?\', '
+        '(user_id,))", "confidence": 0.95}\n\n'
+        "When the fix is a local replacement of the lines you flagged "
+        "(line_start..line_end), set `suggested_replacement` to the EXACT new source "
+        "for those whole lines - no diff markers, no `+`/`-` prefixes, no fences, "
+        "correctly indented so it can be applied verbatim. Keep `suggested_fix` as the "
+        "prose explanation. When the fix is non-local (spans multiple files, needs "
+        "structural changes, or is not a clean line swap), leave `suggested_replacement` "
+        "null and describe it in `suggested_fix` only.\n\n"
         "BAD (vague — DO NOT produce these):\n"
         '{"file_path": "utils.py", "line_start": 1, "severity": "suggestion", '
         '"category": "testing", "title": "Consider adding more tests", '

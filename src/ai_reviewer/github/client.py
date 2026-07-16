@@ -56,6 +56,12 @@ def _raise_if_forbidden(exc: Exception) -> None:
 
 _RESOLVE_COMMENT_DELAY_S: float = float(os.environ.get("AI_REVIEWER_RESOLVE_DELAY", "0.2"))
 _MAX_RESOLVE_COMMENTS: int = int(os.environ.get("AI_REVIEWER_MAX_RESOLVE", "100"))
+# Cap the dismissal ledger so a huge PR can't blow up the cross-review prompt.
+_MAX_DISMISSED_FINDINGS = 50
+# Only a maintainer's rationale may drive the low-confidence-reraise pre-filter. A PR
+# author can resolve their own thread, so an unprivileged reply must not count as
+# rationale (it falls back to a silent resolve, which never suppresses a re-raise).
+_RATIONALE_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 _NO_LONGER_DETECTED_REPLY = (
     "✅ **No longer detected** - This issue was not re-detected after the latest changes."
 )
@@ -216,6 +222,24 @@ def apply_comment_limits(
     return result
 
 
+def _suggestion_block(finding: ConsolidatedFinding) -> str | None:
+    """Render a GitHub ```suggestion block for a validated replacement, else None.
+
+    Only single-line ranges qualify: the inline comment anchors ``line`` alone, so
+    GitHub would apply a suggestion to that one line only - a multi-line range
+    (line_end > line_start) cannot be applied correctly and falls back to prose.
+    A replacement containing triple backticks would break the fence, so it also
+    falls back. Never emit a suggestion for an unvalidated fix.
+    """
+    if not (finding.fix_validated and finding.suggested_replacement):
+        return None
+    if finding.line_end is not None and finding.line_end != finding.line_start:
+        return None
+    if "```" in finding.suggested_replacement:
+        return None
+    return f"```suggestion\n{finding.suggested_replacement}\n```"
+
+
 @dataclass
 class GitHubConfig:
     """Configuration for GitHub client."""
@@ -249,6 +273,22 @@ class PreviousComment:
 
 
 @dataclass
+class DismissedFinding:
+    """A finding a maintainer dismissed by resolving its bot review thread.
+
+    ``rationale`` is the last human-authored comment in the thread (empty string
+    on a silent resolve). ``fingerprint`` is the fuzzy hash of (file_path, title)
+    so it can be compared against a current finding's ``finding_hash_fuzzy``.
+    """
+
+    file_path: str
+    line: int
+    title_snippet: str
+    fingerprint: str
+    rationale: str
+
+
+@dataclass
 class ReviewDelta:
     """Tracks changes between review runs."""
 
@@ -272,6 +312,21 @@ def has_converged(delta: ReviewDelta) -> bool:
     convergence is *not* the same as ``ReviewDelta.all_issues_resolved``.
     """
     return len(delta.new_findings) == 0 and len(delta.fixed_findings) == 0
+
+
+def is_convergence_all_clear(review: ConsolidatedReview, delta: ReviewDelta) -> bool:
+    """Return True when a re-review has cleanly converged to a clean state.
+
+    Fires only when the current pass has zero surviving findings, a previous
+    review existed, at least one previously-reported finding was fixed, and no
+    agents failed (an empty result from a partial run proves nothing).
+    """
+    return (
+        delta.all_issues_resolved
+        and bool(delta.previous_comments)
+        and bool(delta.fixed_findings)
+        and not review.failed_agents
+    )
 
 
 def should_skip_review(review_count: int, delta: ReviewDelta) -> bool:
@@ -727,6 +782,9 @@ class GitHubClient:
             comment_body = f"{emoji} **{finding.title}**\n\n{finding.description}"
             if finding.suggested_fix:
                 comment_body += f"\n\n**Suggested fix:**\n```\n{finding.suggested_fix}\n```"
+            suggestion = _suggestion_block(finding)
+            if suggestion:
+                comment_body += "\n\n" + suggestion
             comment_body += f"\n\n<!-- ai-reviewer-id: {finding.finding_hash} -->"
 
             entry: ReviewComment = {
@@ -1480,6 +1538,118 @@ class GitHubClient:
             resolved_ids.add(reply_to)
 
         return resolved_ids
+
+    @staticmethod
+    def _extract_finding_title(body: str) -> str | None:
+        """Extract the bold title from a bot finding comment body, or None if absent."""
+        match = re.search(r"\*\*([^*]+)\*\*", body)
+        if not match:
+            return None
+        return match.group(1).strip() or None
+
+    def get_dismissed_findings(self, pr: PullRequest) -> list[DismissedFinding]:
+        """Return findings a maintainer dismissed by resolving the bot's review thread.
+
+        Resolved-thread state is only exposed via GraphQL (REST cannot see it), so
+        this issues a single query. A dismissed finding is a RESOLVED thread whose
+        FIRST comment is from an allowed bot user and parses as a bot finding; its
+        rationale is the last comment body from a maintainer (authorAssociation in
+        ``_RATIONALE_AUTHOR_ASSOCIATIONS``), empty on a silent resolve or when only
+        the PR author/other non-maintainers replied. Capped at
+        ``_MAX_DISMISSED_FINDINGS``. Any error returns [] and logs - the ledger must
+        never fail the review.
+        """
+        try:
+            owner, name = pr.base.repo.full_name.split("/", 1)
+            query = """
+            query($owner: String!, $name: String!, $pr_number: Int!) {
+              repository(owner: $owner, name: $name) {
+                pullRequest(number: $pr_number) {
+                  reviewThreads(first: 100) {
+                    nodes {
+                      isResolved
+                      firstComment: comments(first: 1) {
+                        nodes {
+                          author { login }
+                          body
+                          path
+                          line
+                        }
+                      }
+                      recentComments: comments(last: 10) {
+                        nodes {
+                          author { login }
+                          authorAssociation
+                          body
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """
+            data = self._graphql_request(
+                query, {"owner": owner, "name": name, "pr_number": pr.number}
+            )
+            if not data:
+                return []
+
+            allowed_users = self._get_allowed_users()
+            pr_data = (data.get("repository") or {}).get("pullRequest") or {}
+            threads = (pr_data.get("reviewThreads") or {}).get("nodes") or []
+
+            dismissed: list[DismissedFinding] = []
+            for thread in threads:
+                if not thread.get("isResolved"):
+                    continue
+                first_nodes = (thread.get("firstComment") or {}).get("nodes") or []
+                if not first_nodes:
+                    continue
+
+                first = first_nodes[0]
+                first_login = (first.get("author") or {}).get("login")
+                if first_login not in allowed_users:
+                    continue  # not a bot-authored thread - never treat human threads as findings
+
+                title = self._extract_finding_title(first.get("body") or "")
+                if title is None:
+                    continue  # first comment does not parse as a bot finding
+
+                path = first.get("path") or ""
+                fingerprint = compute_fuzzy_hash(path, title)
+                if fingerprint is None:
+                    continue
+
+                # last: 10 keeps the newest replies, so the last match here is the
+                # most recent maintainer rationale even on a long back-and-forth thread.
+                rationale = ""
+                for comment in (thread.get("recentComments") or {}).get("nodes") or []:
+                    login = (comment.get("author") or {}).get("login")
+                    if (
+                        login
+                        and login not in allowed_users
+                        and comment.get("authorAssociation") in _RATIONALE_AUTHOR_ASSOCIATIONS
+                    ):
+                        rationale = comment.get("body") or ""
+
+                dismissed.append(
+                    DismissedFinding(
+                        file_path=path,
+                        line=first.get("line") or 0,
+                        title_snippet=title,
+                        fingerprint=fingerprint,
+                        rationale=rationale,
+                    )
+                )
+                if len(dismissed) >= _MAX_DISMISSED_FINDINGS:
+                    break
+
+            logger.info("Dismissal ledger: %d dismissed finding(s)", len(dismissed))
+            return dismissed
+        except Exception as e:
+            logger.warning("Could not fetch dismissed findings (ledger skipped): %s", e)
+            return []
 
     def get_html_files_in_dirs(self, repo_name: str, ref: str, dirs: list[str]) -> list[str]:
         """Return paths of all .html files found under the given directories.

@@ -260,6 +260,7 @@ async def run_review(repo: str, pr_number: int) -> None:
         GitHubClient,
         ReviewMeta,
         estimate_review_count,
+        is_convergence_all_clear,
         lgtm_placeholder_review,
         should_skip_before_agents,
         should_skip_review,
@@ -308,6 +309,8 @@ async def run_review(repo: str, pr_number: int) -> None:
 
     diff_files = {f.filename for f in pr.get_files()}
     previous_comments = gh.get_previous_review_comments(pr) if meta else []
+    # Dismissal ledger only matters once a prior review exists to have been resolved.
+    dismissed = gh.get_dismissed_findings(pr) if meta else []
     skip_reason = should_skip_before_agents(
         meta,
         current_sha,
@@ -409,6 +412,7 @@ async def run_review(repo: str, pr_number: int) -> None:
             enable_cross_review=enable_cross_review,
             min_validation_agreement=min_agreement,
             config=webhook_config,
+            dismissed=dismissed,
         )
 
     # all_agents_failed is a terminal, non-retryable outcome: we ran, every agent
@@ -453,38 +457,52 @@ async def run_review(repo: str, pr_number: int) -> None:
 
     max_total = _get_env_int("MAX_TOTAL_FINDINGS", 50)
     max_per_file = _get_env_int("MAX_FINDINGS_PER_FILE", 10)
-    candidate_inline_findings = delta.new_findings if delta.previous_comments else review.findings
-    postable_inline_findings = gh.get_postable_inline_findings(
-        pr,
-        inline_findings=candidate_inline_findings,
-        max_total=max_total,
-        max_per_file=max_per_file,
-    )
-    use_compact_body = len(postable_inline_findings) > 0
 
-    if delta.previous_comments:
-        body = (
-            formatter.format_review_with_delta_compact(
-                review,
-                delta,
-                meta=new_meta,
-                inline_new_findings=postable_inline_findings,
-            )
-            if use_compact_body
-            else formatter.format_review_with_delta(review, delta, meta=new_meta)
+    if is_convergence_all_clear(review, delta):
+        # Explicit convergence verdict; never APPROVE unless policy opts in.
+        body = formatter.format_all_clear(review, delta, meta=new_meta)
+        auto_approve = bool(
+            webhook_config
+            and getattr(webhook_config, "review_policy", None)
+            and webhook_config.review_policy.auto_approve_if_no_findings
         )
-        action = formatter.get_review_action_with_delta(review, delta, allow_approve=False)
+        action = "APPROVE" if (auto_approve and not review.failed_agents) else "COMMENT"
+        postable_inline_findings = []
     else:
-        body = (
-            formatter.format_review_compact(
-                review,
-                meta=new_meta,
-                inline_findings=postable_inline_findings,
-            )
-            if use_compact_body
-            else formatter.format_review(review, meta=new_meta)
+        candidate_inline_findings = (
+            delta.new_findings if delta.previous_comments else review.findings
         )
-        action = formatter.get_review_action(review, allow_approve=False)
+        postable_inline_findings = gh.get_postable_inline_findings(
+            pr,
+            inline_findings=candidate_inline_findings,
+            max_total=max_total,
+            max_per_file=max_per_file,
+        )
+        use_compact_body = len(postable_inline_findings) > 0
+
+        if delta.previous_comments:
+            body = (
+                formatter.format_review_with_delta_compact(
+                    review,
+                    delta,
+                    meta=new_meta,
+                    inline_new_findings=postable_inline_findings,
+                )
+                if use_compact_body
+                else formatter.format_review_with_delta(review, delta, meta=new_meta)
+            )
+            action = formatter.get_review_action_with_delta(review, delta, allow_approve=False)
+        else:
+            body = (
+                formatter.format_review_compact(
+                    review,
+                    meta=new_meta,
+                    inline_findings=postable_inline_findings,
+                )
+                if use_compact_body
+                else formatter.format_review(review, meta=new_meta)
+            )
+            action = formatter.get_review_action(review, allow_approve=False)
 
     posted = gh.post_review(
         pr,

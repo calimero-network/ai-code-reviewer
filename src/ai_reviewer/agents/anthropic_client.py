@@ -645,10 +645,10 @@ def _parse_json(text: str) -> dict[str, Any]:
         m = re.search(r"```json\s*([\s\S]*?)```", text)
         if m:
             text = m.group(1).strip()
-    elif "```" in text:
-        m = re.search(r"```\s*([\s\S]*?)```", text)
-        if m:
-            text = m.group(1).strip()
+    # Extract the outermost JSON object from the (possibly fenced or prose-wrapped)
+    # text. Do NOT strip a generic ``` fence first: model output often mentions a
+    # ```suggestion``` fence in prose, and stripping to that fence discards the real
+    # findings JSON. Brace extraction handles plain ``` wrappers on its own.
     m = re.search(r"\{[\s\S]*\}", text)
     if m:
         text = m.group(0)
