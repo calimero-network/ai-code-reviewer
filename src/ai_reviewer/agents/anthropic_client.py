@@ -507,8 +507,9 @@ class AnthropicClient:
                 and last_request_context > circuit_limit * _SOFT_FINALIZE_RATIO
             ):
                 logger.warning(
-                    "Context soft-finalize at %d tokens (75%% of breaker) - forcing final emission",
+                    "Context soft-finalize at %d tokens (%.0f%% of breaker) - forcing final emission",
                     last_request_context,
+                    _SOFT_FINALIZE_RATIO * 100,
                 )
                 tool_budget_exhausted = True
                 finalize_tool_msg = _CONTEXT_BUDGET_MSG
