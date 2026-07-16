@@ -121,6 +121,9 @@ def validate_finding_fixes(
     candidates.sort(key=lambda f: _SEVERITY_ORDER.get(f.severity, 4))
 
     for finding in candidates[:max_checks]:
+        replacement = finding.suggested_replacement
+        if not replacement:  # candidates filter guarantees this; keep for narrowing + fail-safe
+            continue
         content = get_file_content(finding.file_path)
         if content is None:
             logger.info(
@@ -134,7 +137,7 @@ def validate_finding_fixes(
             content,
             finding.line_start,
             finding.line_end,
-            finding.suggested_replacement,
+            replacement,
             finding.file_path,
         ):
             finding.fix_validated = True
