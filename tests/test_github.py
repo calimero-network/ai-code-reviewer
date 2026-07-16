@@ -249,12 +249,19 @@ class TestGitHubPRHandler:
         mock_handler = AsyncMock()
         payload = {
             "action": "created",
-            "comment": {"body": "/ai-review", "user": {"login": "contributor"}},
+            "comment": {
+                "body": "/ai-review",
+                "user": {"login": "maintainer"},
+                "author_association": "MEMBER",
+            },
             "issue": {"number": 42, "pull_request": {"url": "https://..."}},
             "repository": {"full_name": "owner/repo"},
         }
 
-        with patch.object(webhook, "_review_handler", mock_handler):
+        with (
+            patch.object(webhook, "_review_handler", mock_handler),
+            patch.object(webhook, "_ack_comment"),
+        ):
             await _handle_issue_comment_event(payload)
             mock_handler.assert_called_once_with(repo="owner/repo", pr_number=42)
 

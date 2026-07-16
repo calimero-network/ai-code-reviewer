@@ -1928,3 +1928,64 @@ class TestExtraReviewerUsersWiring:
                     config=config,
                 )
             assert gh_cls.call_args.kwargs["extra_reviewer_users"] == ["meroreviewer[bot]"]
+
+
+class TestTransientFailureClassification:
+    """transient_failure gates the queue's whole-review retry, so it must be true
+    only when every agent failure is infra pressure that a retry could clear."""
+
+    _OVERLOADED = "Agent failed: Error code: 529 - {'error': {'type': 'overloaded_error'}}"
+
+    def test_all_agents_failed_with_529_is_transient(self):
+        result = aggregate_findings(
+            [("agent-1", [], self._OVERLOADED), ("agent-2", [], self._OVERLOADED)],
+            "test/repo",
+            1,
+        )
+        assert result.failed_agents == ["agent-1", "agent-2"]
+        assert result.transient_failure is True
+
+    def test_deadline_marker_is_transient(self):
+        from ai_reviewer.agents.anthropic_client import DEADLINE_MARKER
+
+        result = aggregate_findings([("agent-1", [], DEADLINE_MARKER)], "test/repo", 1)
+        assert result.transient_failure is True
+
+    def test_code_bug_failure_is_not_transient(self):
+        result = aggregate_findings(
+            [("agent-1", [], "Agent failed: KeyError('file_path')")], "test/repo", 1
+        )
+        assert result.failed_agents == ["agent-1"]
+        assert result.transient_failure is False
+
+    def test_parse_error_is_not_transient(self):
+        from ai_reviewer.agents.anthropic_client import PARSE_ERROR_MARKER
+
+        result = aggregate_findings([("agent-1", [], PARSE_ERROR_MARKER)], "test/repo", 1)
+        assert result.transient_failure is False
+
+    def test_mixed_failure_is_not_transient(self):
+        """One real bug alongside a 529: retrying would hit the same bug."""
+        result = aggregate_findings(
+            [
+                ("agent-1", [], self._OVERLOADED),
+                ("agent-2", [], "Agent failed: KeyError('file_path')"),
+            ],
+            "test/repo",
+            1,
+        )
+        assert result.transient_failure is False
+
+    def test_clean_review_is_never_transient(self):
+        result = aggregate_findings([("agent-1", [], "Review completed")], "test/repo", 1)
+        assert result.failed_agents == []
+        assert result.transient_failure is False
+
+    def test_partial_success_with_529_is_transient(self):
+        """One agent succeeded, one died on 529 - still worth a whole-review retry."""
+        result = aggregate_findings(
+            [("agent-1", [], "Review completed"), ("agent-2", [], self._OVERLOADED)],
+            "test/repo",
+            1,
+        )
+        assert result.transient_failure is True

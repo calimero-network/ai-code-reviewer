@@ -73,12 +73,14 @@ _GRAMMAR_TIMEOUT_MAX_RETRIES = 2
 _CONNECTION_ERROR_MAX_RETRIES = 2
 
 
-# Anthropic 529 "Overloaded" is server-side capacity pressure that can persist
-# for tens of seconds - longer than the SDK's fast built-in retries. Ride it out
-# with a few long-backoff attempts (bounded by the review deadline). The App's
-# queue path also retries the whole job, but the CI path has no such backstop.
-_OVERLOADED_MAX_RETRIES = 3
-_OVERLOADED_BACKOFF_SECONDS = (15, 30, 60)
+# Anthropic 529 "Overloaded" (and 429 rate limits) are server-side pressure that
+# in practice persists for minutes - far longer than the SDK's fast built-in
+# retries. Ride it out with long backoff (~465s total), bounded by the review
+# deadline. The App's queue path also retries the whole job, but the CI path has
+# no such backstop.
+_OVERLOADED_MAX_RETRIES = 5
+_OVERLOADED_BACKOFF_SECONDS = (15, 30, 60, 120, 240)
+_RETRIABLE_STATUS_CODES = (429, 529)
 
 
 # Summary markers for reviews that did NOT complete. aggregate_findings() treats
@@ -96,6 +98,51 @@ INCOMPLETE_SUMMARY_MARKERS: tuple[str, ...] = (
     TRUNCATED_MARKER,
     DEADLINE_MARKER,
 )
+
+
+def _retry_after_seconds(exc: Exception) -> float | None:
+    """Seconds from the response's `retry-after` header, when present and numeric.
+
+    Only the delta-seconds form is honored; the HTTP-date form is rare from this
+    API and not worth parsing.
+    """
+    headers = getattr(getattr(exc, "response", None), "headers", None)
+    if headers is None:
+        return None
+    try:
+        value = float(headers.get("retry-after"))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def is_transient_infra_error(exc_or_summary: object) -> bool:
+    """True when a failure is Anthropic/network infra pressure, not a code bug.
+
+    Accepts an exception or an agent summary string (review.py stringifies agent
+    exceptions into summaries), so both the exception and the marker paths in the
+    pipeline classify identically. Callers use it to decide whether retrying the
+    whole review can plausibly help.
+    """
+    if isinstance(exc_or_summary, anthropic.APIConnectionError):
+        return True
+    if isinstance(exc_or_summary, anthropic.APIStatusError):
+        return exc_or_summary.status_code in _RETRIABLE_STATUS_CODES
+    if isinstance(exc_or_summary, TimeoutError):
+        return True
+    text = str(exc_or_summary)
+    return any(
+        marker in text
+        for marker in (
+            "overloaded_error",
+            "Error code: 529",
+            "rate_limit_error",
+            "Error code: 429",
+            "APIConnectionError",
+            "Connection error",
+            DEADLINE_MARKER,
+        )
+    )
 
 
 def _accepts_temperature(model: str) -> bool:
@@ -238,23 +285,32 @@ class AnthropicClient:
                 )
                 await asyncio.sleep(grammar_backoff)
             except anthropic.APIStatusError as exc:
-                # 529 Overloaded is Anthropic-side capacity pressure that can
-                # persist past the SDK's fast built-in retries. Retry with long
-                # backoff to ride out the window, bounded by the deadline. Kept
-                # after BadRequestError (a 400 subclass) so grammar-timeout retry
-                # still wins; other status errors (auth/validation) are not
+                # 529 Overloaded and 429 rate limits are Anthropic-side pressure
+                # that persists past the SDK's fast built-in retries. Retry with
+                # long backoff to ride out the window, bounded by the deadline.
+                # Kept after BadRequestError (a 400 subclass) so grammar-timeout
+                # retry still wins; other status errors (auth/validation) are not
                 # retried here.
-                if getattr(exc, "status_code", None) != 529:
+                if getattr(exc, "status_code", None) not in _RETRIABLE_STATUS_CODES:
                     raise
                 if overloaded_retries >= _OVERLOADED_MAX_RETRIES:
                     raise
                 overloaded_retries += 1
                 backoff = _OVERLOADED_BACKOFF_SECONDS[overloaded_retries - 1]
+                # Server-advised wait wins when it is longer than ours: retrying
+                # sooner than told just burns the remaining attempts.
+                retry_after = _retry_after_seconds(exc)
+                source = "our backoff"
+                if retry_after is not None and retry_after > backoff:
+                    backoff = retry_after
+                    source = "retry-after header"
                 if deadline is not None and time.monotonic() + backoff >= deadline:
                     raise TimeoutError("review deadline reached before overloaded retry") from exc
                 logger.warning(
-                    "Anthropic overloaded (529), retrying in %ds (%d/%d)",
+                    "Anthropic status %s, retrying in %.0fs per %s (%d/%d)",
+                    exc.status_code,
                     backoff,
+                    source,
                     overloaded_retries,
                     _OVERLOADED_MAX_RETRIES,
                 )
