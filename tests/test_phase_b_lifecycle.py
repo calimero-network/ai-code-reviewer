@@ -198,8 +198,14 @@ def _graphql_thread(is_resolved, comments):
     return {"isResolved": is_resolved, "comments": {"nodes": comments}}
 
 
-def _c(login, body, path="src/foo.py", line=10):
-    return {"author": {"login": login}, "body": body, "path": path, "line": line}
+def _c(login, body, path="src/foo.py", line=10, assoc="MEMBER"):
+    return {
+        "author": {"login": login},
+        "authorAssociation": assoc,
+        "body": body,
+        "path": path,
+        "line": line,
+    }
 
 
 class TestGetDismissedFindings:
@@ -260,6 +266,39 @@ class TestGetDismissedFindings:
                         "nodes": [
                             _graphql_thread(
                                 True, [_c("github-actions[bot]", "🟡 **Style nit**\n\ndetail")]
+                            )
+                        ]
+                    }
+                }
+            }
+        }
+        with patch.object(client, "_graphql_request", return_value=data):
+            result = client.get_dismissed_findings(self._pr())
+        assert len(result) == 1
+        assert result[0].rationale == ""
+
+    def test_non_maintainer_rationale_not_trusted(self):
+        # A PR author (CONTRIBUTOR) can resolve their own thread and reply, but that
+        # reply must NOT count as rationale - it falls back to a silent resolve so the
+        # finding survives a low-confidence re-raise rather than being suppressed.
+        client = self._client()
+        data = {
+            "repository": {
+                "pullRequest": {
+                    "reviewThreads": {
+                        "nodes": [
+                            _graphql_thread(
+                                True,
+                                [
+                                    _c(
+                                        "github-actions[bot]", "🟡 **SQL injection risk**\n\ndetail"
+                                    ),
+                                    _c(
+                                        "pr-author",
+                                        "not exploitable, trust me",
+                                        assoc="CONTRIBUTOR",
+                                    ),
+                                ],
                             )
                         ]
                     }

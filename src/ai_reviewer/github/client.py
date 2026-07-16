@@ -58,6 +58,10 @@ _RESOLVE_COMMENT_DELAY_S: float = float(os.environ.get("AI_REVIEWER_RESOLVE_DELA
 _MAX_RESOLVE_COMMENTS: int = int(os.environ.get("AI_REVIEWER_MAX_RESOLVE", "100"))
 # Cap the dismissal ledger so a huge PR can't blow up the cross-review prompt.
 _MAX_DISMISSED_FINDINGS = 50
+# Only a maintainer's rationale may drive the low-confidence-reraise pre-filter. A PR
+# author can resolve their own thread, so an unprivileged reply must not count as
+# rationale (it falls back to a silent resolve, which never suppresses a re-raise).
+_RATIONALE_AUTHOR_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 _NO_LONGER_DETECTED_REPLY = (
     "✅ **No longer detected** - This issue was not re-detected after the latest changes."
 )
@@ -1528,9 +1532,11 @@ class GitHubClient:
         Resolved-thread state is only exposed via GraphQL (REST cannot see it), so
         this issues a single query. A dismissed finding is a RESOLVED thread whose
         FIRST comment is from an allowed bot user and parses as a bot finding; its
-        rationale is the last human-authored comment body in the thread (empty on a
-        silent resolve). Capped at ``_MAX_DISMISSED_FINDINGS``. Any error returns []
-        and logs - the ledger must never fail the review.
+        rationale is the last comment body from a maintainer (authorAssociation in
+        ``_RATIONALE_AUTHOR_ASSOCIATIONS``), empty on a silent resolve or when only
+        the PR author/other non-maintainers replied. Capped at
+        ``_MAX_DISMISSED_FINDINGS``. Any error returns [] and logs - the ledger must
+        never fail the review.
         """
         try:
             owner, name = pr.base.repo.full_name.split("/", 1)
@@ -1544,6 +1550,7 @@ class GitHubClient:
                       comments(first: 10) {
                         nodes {
                           author { login }
+                          authorAssociation
                           body
                           path
                           line
@@ -1590,7 +1597,11 @@ class GitHubClient:
                 rationale = ""
                 for comment in comments:
                     login = (comment.get("author") or {}).get("login")
-                    if login and login not in allowed_users:
+                    if (
+                        login
+                        and login not in allowed_users
+                        and comment.get("authorAssociation") in _RATIONALE_AUTHOR_ASSOCIATIONS
+                    ):
                         rationale = comment.get("body") or ""
 
                 dismissed.append(
