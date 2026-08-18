@@ -107,3 +107,7 @@ dmypy.json
 
 # pre-commit
 .pre-commit-cache/
+
+# Per-developer Claude Code permissions: local grants and absolute paths,
+# never shared. The skill and agent definitions under .claude/ are shared.
+.claude/settings.local.json

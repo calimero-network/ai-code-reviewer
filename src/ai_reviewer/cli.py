@@ -15,7 +15,13 @@ from rich.logging import RichHandler
 from rich.table import Table
 
 from ai_reviewer import __version__
-from ai_reviewer.config import Config, DocReviewSettings, load_config, validate_config
+from ai_reviewer.config import (
+    AnthropicApiConfig,
+    Config,
+    DocReviewSettings,
+    load_config,
+    validate_config,
+)
 from ai_reviewer.docs.analyzer import DocAnalyzer, format_doc_comment
 from ai_reviewer.docs.updater import run_doc_update
 from ai_reviewer.github.client import (
@@ -27,9 +33,14 @@ from ai_reviewer.github.client import (
     should_skip_before_agents,
     should_skip_review,
 )
-from ai_reviewer.github.formatter import GitHubFormatter, format_review_as_json
+from ai_reviewer.github.formatter import (
+    GitHubFormatter,
+    format_local_report,
+    format_review_as_json,
+)
 from ai_reviewer.github.webhook import create_webhook_app, set_review_handler
 from ai_reviewer.models.review import ConsolidatedReview
+from ai_reviewer.review import build_agent_prompts, consolidate_agent_findings, review_local
 from ai_reviewer.review import review_pr as run_review
 
 console = Console()
@@ -590,6 +601,149 @@ def _run_doc_review(
             gh.post_or_update_doc_comment(pr, body, marker)
         else:
             console.print("[dim]📄 Documentation looks current — no comment needed[/dim]")
+
+
+@cli.command("review")
+@click.option("--staged", is_flag=True, help="Review the index instead of the working tree")
+@click.option("--base", default=None, help="Review base...HEAD instead of uncommitted changes")
+@click.option("--output", type=click.Choice(["markdown", "json"]), default="markdown")
+@click.option("--agents", type=int, default=3, help="Number of agents (1-5)")
+@click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
+@click.option("--no-cross-review", "no_cross_review", is_flag=True)
+def review_local_command(
+    staged: bool,
+    base: str | None,
+    output: str,
+    agents: int,
+    config_path: str | None,
+    no_cross_review: bool,
+) -> None:
+    """Review local changes with no pull request.
+
+    Reviews uncommitted work by default, the index with --staged, or a branch
+    range with --base. Use --output json to drive a fix loop.
+    """
+    config = load_config(Path(config_path) if config_path else None)
+    # Local review builds its own inputs; a config without an anthropic section is
+    # usable rather than fatal.
+    anthropic_cfg = config.anthropic or AnthropicApiConfig(api_key="")
+
+    try:
+        review = asyncio.run(
+            review_local(
+                root=os.getcwd(),
+                anthropic_cfg=anthropic_cfg,
+                staged=staged,
+                base=base,
+                num_agents=agents,
+                enable_cross_review=not no_cross_review,
+                config=config,
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+
+    if output == "json":
+        print(json.dumps(format_review_as_json(review), indent=2))
+    else:
+        print(GitHubFormatter("AI Code Reviewer").format_review(review))
+
+
+@cli.command("prompts")
+@click.option("--out", "out_dir", required=True, type=click.Path(), help="Directory to write to")
+@click.option("--staged", is_flag=True, help="Prompt for the index instead of the working tree")
+@click.option("--base", default=None, help="Prompt for base...HEAD")
+@click.option("--agents", type=int, default=3, help="How many reviewer profiles to emit")
+@click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
+def prompts_command(
+    out_dir: str, staged: bool, base: str | None, agents: int, config_path: str | None
+) -> None:
+    """Write one self-contained review prompt per reviewer profile.
+
+    For orchestrating reviewer subagents from a coding session: this makes no LLM
+    calls, it only assembles the same prompts the API path would send.
+    """
+    config = load_config(Path(config_path) if config_path else None)
+    try:
+        built = asyncio.run(
+            build_agent_prompts(
+                root=os.getcwd(),
+                staged=staged,
+                base=base,
+                num_agents=agents,
+                anthropic_cfg=config.anthropic,
+                config=config,
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+    target = Path(out_dir)
+    target.mkdir(parents=True, exist_ok=True)
+    for name, spec in built.items():
+        (target / f"{name}.md").write_text(spec["prompt"])
+        print(f"{name}\t{spec['model']}\t{target / f'{name}.md'}")
+
+
+@cli.command("consolidate")
+@click.argument("findings_files", nargs=-1, required=True, type=click.Path(exists=True))
+@click.option("--output", type=click.Choice(["markdown", "json"]), default="markdown")
+@click.option("--all", "show_all", is_flag=True, help="Include suggestions and nitpicks")
+@click.option("--scope", default="working tree", help="What was reviewed, for the header")
+@click.option("--staged", is_flag=True, help="Findings came from the index")
+@click.option("--base", default=None, help="Findings came from base...HEAD")
+@click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
+def consolidate_command(
+    findings_files: tuple[str, ...],
+    output: str,
+    show_all: bool,
+    scope: str,
+    staged: bool,
+    base: str | None,
+    config_path: str | None,
+) -> None:
+    """Consolidate per-agent findings JSON into one reviewed result.
+
+    Each file holds one agent's findings and is named for that agent, so the
+    filename drives consensus scoring. Clustering, confidence floors, cross-file
+    dedup and fix validation all run here.
+    """
+    config = load_config(Path(config_path) if config_path else None)
+    root = Path(os.getcwd())
+
+    def read_local(path: str) -> str | None:
+        # file_path comes from agent-produced JSON, so it is untrusted; the shared
+        # reader confines it to the repository.
+        return read_repo_file(str(root), path)
+
+    # The adaptive cap and density penalty scale with the size of the diff that was
+    # reviewed, so measure it here rather than inferring it from the findings.
+    from ai_reviewer.context.local_source import (
+        build_local_context,
+        changed_files,
+        local_diff,
+        read_repo_file,
+    )
+
+    try:
+        diff = local_diff(str(root), staged=staged, base=base)
+        reviewed = build_local_context(str(root), diff, changed_files(str(root), staged, base))
+        review = consolidate_agent_findings(
+            list(findings_files),
+            repo=root.name,
+            config=config,
+            read_file=read_local,
+            total_lines=reviewed.additions + reviewed.deletions,
+        )
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+
+    if output == "json":
+        print(json.dumps(format_review_as_json(review), indent=2))
+    else:
+        print(format_local_report(review, scope=scope, show_all=show_all))
 
 
 @cli.command("update-docs")

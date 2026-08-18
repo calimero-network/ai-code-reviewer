@@ -6,7 +6,7 @@ import base64
 import logging
 from collections.abc import Iterable
 
-from ai_reviewer.github.client import GitHubClient
+from ai_reviewer.models.context import RepoSource
 from ai_reviewer.session import ReviewSession
 
 logger = logging.getLogger(__name__)
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 def fetch_conventions(
     session: ReviewSession,
-    gh: GitHubClient,
+    gh: RepoSource,
     paths: Iterable[str],
 ) -> dict[str, str]:
     """Fetch convention files that exist; skip missing silently."""
@@ -44,7 +44,7 @@ def fetch_conventions(
     return out
 
 
-def build_repo_map(session: ReviewSession, gh: GitHubClient) -> str:
+def build_repo_map(session: ReviewSession, gh: RepoSource) -> str:
     """Build a compact top-level directory listing for the system prompt."""
     cached_tree = session.cached_tree()
     if cached_tree is None:

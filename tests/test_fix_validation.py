@@ -207,3 +207,21 @@ def test_multi_line_range_finding_falls_back_to_prose():
         )
     )
     assert "```suggestion" not in body
+
+
+def test_json_export_carries_the_fields_a_fix_loop_needs():
+    """The local fix loop reads findings from --output json. Without these two
+    fields every fix must be re-derived by a model instead of applied."""
+    from ai_reviewer.github.formatter import format_review_as_json
+
+    validated = _finding(suggested_replacement="    x = 2", fix_validated=True)
+    prose_only = _finding(id="f2", suggested_replacement=None, fix_validated=False)
+    review = aggregate_findings([("a", [], "ok")], "o/r", 1)
+    review.findings = [validated, prose_only]
+
+    exported = format_review_as_json(review)["findings"]
+
+    assert exported[0]["suggested_replacement"] == "    x = 2"
+    assert exported[0]["fix_validated"] is True
+    assert exported[1]["suggested_replacement"] is None
+    assert exported[1]["fix_validated"] is False

@@ -3,7 +3,19 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol
+
+
+class RepoSource(Protocol):
+    """Repository reads the context builder and tool registry need.
+
+    Satisfied by GitHubClient (Contents API) and by LocalGitSource (working
+    tree), which is why these two methods are the whole seam.
+    """
+
+    def get_file_contents(self, repo: str, path: str, ref: str) -> Any: ...
+
+    def get_tree(self, repo: str, sha: str, recursive: bool = True) -> Any: ...
 
 
 @dataclass

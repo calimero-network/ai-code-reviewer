@@ -110,6 +110,23 @@ doc_review:
 
 ---
 
+## Local Review (before a PR exists)
+
+Run the same multi-agent pipeline against uncommitted work, from inside a Claude
+Code session — no API key and nothing posted to GitHub. Reviewers are subagents in
+your session; clustering, consensus scoring, confidence floors and fix validation
+stay in Python, so local and PR reviews apply the same rules.
+
+```bash
+/ai-review                 # uncommitted changes, including untracked files
+/ai-review --staged        # the index only
+/ai-review --base main     # main...HEAD
+```
+
+Setup, scopes, configuration and the non-session CLI workflow: **[Local Review](docs/LOCAL-REVIEW.md)**.
+
+---
+
 ## CLI Commands
 
 ```bash
