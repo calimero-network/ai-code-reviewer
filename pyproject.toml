@@ -69,6 +69,9 @@ packages = ["src/ai_reviewer"]
 target-version = "py311"
 line-length = 100
 src = ["src", "tests"]
+# Docs are prose. Recent ruff formats Python inside Markdown code blocks, which
+# collapses examples written expanded on purpose to illustrate a point.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = [
