@@ -128,8 +128,12 @@ ai-reviewer prompts --out "$D" --agents 3
 #    drives consensus scoring.
 
 # 3. consolidate (no LLM calls)
-ai-reviewer consolidate "$D"/out/*.json --scope "working tree"
+ai-reviewer consolidate "$D"/out/*.json
 ```
+
+Pass the same scope flag (`--staged` / `--base <ref>`) to both commands.
+The finding cap scales with the size of the reviewed diff, so consolidating a
+staged review without `--staged` measures a clean working tree.
 
 Each brief states the exact JSON shape required.
 `ai-reviewer consolidate --output json` emits machine-readable findings including

@@ -607,7 +607,7 @@ def _run_doc_review(
 @click.option("--staged", is_flag=True, help="Review the index instead of the working tree")
 @click.option("--base", default=None, help="Review base...HEAD instead of uncommitted changes")
 @click.option("--output", type=click.Choice(["markdown", "json"]), default="markdown")
-@click.option("--agents", type=int, default=3, help="Number of agents (1-5)")
+@click.option("--agents", type=click.IntRange(1, 5), default=3, help="Number of agents")
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
 @click.option("--no-cross-review", "no_cross_review", is_flag=True)
 def review_local_command(
@@ -654,7 +654,9 @@ def review_local_command(
 @click.option("--out", "out_dir", required=True, type=click.Path(), help="Directory to write to")
 @click.option("--staged", is_flag=True, help="Prompt for the index instead of the working tree")
 @click.option("--base", default=None, help="Prompt for base...HEAD")
-@click.option("--agents", type=int, default=3, help="How many reviewer profiles to emit")
+@click.option(
+    "--agents", type=click.IntRange(1, 5), default=3, help="How many reviewer profiles to emit"
+)
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
 def prompts_command(
     out_dir: str, staged: bool, base: str | None, agents: int, config_path: str | None
@@ -690,7 +692,6 @@ def prompts_command(
 @click.argument("findings_files", nargs=-1, required=True, type=click.Path(exists=True))
 @click.option("--output", type=click.Choice(["markdown", "json"]), default="markdown")
 @click.option("--all", "show_all", is_flag=True, help="Include suggestions and nitpicks")
-@click.option("--scope", default="working tree", help="What was reviewed, for the header")
 @click.option("--staged", is_flag=True, help="Findings came from the index")
 @click.option("--base", default=None, help="Findings came from base...HEAD")
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
@@ -698,7 +699,6 @@ def consolidate_command(
     findings_files: tuple[str, ...],
     output: str,
     show_all: bool,
-    scope: str,
     staged: bool,
     base: str | None,
     config_path: str | None,
@@ -709,6 +709,14 @@ def consolidate_command(
     filename drives consensus scoring. Clustering, confidence floors, cross-file
     dedup and fix validation all run here.
     """
+    from ai_reviewer.context.local_source import (
+        build_local_context,
+        changed_files,
+        local_diff,
+        read_repo_file,
+        scope_label,
+    )
+
     config = load_config(Path(config_path) if config_path else None)
     root = Path(os.getcwd())
 
@@ -716,15 +724,6 @@ def consolidate_command(
         # file_path comes from agent-produced JSON, so it is untrusted; the shared
         # reader confines it to the repository.
         return read_repo_file(str(root), path)
-
-    # The adaptive cap and density penalty scale with the size of the diff that was
-    # reviewed, so measure it here rather than inferring it from the findings.
-    from ai_reviewer.context.local_source import (
-        build_local_context,
-        changed_files,
-        local_diff,
-        read_repo_file,
-    )
 
     try:
         diff = local_diff(str(root), staged=staged, base=base)
@@ -743,7 +742,7 @@ def consolidate_command(
     if output == "json":
         print(json.dumps(format_review_as_json(review), indent=2))
     else:
-        print(format_local_report(review, scope=scope, show_all=show_all))
+        print(format_local_report(review, scope=scope_label(staged, base), show_all=show_all))
 
 
 @cli.command("update-docs")

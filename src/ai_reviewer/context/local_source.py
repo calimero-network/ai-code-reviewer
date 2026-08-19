@@ -14,6 +14,8 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+
 from ai_reviewer.models.context import ReviewContext
 
 logger = logging.getLogger(__name__)
@@ -219,11 +221,28 @@ def build_local_context(root: str, diff: str, files: dict[str, str]) -> ReviewCo
     )
 
 
+def scope_label(staged: bool = False, base: str | None = None) -> str:
+    """What a given scope is called, wherever it is shown to a reader."""
+    return f"{base}...HEAD" if base else "the index" if staged else "the working tree"
+
+
+def load_local_repo_config(root: str) -> dict | None:
+    """Best-effort ``.ai-reviewer.yaml`` from the checkout, mirroring the API load."""
+    config_file = Path(root) / ".ai-reviewer.yaml"
+    if not config_file.is_file():
+        return None
+    try:
+        parsed = yaml.safe_load(config_file.read_text())
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not read .ai-reviewer.yaml: %s", e)
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
 def build_local_pr(root: str, staged: bool = False, base: str | None = None) -> LocalPR:
     """A PullRequest stand-in describing what is being reviewed."""
-    scope = f"{base}...HEAD" if base else "the index" if staged else "the working tree"
     return LocalPR(
-        title=f"Local review of {scope}",
+        title=f"Local review of {scope_label(staged, base)}",
         body="",
         head=_Head(sha=_head_sha(Path(root))),
     )

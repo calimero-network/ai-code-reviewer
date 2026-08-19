@@ -33,10 +33,11 @@ Create a todo per step and work through them in order.
 
 ```bash
 D=$(mktemp -d) && mkdir -p "$D/out"
-ai-reviewer prompts --out "$D" --agents 3 --config .ai-reviewer.yaml
+SCOPE=()                      # or (--staged), or (--base main)
+ai-reviewer prompts --out "$D" --agents 3 --config .ai-reviewer.yaml "${SCOPE[@]}"
 ```
 
-Add `--staged` or `--base <ref>` to match the requested scope.
+Set `SCOPE` once to match the requested scope; step 4 reuses it.
 Each output line is `<agent-name>\t<model>\t<brief path>`.
 If it prints nothing, there are no changes to review - say so and stop.
 
@@ -66,9 +67,12 @@ agent must never read as a clean review.
 **4. Consolidate in Python.**
 
 ```bash
-ai-reviewer consolidate "$D"/out/*.json --scope "working tree" --config .ai-reviewer.yaml
+ai-reviewer consolidate "$D"/out/*.json --config .ai-reviewer.yaml "${SCOPE[@]}"
 ```
 
+Pass the same `SCOPE` as step 1. The finding cap and density penalty scale with the
+size of the reviewed diff, so consolidating a staged review without `--staged`
+measures a clean working tree and caps the report at five findings.
 Add `--all` to expand suggestions and nitpicks.
 This clusters agreeing findings, applies confidence floors, dedups across files,
 caps the total, and validates any structured replacements.

@@ -99,6 +99,14 @@ def _compile_ignore_patterns(patterns: list[str]) -> list[re.Pattern[str]]:
     return [re.compile(fnmatch.translate(p)) for p in patterns]
 
 
+def ignore_patterns_from(repo_config: dict | None) -> list[str]:
+    """The repo's ``ignore`` list, accepting a bare string as a one-element list."""
+    raw = (repo_config or {}).get("ignore", [])
+    if isinstance(raw, str):
+        return [raw]
+    return raw if isinstance(raw, list) else []
+
+
 def filter_by_ignore_patterns(files: dict[str, str], patterns: list[str]) -> dict[str, str]:
     """Remove entries whose path matches any of the fnmatch *patterns*."""
     if not patterns:
@@ -981,6 +989,15 @@ _AGENT_CLASSES: dict[str, type[ReviewAgent]] = {
     "style-reviewer": StyleAgent,
 }
 
+# Given to a lone reviewer, on either entry point: its role prompt is one
+# perspective, and nobody else is covering the rest.
+_SOLE_REVIEWER_INSTRUCTION = (
+    "**IMPORTANT: You are the ONLY reviewer for this PR. "
+    "Analyze from ALL perspectives**: security, performance, "
+    "logic, architecture, and code quality. Do NOT limit "
+    "yourself to your default focus area."
+)
+
 DEFAULT_AGENT_ORDER = [
     "security-reviewer",
     "logic-reviewer",
@@ -1594,23 +1611,6 @@ async def review_pr(
             len(secret_findings),
         )
 
-    raw_ignore = (context.repo_config or {}).get("ignore", [])
-    ignore_patterns = (
-        raw_ignore
-        if isinstance(raw_ignore, list)
-        else [raw_ignore]
-        if isinstance(raw_ignore, str)
-        else []
-    )
-    if ignore_patterns:
-        pre_file_count = len(files)
-        files = filter_by_ignore_patterns(files, ignore_patterns)
-        diff = filter_diff_by_ignore_patterns(diff, ignore_patterns)
-        logger.info(
-            "Ignore patterns filtered %d file(s) from prompt inputs",
-            pre_file_count - len(files),
-        )
-
     return await _review_from_inputs(
         repo=repo,
         pr_number=pr_number,
@@ -1655,25 +1655,6 @@ def _flatten_prompt_blocks(blocks: list[dict[str, Any]]) -> str:
     return "\n\n".join(b["text"] for b in blocks if b.get("type") == "text")
 
 
-def _local_ignore_patterns(root: str) -> list[str]:
-    """The repo's own ``ignore`` list from .ai-reviewer.yaml, if present."""
-    from pathlib import Path
-
-    import yaml
-
-    config_file = Path(root) / ".ai-reviewer.yaml"
-    if not config_file.is_file():
-        return []
-    try:
-        raw = (yaml.safe_load(config_file.read_text()) or {}).get("ignore", [])
-    except Exception as e:  # noqa: BLE001
-        logger.warning("Could not read .ai-reviewer.yaml ignore list: %s", e)
-        return []
-    if isinstance(raw, str):
-        return [raw]
-    return raw if isinstance(raw, list) else []
-
-
 async def build_agent_prompts(
     root: str,
     staged: bool = False,
@@ -1694,6 +1675,7 @@ async def build_agent_prompts(
         build_local_context,
         build_local_pr,
         changed_files,
+        load_local_repo_config,
         local_diff,
     )
 
@@ -1703,7 +1685,7 @@ async def build_agent_prompts(
 
     # Same exclusions review_pr applies, so a repo's generated and vendored files
     # are skipped locally too rather than only when reviewed as a PR.
-    ignore = _local_ignore_patterns(root)
+    ignore = ignore_patterns_from(load_local_repo_config(root))
     if ignore:
         files = filter_by_ignore_patterns(files, ignore)
         diff = filter_diff_by_ignore_patterns(diff, ignore)
@@ -1741,6 +1723,8 @@ async def build_agent_prompts(
     configured = [a.name for a in (config.agents if config and config.agents else [])]
     order = (configured or DEFAULT_AGENT_ORDER)[:effective]
 
+    sole = f"{_SOLE_REVIEWER_INSTRUCTION}\n\n" if len(order) == 1 else ""
+
     prompts: dict[str, dict[str, str]] = {}
     for name in order:
         cls = _AGENT_CLASSES.get(name)
@@ -1750,7 +1734,8 @@ async def build_agent_prompts(
         prompts[name] = {
             "model": (agent_cfg.model if agent_cfg else None) or cls.MODEL,
             "prompt": (
-                f"{shared}\n\n## Your reviewer role\n{cls.SYSTEM_PROMPT}\n{_LOCAL_OUTPUT_CONTRACT}"
+                f"{sole}{shared}\n\n## Your reviewer role\n"
+                f"{cls.SYSTEM_PROMPT}\n{_LOCAL_OUTPUT_CONTRACT}"
             ),
         }
     return prompts
@@ -1834,6 +1819,7 @@ async def review_local(
         build_local_context,
         build_local_pr,
         changed_files,
+        load_local_repo_config,
         local_diff,
     )
 
@@ -1842,6 +1828,7 @@ async def review_local(
     diff = local_diff(root, staged=staged, base=base)
     files = changed_files(root, staged=staged, base=base)
     context = build_local_context(root, diff, files)
+    context.repo_config = load_local_repo_config(root)
 
     if not diff.strip():
         logger.info("No local changes to review")
@@ -1897,6 +1884,18 @@ async def _review_from_inputs(
     ``get_file_contents`` and ``get_tree``.
     """
     import time
+
+    # Both entry points scan for secrets on the unfiltered diff first, so filtering
+    # here keeps that order while giving the two paths one exclusion rule.
+    patterns = ignore_patterns_from(context.repo_config)
+    if patterns:
+        pre_file_count = len(files)
+        files = filter_by_ignore_patterns(files, patterns)
+        diff = filter_diff_by_ignore_patterns(diff, patterns)
+        logger.info(
+            "Ignore patterns filtered %d file(s) from prompt inputs",
+            pre_file_count - len(files),
+        )
 
     logger.info(f"Reviewing PR #{pr_number}: {context.pr_title}")
     logger.info(
@@ -1976,16 +1975,10 @@ async def _review_from_inputs(
             # with a comprehensive prompt covering ALL review perspectives.
             agent_system = system_blocks
             if _single_agent_comprehensive:
-                comprehensive_block = {
-                    "type": "text",
-                    "text": (
-                        "**IMPORTANT: You are the ONLY reviewer for this PR. "
-                        "Analyze from ALL perspectives**: security, performance, "
-                        "logic, architecture, and code quality. Do NOT limit "
-                        "yourself to your default focus area."
-                    ),
-                }
-                agent_system = [comprehensive_block, *system_blocks]
+                agent_system = [
+                    {"type": "text", "text": _SOLE_REVIEWER_INSTRUCTION},
+                    *system_blocks,
+                ]
 
             if sharded:
                 instantiated.append((agent_name, None))

@@ -154,3 +154,47 @@ class TestReviewCommand:
 
         assert result.exit_code == 0, result.output
         assert spy.await_args.kwargs["anthropic_cfg"].api_key == ""
+
+
+@pytest.mark.asyncio
+async def test_ignored_paths_are_not_sent_to_reviewers(repo):
+    """review_local must apply the repo's ignore list, as review_pr does."""
+    (repo / ".ai-reviewer.yaml").write_text('version: 1\nignore:\n  - "generated/**"\n')
+    (repo / "generated").mkdir()
+    (repo / "generated" / "api.py").write_text("noise = 1\n")
+    (repo / "a.py").write_text("x = 2\n")
+    client, agent_review = _stub_agents()
+
+    captured: dict = {}
+
+    async def capture(**kwargs):
+        captured.update(kwargs)
+        return [], [], set()
+
+    with (
+        patch.object(rev, "AnthropicClient", return_value=client),
+        patch.object(rev, "_prepare_shared_context", new=capture),
+        patch.object(rev, "_run_agent_safe", new=AsyncMock(return_value=agent_review)),
+    ):
+        await rev.review_local(root=str(repo), anthropic_cfg=CFG, num_agents=1)
+
+    assert "generated/api.py" not in captured["changed_file_contents"]
+    assert "generated/api.py" not in captured["diff"]
+    assert "a.py" in captured["changed_file_contents"]
+
+
+@pytest.mark.asyncio
+async def test_a_lone_local_reviewer_is_told_to_cover_every_perspective(repo):
+    """One reviewer's role prompt is one perspective; nobody else covers the rest."""
+    # Large enough that agent scaling does not collapse the multi-agent case to one.
+    for name in ("a.py", "b.py", "c.py", "d.py"):
+        (repo / name).write_text("".join(f"x{i} = {i}\n" for i in range(200)))
+
+    with patch.object(rev, "_prepare_shared_context", new=AsyncMock(return_value=([], [], set()))):
+        one = await rev.build_agent_prompts(root=str(repo), num_agents=1)
+        three = await rev.build_agent_prompts(root=str(repo), num_agents=3)
+
+    assert len(three) == 3
+
+    assert all(rev._SOLE_REVIEWER_INSTRUCTION in s["prompt"] for s in one.values())
+    assert not any(rev._SOLE_REVIEWER_INSTRUCTION in s["prompt"] for s in three.values())
