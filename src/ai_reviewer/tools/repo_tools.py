@@ -133,9 +133,11 @@ class ToolRegistry:
         )
 
     def _read_file(self, path: str) -> str:
-        # Block path traversal — the GitHub API would reject it too, but reject early
-        # with a clear message rather than letting it become an opaque API error.
-        if ".." in PurePosixPath(path).parts:
+        # Block path traversal and absolute paths. The GitHub source would reject
+        # both, but a local repo source resolves them against the real filesystem,
+        # so this guard is load-bearing rather than just a nicer error.
+        candidate = PurePosixPath(path)
+        if ".." in candidate.parts or candidate.is_absolute():
             return "[error: path traversal not allowed]"
         cached = self.session.cached_file(path)
         if cached is not None:

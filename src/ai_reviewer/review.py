@@ -40,7 +40,7 @@ from ai_reviewer.context.builder import build_pr_map_block, build_system_blocks,
 from ai_reviewer.context.fetch import build_repo_map, fetch_conventions
 from ai_reviewer.context.neighbors import select_neighbors
 from ai_reviewer.github.client import GitHubClient
-from ai_reviewer.models.context import ReviewContext
+from ai_reviewer.models.context import RepoSource, ReviewContext
 from ai_reviewer.models.findings import Category, ConsolidatedFinding, ReviewFinding, Severity
 from ai_reviewer.models.review import AgentReview, ConsolidatedReview, ScoreBreakdown
 from ai_reviewer.security.scanner import scan_for_secrets
@@ -97,6 +97,14 @@ _DIFF_FILE_HEADER_RE = re.compile(r"^diff --git a/.+ b/(.+)$")
 def _compile_ignore_patterns(patterns: list[str]) -> list[re.Pattern[str]]:
     """Pre-compile fnmatch patterns into regex for efficient repeated matching."""
     return [re.compile(fnmatch.translate(p)) for p in patterns]
+
+
+def ignore_patterns_from(repo_config: dict | None) -> list[str]:
+    """The repo's ``ignore`` list, accepting a bare string as a one-element list."""
+    raw = (repo_config or {}).get("ignore", [])
+    if isinstance(raw, str):
+        return [raw]
+    return raw if isinstance(raw, list) else []
 
 
 def filter_by_ignore_patterns(files: dict[str, str], patterns: list[str]) -> dict[str, str]:
@@ -981,6 +989,15 @@ _AGENT_CLASSES: dict[str, type[ReviewAgent]] = {
     "style-reviewer": StyleAgent,
 }
 
+# Given to a lone reviewer, on either entry point: its role prompt is one
+# perspective, and nobody else is covering the rest.
+_SOLE_REVIEWER_INSTRUCTION = (
+    "**IMPORTANT: You are the ONLY reviewer for this PR. "
+    "Analyze from ALL perspectives**: security, performance, "
+    "logic, architecture, and code quality. Do NOT limit "
+    "yourself to your default focus area."
+)
+
 DEFAULT_AGENT_ORDER = [
     "security-reviewer",
     "logic-reviewer",
@@ -1030,7 +1047,7 @@ def _truncate_to_byte_limit(text: str, max_bytes: int, marker: str = "") -> str:
 
 async def _prepare_shared_context(
     session: ReviewSession,
-    gh: GitHubClient,
+    gh: RepoSource,
     pr: Any,
     diff: str,
     changed_file_contents: dict[str, str],
@@ -1594,18 +1611,287 @@ async def review_pr(
             len(secret_findings),
         )
 
-    raw_ignore = (context.repo_config or {}).get("ignore", [])
-    ignore_patterns = (
-        raw_ignore
-        if isinstance(raw_ignore, list)
-        else [raw_ignore]
-        if isinstance(raw_ignore, str)
-        else []
+    return await _review_from_inputs(
+        repo=repo,
+        pr_number=pr_number,
+        pr=pr,
+        gh=gh,
+        diff=diff,
+        files=files,
+        context=context,
+        anthropic_cfg=anthropic_cfg,
+        config=config,
+        num_agents=num_agents,
+        enable_cross_review=enable_cross_review,
+        min_validation_agreement=min_validation_agreement,
+        dismissed=dismissed,
+        secret_findings=secret_findings,
+        on_status=on_status,
+        start_time=start_time,
     )
-    if ignore_patterns:
+
+
+# Emitted with every local prompt: subagents have no schema enforcement, so the
+# expected shape has to be stated explicitly.
+_LOCAL_OUTPUT_CONTRACT = """
+## Required output
+
+Reply with ONE JSON object and nothing else - no prose before or after, no code fence:
+
+{"findings": [{"file_path": "path/from/repo/root.py", "line_start": 42, "line_end": 42,
+  "severity": "critical|warning|suggestion|nitpick",
+  "category": "security|performance|logic|style|architecture|testing|documentation",
+  "title": "one line", "description": "why this is wrong and what happens",
+  "suggested_fix": "prose fix, or null",
+  "suggested_replacement": "exact replacement source for line_start..line_end, or null",
+  "confidence": 0.0}], "summary": "one paragraph"}
+
+Report an empty findings list only if you genuinely found nothing after looking.
+"""
+
+
+def _flatten_prompt_blocks(blocks: list[dict[str, Any]]) -> str:
+    """Join text blocks into one prompt; cache_control has no meaning off-API."""
+    return "\n\n".join(b["text"] for b in blocks if b.get("type") == "text")
+
+
+async def build_agent_prompts(
+    root: str,
+    staged: bool = False,
+    base: str | None = None,
+    num_agents: int = 3,
+    anthropic_cfg: AnthropicApiConfig | None = None,
+    config: Any | None = None,
+) -> dict[str, dict[str, str]]:
+    """Build one self-contained review prompt per agent profile, no LLM calls.
+
+    Lets a coding session spawn reviewer subagents without reimplementing the
+    review standard, severity rubric, few-shot anchors, repo map or conventions -
+    the same blocks the API path sends, including its size-based agent scaling.
+    Returns ``{agent_name: {model, prompt}}``.
+    """
+    from ai_reviewer.context.local_source import (
+        LocalGitSource,
+        build_local_context,
+        build_local_pr,
+        changed_files,
+        load_local_repo_config,
+        local_diff,
+    )
+
+    cfg = anthropic_cfg or AnthropicApiConfig(api_key="")
+    diff = local_diff(root, staged=staged, base=base)
+    files = changed_files(root, staged=staged, base=base)
+
+    # Same exclusions review_pr applies, so a repo's generated and vendored files
+    # are skipped locally too rather than only when reviewed as a PR.
+    ignore = ignore_patterns_from(load_local_repo_config(root))
+    if ignore:
+        files = filter_by_ignore_patterns(files, ignore)
+        diff = filter_diff_by_ignore_patterns(diff, ignore)
+
+    context = build_local_context(root, diff, files)
+    pr = build_local_pr(root, staged=staged, base=base)
+
+    pr_type, pr_size = classify_pr(list(files.keys()), context.additions, context.deletions)
+    session = ReviewSession(
+        repo=context.repo_name,
+        head_sha=pr.head.sha,
+        github_budget=cfg.per_review_github_request_budget,
+    )
+
+    system_blocks, user_blocks, _trimmed = await _prepare_shared_context(
+        session=session,
+        gh=LocalGitSource(root),
+        pr=pr,
+        diff=diff,
+        changed_file_contents=files,
+        anthropic_cfg=cfg,
+        pr_type=pr_type,
+        pr_size=pr_size,
+        language_rules=get_language_rules(context.repo_languages),
+    )
+    shared = _flatten_prompt_blocks(system_blocks) + "\n\n" + _flatten_prompt_blocks(user_blocks)
+
+    # Same size-based scaling the API path applies, so a trivial diff does not
+    # spend three reviewers' worth of quota.
+    effective = _effective_agent_count(
+        context.additions, context.deletions, context.changed_files_count, num_agents
+    )
+    if effective != num_agents:
+        logger.info("Effective agent count: %d (requested %d)", effective, num_agents)
+    configured = [a.name for a in (config.agents if config and config.agents else [])]
+    order = (configured or DEFAULT_AGENT_ORDER)[:effective]
+
+    sole = f"{_SOLE_REVIEWER_INSTRUCTION}\n\n" if len(order) == 1 else ""
+
+    prompts: dict[str, dict[str, str]] = {}
+    for name in order:
+        cls = _AGENT_CLASSES.get(name)
+        if not cls:
+            continue
+        agent_cfg = next((a for a in (config.agents if config else []) if a.name == name), None)
+        prompts[name] = {
+            "model": (agent_cfg.model if agent_cfg else None) or cls.MODEL,
+            "prompt": (
+                f"{sole}{shared}\n\n## Your reviewer role\n"
+                f"{cls.SYSTEM_PROMPT}\n{_LOCAL_OUTPUT_CONTRACT}"
+            ),
+        }
+    return prompts
+
+
+def consolidate_agent_findings(
+    paths: list[Any],
+    repo: str,
+    config: Any | None = None,
+    read_file: Callable[[str], str | None] | None = None,
+    total_lines: int = 0,
+) -> ConsolidatedReview:
+    """Consolidate raw per-agent findings JSON into one reviewed result.
+
+    Each file holds one agent's ``{"findings": [...], "summary": str}`` and is
+    named for that agent, so the filename carries the attribution that drives
+    consensus scoring. Clustering, per-severity confidence floors, cross-file
+    dedup and the adaptive cap all run here rather than in a prompt.
+
+    ``total_lines`` is the size of the diff that was reviewed; it drives the
+    adaptive cap and the density penalty, so it must be measured from the diff
+    rather than inferred from how many findings came back.
+    """
+    import json
+    from pathlib import Path
+
+    per_agent: list[tuple[str, list[dict[str, Any]], str]] = []
+    for path in paths:
+        p = Path(path)
+        try:
+            payload = json.loads(p.read_text())
+            findings = payload.get("findings") or []
+        except (json.JSONDecodeError, AttributeError) as e:
+            raise ValueError(f"{p.name} is not a valid findings file: {e}") from e
+        per_agent.append((p.stem, findings, payload.get("summary", "")))
+
+    thresholds = None
+    if config:
+        thresholds = {
+            Severity.CRITICAL: config.aggregator.min_confidence_critical,
+            Severity.WARNING: config.aggregator.min_confidence_warning,
+            Severity.SUGGESTION: config.aggregator.min_confidence_suggestion,
+            Severity.NITPICK: config.aggregator.min_confidence_nitpick,
+        }
+    base = thresholds if thresholds is not None else CONFIDENCE_THRESHOLDS
+    # No cross-review round runs on the local path, so use the conservative floors.
+    review = aggregate_findings(
+        per_agent,
+        repo,
+        0,
+        confidence_thresholds=_thresholds_for_run(base, cross_review_active=False),
+        total_lines=total_lines,
+    )
+
+    if read_file is not None:
+        validate_finding_fixes(review.findings, read_file)
+    return review
+
+
+async def review_local(
+    root: str,
+    anthropic_cfg: AnthropicApiConfig,
+    staged: bool = False,
+    base: str | None = None,
+    num_agents: int = 3,
+    enable_cross_review: bool = True,
+    min_validation_agreement: float = 2 / 3,
+    config: Any | None = None,
+    on_status: Callable[..., Any] | None = None,
+) -> ConsolidatedReview:
+    """Review a local diff - the working tree, the index, or base...HEAD.
+
+    No pull request and no GitHub calls: repository reads are served from the
+    checkout by LocalGitSource, which satisfies the same two-method surface the
+    shared context builder and ToolRegistry use.
+    """
+    import time
+
+    from ai_reviewer.context.local_source import (
+        LocalGitSource,
+        build_local_context,
+        build_local_pr,
+        changed_files,
+        load_local_repo_config,
+        local_diff,
+    )
+
+    start_time = time.time()
+
+    diff = local_diff(root, staged=staged, base=base)
+    files = changed_files(root, staged=staged, base=base)
+    context = build_local_context(root, diff, files)
+    context.repo_config = load_local_repo_config(root)
+
+    if not diff.strip():
+        logger.info("No local changes to review")
+        return aggregate_findings([], context.repo_name, 0)
+
+    secret_scan_exclude = config.review_policy.secret_scan_exclude if config else []
+    secret_findings = scan_for_secrets(diff, exclude_patterns=secret_scan_exclude)
+
+    return await _review_from_inputs(
+        repo=context.repo_name,
+        pr_number=0,
+        pr=build_local_pr(root, staged=staged, base=base),
+        gh=LocalGitSource(root),
+        diff=diff,
+        files=files,
+        context=context,
+        anthropic_cfg=anthropic_cfg,
+        config=config,
+        num_agents=num_agents,
+        enable_cross_review=enable_cross_review,
+        min_validation_agreement=min_validation_agreement,
+        dismissed=None,
+        secret_findings=secret_findings,
+        on_status=on_status,
+        start_time=start_time,
+    )
+
+
+async def _review_from_inputs(
+    *,
+    repo: str,
+    pr_number: int,
+    pr: Any,
+    gh: Any,
+    diff: str,
+    files: dict[str, str],
+    context: ReviewContext,
+    anthropic_cfg: AnthropicApiConfig,
+    config: Any | None,
+    num_agents: int,
+    enable_cross_review: bool,
+    min_validation_agreement: float,
+    dismissed: list | None,
+    secret_findings: list[ConsolidatedFinding],
+    on_status: Callable[..., Any] | None,
+    start_time: float,
+) -> ConsolidatedReview:
+    """Run agents over already-assembled inputs and consolidate the result.
+
+    Shared by the pull-request entry and the working-tree entry: everything from
+    agent selection through aggregation, cross-review and fix validation is
+    independent of where the diff and file contents came from. ``gh`` only needs
+    ``get_file_contents`` and ``get_tree``.
+    """
+    import time
+
+    # Both entry points scan for secrets on the unfiltered diff first, so filtering
+    # here keeps that order while giving the two paths one exclusion rule.
+    patterns = ignore_patterns_from(context.repo_config)
+    if patterns:
         pre_file_count = len(files)
-        files = filter_by_ignore_patterns(files, ignore_patterns)
-        diff = filter_diff_by_ignore_patterns(diff, ignore_patterns)
+        files = filter_by_ignore_patterns(files, patterns)
+        diff = filter_diff_by_ignore_patterns(diff, patterns)
         logger.info(
             "Ignore patterns filtered %d file(s) from prompt inputs",
             pre_file_count - len(files),
@@ -1689,16 +1975,10 @@ async def review_pr(
             # with a comprehensive prompt covering ALL review perspectives.
             agent_system = system_blocks
             if _single_agent_comprehensive:
-                comprehensive_block = {
-                    "type": "text",
-                    "text": (
-                        "**IMPORTANT: You are the ONLY reviewer for this PR. "
-                        "Analyze from ALL perspectives**: security, performance, "
-                        "logic, architecture, and code quality. Do NOT limit "
-                        "yourself to your default focus area."
-                    ),
-                }
-                agent_system = [comprehensive_block, *system_blocks]
+                agent_system = [
+                    {"type": "text", "text": _SOLE_REVIEWER_INSTRUCTION},
+                    *system_blocks,
+                ]
 
             if sharded:
                 instantiated.append((agent_name, None))

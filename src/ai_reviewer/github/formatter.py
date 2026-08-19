@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from ai_reviewer.github.client import ReviewDelta, ReviewMeta
-from ai_reviewer.models.findings import Severity
+from ai_reviewer.models.findings import ConsolidatedFinding, Severity
 from ai_reviewer.models.review import ConsolidatedReview
 
 
@@ -668,6 +668,10 @@ def format_review_as_json(review: ConsolidatedReview) -> dict:
                 "title": f.title,
                 "description": f.description,
                 "suggested_fix": f.suggested_fix,
+                # The local fix loop applies validated replacements directly; without
+                # these it would have to re-derive a fix that was already verified.
+                "suggested_replacement": f.suggested_replacement,
+                "fix_validated": f.fix_validated,
                 "consensus_score": f.consensus_score,
                 "agreeing_agents": f.agreeing_agents,
                 "confidence": f.confidence,
@@ -678,3 +682,53 @@ def format_review_as_json(review: ConsolidatedReview) -> dict:
             k.value: v for k, v in review.findings_by_severity.items() if v > 0
         },
     }
+
+
+# Local report: severities in descending order, with the low two collapsed by
+# default so a terminal read starts with what blocks.
+_LOCAL_SEVERITY_ORDER = [Severity.CRITICAL, Severity.WARNING, Severity.SUGGESTION, Severity.NITPICK]
+_LOCAL_COLLAPSED = (Severity.SUGGESTION, Severity.NITPICK)
+
+
+def format_local_report(
+    review: ConsolidatedReview,
+    scope: str,
+    show_all: bool = False,
+) -> str:
+    """Render a consolidated review for a terminal, grouped by severity.
+
+    Each finding shows where it is, how confident the agents were, how many of
+    them agreed, and whether its fix is a validated replacement or only prose -
+    so a reader can tell an applyable fix from a suggestion at a glance.
+    """
+    agents = review.agent_count
+    lines = [f"Reviewed {scope} - {agents} agent(s), {review.total_review_time_ms}ms", ""]
+
+    if not review.findings:
+        lines.append("No findings.")
+        return "\n".join(lines)
+
+    by_severity: dict[Severity, list[ConsolidatedFinding]] = {}
+    for finding in review.findings:
+        by_severity.setdefault(finding.severity, []).append(finding)
+
+    hidden = 0
+    for severity in _LOCAL_SEVERITY_ORDER:
+        found = by_severity.get(severity) or []
+        if not found:
+            continue
+        if severity in _LOCAL_COLLAPSED and not show_all:
+            hidden += len(found)
+            continue
+        lines.append(f"{severity.value.upper()} ({len(found)})")
+        for finding in sorted(found, key=lambda f: (f.file_path, f.line_start)):
+            lines.append(f"  {finding.file_path}:{finding.line_start}  {finding.title}")
+            fix = "fix ready (validated)" if finding.fix_validated else "prose fix only"
+            agreed = len(finding.agreeing_agents)
+            lines.append(f"    conf {finding.confidence:.2f} - {agreed}/{agents} agents - {fix}")
+        lines.append("")
+
+    if hidden:
+        lines.append(f"{hidden} lower-severity finding(s) collapsed - run with --all to expand")
+
+    return "\n".join(lines).rstrip() + "\n"

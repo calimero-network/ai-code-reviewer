@@ -203,3 +203,22 @@ def test_max_tool_result_bytes_config_parses_and_defaults():
 
     config = _parse_config({"github": {"token": "t"}, "anthropic": {"max_tool_result_bytes": 4096}})
     assert config.anthropic.max_tool_result_bytes == 4096
+
+
+def test_read_file_rejects_absolute_paths():
+    """Defence in depth: the ".."-only guard let absolute paths through, and the
+    local repo source resolves them against the real filesystem."""
+    from unittest.mock import MagicMock
+
+    from ai_reviewer.session import ReviewSession
+    from ai_reviewer.tools.repo_tools import ToolRegistry
+
+    registry = ToolRegistry(
+        session=ReviewSession(repo="o/r", head_sha="sha", github_budget=10),
+        github_client=MagicMock(),
+        agent_id="a-0",
+        max_calls=5,
+        per_file_max_bytes=1024,
+    )
+
+    assert "not allowed" in registry._read_file("/etc/passwd")
