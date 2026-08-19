@@ -1,20 +1,15 @@
 name: Integration Tests
 
-# Live-API integration tests (real Anthropic calls) — e.g. the prompt-caching
-# proof that asserts cache_read_input_tokens > 0 on a repeated request.
+# Live-API integration tests (real Anthropic calls), excluded from normal CI by
+# pyproject's `addopts = -m 'not integration'`; this workflow opts them in.
 #
-# These are excluded from the normal CI run (pyproject `addopts = -m 'not
-# integration'`); this workflow opts them in. Runs on PRs and on manual dispatch.
-# Fork PRs do not receive repository secrets, so the tests skip there (each test
-# skips when ANTHROPIC_API_KEY is unset) rather than failing.
+# Dispatch only: each run spends real credit, and an exhausted balance fails the
+# job on diffs that never touched API code, which reads as a broken branch.
 
 on:
-  pull_request:
-    branches: [main, master]
   workflow_dispatch:
 
-# Cancel an in-flight run when new commits land on the same ref, so rapid pushes
-# don't stack real (paid) API calls.
+# One paid run at a time.
 concurrency:
   group: integration-${{ github.ref }}
   cancel-in-progress: true
