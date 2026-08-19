@@ -333,3 +333,53 @@ def test_the_skill_passes_one_scope_to_both_commands():
 
     assert len(invocations) == 2
     assert all('"${SCOPE[@]}"' in line for line in invocations), invocations
+
+
+def _repo_root():
+    from pathlib import Path
+
+    return Path(__file__).resolve().parents[1]
+
+
+def test_the_plugin_ships_the_skill_and_agent_it_promises():
+    """The marketplace source is a path, so a wrong one publishes a plugin that
+    installs cleanly and provides nothing."""
+    import json
+
+    root = _repo_root()
+    entry = json.loads((root / ".claude-plugin/marketplace.json").read_text())["plugins"][0]
+    plugin_root = (root / entry["source"]).resolve()
+
+    assert (plugin_root / ".claude-plugin/plugin.json").is_file()
+    assert (plugin_root / "skills/ai-review/SKILL.md").is_file()
+    assert (plugin_root / "agents/code-reviewer-readonly.md").is_file()
+
+
+def test_the_documented_install_name_is_the_one_that_resolves():
+    """`/plugin install <plugin>@<marketplace>` is what the docs tell people to run,
+    so both halves have to match the manifests."""
+    import json
+
+    root = _repo_root()
+    marketplace = json.loads((root / ".claude-plugin/marketplace.json").read_text())
+    entry = marketplace["plugins"][0]
+    plugin = json.loads((root / entry["source"] / ".claude-plugin/plugin.json").read_text())
+
+    assert entry["name"] == plugin["name"]
+    documented = f"/plugin install {plugin['name']}@{marketplace['name']}"
+    for doc in ("README.md", "docs/LOCAL-REVIEW.md"):
+        assert documented in (root / doc).read_text(), doc
+
+
+def test_the_plugin_version_tracks_the_package_version():
+    """Two hand-maintained versions drift; the plugin's must follow pyproject."""
+    import json
+    import re
+
+    root = _repo_root()
+    declared = re.search(
+        r'^version\s*=\s*"([^"]+)"', (root / "pyproject.toml").read_text(), re.M
+    ).group(1)
+    plugin = json.loads((root / ".claude/.claude-plugin/plugin.json").read_text())
+
+    assert plugin["version"] == declared

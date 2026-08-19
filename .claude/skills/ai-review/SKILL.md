@@ -37,6 +37,8 @@ SCOPE=()                      # or (--staged), or (--base main)
 ai-reviewer prompts --out "$D" --agents 3 --config .ai-reviewer.yaml "${SCOPE[@]}"
 ```
 
+If `ai-reviewer` is not on PATH, stop and give the user the one install line:
+`uv tool install git+https://github.com/calimero-network/ai-code-reviewer`.
 Set `SCOPE` once to match the requested scope; step 4 reuses it.
 Each output line is `<agent-name>\t<model>\t<brief path>`.
 If it prints nothing, there are no changes to review - say so and stop.

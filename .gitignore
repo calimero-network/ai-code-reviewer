@@ -111,3 +111,6 @@ dmypy.json
 # Per-developer Claude Code permissions: local grants and absolute paths,
 # never shared. The skill and agent definitions under .claude/ are shared.
 .claude/settings.local.json
+
+# Planning artifacts: working notes, never product documentation.
+docs/superpowers/

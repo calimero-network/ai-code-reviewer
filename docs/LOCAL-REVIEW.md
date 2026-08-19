@@ -36,38 +36,42 @@ and the result still parses, so it can be applied mechanically.
 
 ## Setup
 
-### One repository
-
-Nothing to install if the package is already a dev dependency:
-
-```bash
-pip install -e .          # provides the `ai-reviewer` command
-```
-
-The skill and the reviewer agent are checked in under `.claude/`, so they are
-available in this repository as soon as you have it cloned.
+Two pieces: the `ai-reviewer` command, and the skill plus reviewer agent that
+drive it.
 
 ### Every repository, every session
 
-Install the command once so it is on `PATH` everywhere:
-
 ```bash
-uv tool install ai-code-reviewer      # or: pipx install ai-code-reviewer
-ai-reviewer --version
+uv tool install git+https://github.com/calimero-network/ai-code-reviewer
 ```
 
-Then copy the skill and the agent into your user-level Claude Code directory, so
-every session in every project can use them:
-
-```bash
-CFG="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
-mkdir -p "$CFG/skills" "$CFG/agents"
-cp -r .claude/skills/ai-review "$CFG/skills/"
-cp .claude/agents/code-reviewer-readonly.md "$CFG/agents/"
+```
+/plugin marketplace add calimero-network/ai-code-reviewer
+/plugin install ai-review@calimero
 ```
 
-Start a new session and `/ai-review` is available anywhere.
+Start a new session and `/ai-review` works in any project.
 Repositories with no `.ai-reviewer.yaml` get the built-in defaults.
+
+The package is not on PyPI, so install from the repository rather than by name -
+`ai-code-reviewer` on PyPI is an unrelated project.
+
+### This repository
+
+`pip install -e .` provides the command, and the skill and agent are already
+checked in under `.claude/`, so a clone needs no plugin install.
+
+The plugin points at that same `.claude` directory rather than a copy, so the
+project-local skill and the published plugin cannot drift apart.
+
+### Without installing anything
+
+`uvx` runs the command straight from the repository, which is enough for the
+non-session workflow below:
+
+```bash
+uvx --from git+https://github.com/calimero-network/ai-code-reviewer ai-reviewer --version
+```
 
 ## Scopes
 
