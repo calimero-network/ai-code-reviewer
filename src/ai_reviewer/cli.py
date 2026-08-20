@@ -82,6 +82,14 @@ def github_token(config: Config) -> str:
     return token
 
 
+def _github_client(config: Config) -> GitHubClient:
+    """Without extra_reviewer_users the repo's bot identity is not an AI reviewer
+    here, so everything it already posted is invisible and gets posted again."""
+    return GitHubClient(
+        github_token(config), extra_reviewer_users=config.github.extra_reviewer_users
+    )
+
+
 @click.group()
 @click.version_option(version=__version__)
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose output")
@@ -644,7 +652,7 @@ def _prompts_for_pr(
     ``publish`` removes it.
     """
     slug, number = parse_pr_target(pr_target)
-    gh = GitHubClient(github_token(config))
+    gh = _github_client(config)
     pull = gh.get_pull_request(slug, number)
 
     err_console.print(f"[bold]Preparing {slug}#{number}[/bold]")
@@ -789,7 +797,7 @@ def publish_command(
             format_local_report(review, scope=f"{target.repo}#{target.number}", show_all=show_all)
         )
 
-        gh = GitHubClient(github_token(config))
+        gh = _github_client(config)
         pull = gh.get_pull_request(target.repo, target.number)
         result = publish_review(
             gh=gh,

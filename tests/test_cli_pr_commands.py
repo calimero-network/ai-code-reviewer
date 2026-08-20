@@ -359,3 +359,87 @@ def test_publish_needs_at_least_one_agent_result(tmp_path):
     # The worktree exists once target.json is read, so the one cleanup rule
     # applies here too, not only once findings have been loaded.
     remove.assert_called_once()
+
+
+class TestExtraReviewerUsersWiring:
+    """config.github.extra_reviewer_users must reach the GitHubClient (was dead config).
+
+    Without it a repo's bot identity is not an AI reviewer here, so every comment
+    that bot already posted is invisible and gets posted a second time.
+    """
+
+    @staticmethod
+    def _config(tmp_path) -> str:
+        path = tmp_path / "cfg.yaml"
+        path.write_text('github:\n  token: t\n  extra_reviewer_users:\n    - "meroreviewer[bot]"\n')
+        return str(path)
+
+    def test_prompts_pr_passes_extra_reviewer_users(self, tmp_path):
+        from ai_reviewer.context.pr_checkout import PreparedPR
+
+        out = tmp_path / "session"
+        prepared = PreparedPR(
+            repo="acme/widget",
+            number=42,
+            title="t",
+            clone=str(tmp_path / "clone"),
+            root=str(out / "wt"),
+            base_sha="b" * 40,
+            head_sha="h" * 40,
+        )
+        pull = MagicMock()
+        pull.title = "t"
+        pull.body = ""
+        pull.base.ref = "main"
+
+        with (
+            patch("ai_reviewer.cli.GitHubClient") as client,
+            patch("ai_reviewer.cli.resolve_clone", return_value=tmp_path / "clone"),
+            patch("ai_reviewer.cli.create_pr_worktree", return_value=prepared),
+            patch(
+                "ai_reviewer.cli.build_agent_prompts",
+                new_callable=AsyncMock,
+                return_value={"security-reviewer": {"model": "m", "prompt": "brief"}},
+            ),
+        ):
+            client.return_value.get_pull_request.return_value = pull
+            result = CliRunner().invoke(
+                cli,
+                [
+                    "prompts",
+                    "--out",
+                    str(out),
+                    "--pr",
+                    "acme/widget#42",
+                    "--config",
+                    self._config(tmp_path),
+                ],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert client.call_args.kwargs["extra_reviewer_users"] == ["meroreviewer[bot]"]
+
+    def test_publish_passes_extra_reviewer_users(self, tmp_path, local_scope):  # noqa: ARG002
+        from ai_reviewer.github.publish import PublishResult
+
+        out = _session(tmp_path)
+        result_obj = PublishResult(
+            posted=True, action="COMMENT", inline_comments=0, resolved=0, skipped=False, body=""
+        )
+
+        with (
+            patch("ai_reviewer.cli.GitHubClient") as client,
+            patch("ai_reviewer.cli.consolidate_agent_findings") as consolidate,
+            patch("ai_reviewer.cli.publish_review", return_value=result_obj),
+            patch("ai_reviewer.cli.remove_pr_worktree"),
+        ):
+            consolidate.return_value = MagicMock(findings=[], summary="ok", agent_count=1)
+            result = CliRunner().invoke(
+                cli,
+                ["publish", str(out), "--config", self._config(tmp_path)],
+                catch_exceptions=False,
+            )
+
+        assert result.exit_code == 0
+        assert client.call_args.kwargs["extra_reviewer_users"] == ["meroreviewer[bot]"]
