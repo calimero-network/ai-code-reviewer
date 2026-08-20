@@ -734,6 +734,91 @@ def consolidate_command(
         print(format_local_report(review, scope=scope_label(staged, base), show_all=show_all))
 
 
+@cli.command("publish")
+@click.argument("session_dir", type=click.Path(exists=True, file_okay=False))
+@click.option("--dry-run", is_flag=True, help="Print the review instead of posting it")
+@click.option("--all", "show_all", is_flag=True, help="Include suggestions and nitpicks locally")
+@click.option("--force-review", is_flag=True, help="Post even when findings are unchanged")
+@click.option("--reviewer-name", default="AI Code Reviewer", help="Name shown in the review header")
+@click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
+def publish_command(
+    session_dir: str,
+    dry_run: bool,
+    show_all: bool,
+    force_review: bool,
+    reviewer_name: str,
+    config_path: str | None,
+) -> None:
+    """Consolidate a prepared pull request review and post it to GitHub.
+
+    Takes the directory ``prompts --pr`` wrote: what was reviewed is read from
+    target.json rather than re-described, so the two phases cannot disagree.
+    """
+    from ai_reviewer.context.local_source import (
+        build_local_context,
+        changed_files,
+        local_diff,
+        read_repo_file,
+    )
+
+    session = Path(session_dir)
+    target_file = session / "target.json"
+    if not target_file.is_file():
+        raise click.ClickException(f"{target_file} not found - run `prompts --pr` first")
+    target = PreparedPR.read(target_file)
+
+    findings_files = sorted(str(p) for p in (session / "out").glob("*.json"))
+    if not findings_files:
+        raise click.ClickException(f"no agent findings in {session / 'out'}")
+
+    config = load_config(Path(config_path) if config_path else None)
+
+    try:
+        diff = local_diff(target.root, base=target.base_sha)
+        reviewed = build_local_context(
+            target.root, diff, changed_files(target.root, base=target.base_sha)
+        )
+        review = consolidate_agent_findings(
+            findings_files,
+            repo=target.repo,
+            config=config,
+            read_file=lambda path: read_repo_file(target.root, path),
+            total_lines=reviewed.additions + reviewed.deletions,
+        )
+        print(
+            format_local_report(review, scope=f"{target.repo}#{target.number}", show_all=show_all)
+        )
+
+        gh = GitHubClient(github_token(config))
+        pull = gh.get_pull_request(target.repo, target.number)
+        result = publish_review(
+            gh=gh,
+            pr=pull,
+            review=review,
+            config=config,
+            meta=gh.get_review_metadata(pull),
+            reviewer_name=reviewer_name,
+            force_review=force_review,
+            dry_run=dry_run,
+            # This posts under a person's GitHub identity, so it never approves for them.
+            allow_approve=False,
+            emit=console.print,
+        )
+        if dry_run and result.body:
+            print(result.body)
+    except click.ClickException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        if not dry_run:
+            remove_pr_worktree(target)
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+
+    # A dry run is a rehearsal: keep the worktree so the real post needs no refetch.
+    if not dry_run:
+        remove_pr_worktree(target)
+
+
 @cli.command("update-docs")
 @click.argument("repo")
 @click.argument("pr_number", type=int)
