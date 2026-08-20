@@ -9,7 +9,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import subprocess
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -129,3 +131,95 @@ def _remember(slug: str, path: Path) -> None:
 def _recall(slug: str) -> Path | None:
     recorded = _load_index().get(slug)
     return Path(recorded) if recorded else None
+
+
+@dataclass
+class PreparedPR:
+    """What is under review, recorded so the second phase cannot disagree with the first.
+
+    Written by ``prompts --pr`` and read by ``publish``: the scope is recorded
+    rather than re-typed, so the two phases cannot measure different diffs.
+    """
+
+    repo: str
+    number: int
+    title: str
+    clone: str
+    root: str
+    base_sha: str
+    head_sha: str
+
+    def write(self, path: Path) -> None:
+        path.write_text(json.dumps(asdict(self), indent=2))
+
+    @classmethod
+    def read(cls, path: Path) -> PreparedPR:
+        return cls(**json.loads(path.read_text()))
+
+
+def create_pr_worktree(
+    clone: Path,
+    slug: str,
+    number: int,
+    base_ref: str,
+    root: Path,
+    title: str = "",
+) -> PreparedPR:
+    """Check the pull request out at *root* as a detached worktree of *clone*.
+
+    The base branch is fetched alongside the PR head because ``--base <sha>``
+    diffs ``<sha>...HEAD``, which is the pull request's range only when that
+    commit is present locally.
+
+    Fetching by remote name rather than a constructed URL uses whatever protocol
+    and credentials the clone is already configured with; ``resolve_clone`` has
+    verified that remote points at *slug*.
+    """
+    head_ref = f"refs/ai-reviewer/{number}/head"
+    base_local = f"refs/ai-reviewer/{number}/base"
+    # A session that never reached publish leaves an administrative entry behind.
+    _git(clone, "worktree", "prune")
+    _git(
+        clone,
+        "fetch",
+        "--no-tags",
+        "origin",
+        f"+refs/pull/{number}/head:{head_ref}",
+        f"+refs/heads/{base_ref}:{base_local}",
+    )
+    head_sha = _git(clone, "rev-parse", head_ref).strip()
+    base_sha = _git(clone, "rev-parse", base_local).strip()
+    _git(clone, "worktree", "add", "--detach", str(root), head_sha)
+    return PreparedPR(
+        repo=slug,
+        number=number,
+        title=title,
+        clone=str(clone),
+        root=str(root),
+        base_sha=base_sha,
+        head_sha=head_sha,
+    )
+
+
+def remove_pr_worktree(prepared: PreparedPR) -> None:
+    """Remove the worktree and the refs it needed. Safe to call more than once."""
+    clone = Path(prepared.clone)
+    _git_quiet(clone, "worktree", "remove", "--force", prepared.root)
+    shutil.rmtree(prepared.root, ignore_errors=True)
+    for ref in (
+        f"refs/ai-reviewer/{prepared.number}/head",
+        f"refs/ai-reviewer/{prepared.number}/base",
+    ):
+        _git_quiet(clone, "update-ref", "-d", ref)
+    _git_quiet(clone, "worktree", "prune")
+
+
+def _git(repo: Path, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout
+
+
+def _git_quiet(repo: Path, *args: str) -> None:
+    """For cleanup, where the thing being removed may already be gone."""
+    subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=False)

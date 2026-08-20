@@ -13,7 +13,13 @@ import subprocess
 import pytest
 
 from ai_reviewer.context import pr_checkout
-from ai_reviewer.context.pr_checkout import parse_pr_target, resolve_clone
+from ai_reviewer.context.pr_checkout import (
+    PreparedPR,
+    create_pr_worktree,
+    parse_pr_target,
+    remove_pr_worktree,
+    resolve_clone,
+)
 
 
 def _git(repo, *args: str) -> str:
@@ -232,3 +238,119 @@ def test_load_index_ignores_non_dict_json():
     pr_checkout.CLONE_INDEX.write_text("[1, 2, 3]")
 
     assert pr_checkout._load_index() == {}
+
+
+def _open_pr(origin_bare, tmp_path, number: int = 42) -> None:
+    """Push a branch and publish it as refs/pull/<n>/head, as GitHub does."""
+    work = tmp_path / f"contrib{number}"
+    subprocess.run(
+        ["git", "clone", "-q", str(origin_bare), str(work)], check=True, capture_output=True
+    )
+    _git(work, "config", "user.email", "c@e.st")
+    _git(work, "config", "user.name", "c")
+    (work / "a.py").write_text("x = 1\ny = 2\n")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-qm", "add y")
+    _git(work, "push", "-q", "origin", f"HEAD:refs/pull/{number}/head")
+
+
+def test_worktree_is_detached_at_the_pr_head(clone, origin, tmp_path):
+    _open_pr(origin, tmp_path)
+    root = tmp_path / "session" / "wt"
+    root.parent.mkdir()
+
+    prepared = create_pr_worktree(clone, "acme/widget", 42, "main", root)
+
+    assert (root / "a.py").read_text() == "x = 1\ny = 2\n"
+    assert prepared.head_sha != prepared.base_sha
+    remove_pr_worktree(prepared)
+
+
+def test_the_developer_head_is_not_moved(clone, origin, tmp_path):
+    _open_pr(origin, tmp_path)
+    before = _git(clone, "rev-parse", "HEAD").strip()
+    root = tmp_path / "session" / "wt"
+    root.parent.mkdir()
+
+    prepared = create_pr_worktree(clone, "acme/widget", 42, "main", root)
+
+    assert _git(clone, "rev-parse", "HEAD").strip() == before
+    assert _git(clone, "status", "--porcelain") == ""
+    remove_pr_worktree(prepared)
+
+
+def test_the_base_commit_is_fetched_so_the_diff_range_resolves(clone, origin, tmp_path):
+    """``--base <sha>`` diffs ``<sha>...HEAD``; without the base commit locally
+    that range does not exist."""
+    from ai_reviewer.context.local_source import local_diff
+
+    _open_pr(origin, tmp_path)
+    root = tmp_path / "session" / "wt"
+    root.parent.mkdir()
+
+    prepared = create_pr_worktree(clone, "acme/widget", 42, "main", root)
+
+    diff = local_diff(str(root), base=prepared.base_sha)
+    assert "+y = 2" in diff
+    remove_pr_worktree(prepared)
+
+
+def test_remove_cleans_the_worktree_and_the_temporary_refs(clone, origin, tmp_path):
+    _open_pr(origin, tmp_path)
+    root = tmp_path / "session" / "wt"
+    root.parent.mkdir()
+    prepared = create_pr_worktree(clone, "acme/widget", 42, "main", root)
+
+    remove_pr_worktree(prepared)
+
+    assert not root.exists()
+    # The worktree path is a pytest tmpdir, so it must be matched by its own path;
+    # the refs carry the module's namespace and are matched by that.
+    assert str(root) not in _git(clone, "worktree", "list")
+    assert "refs/ai-reviewer/" not in _git(clone, "for-each-ref", "--format=%(refname)")
+
+
+def test_remove_is_safe_to_call_twice(clone, origin, tmp_path):
+    """publish removes in a finally, and a failed run may already have removed it."""
+    _open_pr(origin, tmp_path)
+    root = tmp_path / "session" / "wt"
+    root.parent.mkdir()
+    prepared = create_pr_worktree(clone, "acme/widget", 42, "main", root)
+    remove_pr_worktree(prepared)
+
+    remove_pr_worktree(prepared)
+
+
+def test_a_leaked_worktree_does_not_block_the_next_run(clone, origin, tmp_path):
+    """A session that never reached publish leaves a stale administrative entry."""
+    import shutil
+
+    _open_pr(origin, tmp_path)
+    first = tmp_path / "s1" / "wt"
+    first.parent.mkdir()
+    create_pr_worktree(clone, "acme/widget", 42, "main", first)
+    shutil.rmtree(first.parent)
+
+    second = tmp_path / "s2" / "wt"
+    second.parent.mkdir()
+    prepared = create_pr_worktree(clone, "acme/widget", 42, "main", second)
+
+    assert (second / "a.py").exists()
+    remove_pr_worktree(prepared)
+
+
+def test_prepared_pr_round_trips_through_json(tmp_path):
+    prepared = PreparedPR(
+        repo="acme/widget",
+        number=42,
+        title="fix: things",
+        clone="/clones/widget",
+        root="/tmp/s/wt",
+        base_sha="b" * 40,
+        head_sha="h" * 40,
+    )
+    path = tmp_path / "target.json"
+
+    prepared.write(path)
+
+    assert PreparedPR.read(path) == prepared
