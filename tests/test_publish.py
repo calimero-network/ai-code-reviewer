@@ -88,10 +88,14 @@ def pr():
 
 
 def test_a_first_review_is_posted_with_its_inline_comments(gh, pr, config):
+    """With nothing posted before, every finding is inline-eligible - the delta's
+    new_findings are not the source, so the review carries one the delta lacks."""
+    review = _review([_finding(), _finding("Second issue", 300)])
+
     result = publish_review(
         gh=gh,
         pr=pr,
-        review=_review(),
+        review=review,
         config=config,
         meta=None,
         reviewer_name="AI Code Reviewer",
@@ -104,6 +108,7 @@ def test_a_first_review_is_posted_with_its_inline_comments(gh, pr, config):
     assert result.inline_comments == 1
     gh.post_review.assert_called_once()
     assert gh.post_review.call_args.args[2] == "COMMENT"
+    assert gh.get_postable_inline_findings.call_args.kwargs["inline_findings"] == review.findings
 
 
 def test_a_dry_run_posts_nothing_but_returns_the_body(gh, pr, config):
@@ -170,6 +175,8 @@ def test_force_review_overrides_the_convergence_gate(gh, pr, config):
 
     assert result.skipped is False
     gh.post_review.assert_called_once()
+    # Once something has been posted before, only the new findings may go inline.
+    assert gh.get_postable_inline_findings.call_args.kwargs["inline_findings"] == []
 
 
 def test_approve_is_never_used_when_it_is_not_allowed(gh, pr, config):
@@ -198,12 +205,13 @@ def test_approve_is_never_used_when_it_is_not_allowed(gh, pr, config):
 def test_fixed_findings_get_their_comments_resolved(gh, pr, config):
     """fixed_findings holds PreviousComment, not ConsolidatedFinding."""
     previous = _prev_comment(title="Old")
-    gh.compute_review_delta.return_value = ReviewDelta(
+    delta = ReviewDelta(
         new_findings=[_finding("New issue", 300)],
         open_findings=[],
         fixed_findings=[previous],
         previous_comments=[previous],
     )
+    gh.compute_review_delta.return_value = delta
     gh.resolve_fixed_comments.return_value = 1
 
     result = publish_review(
@@ -219,3 +227,4 @@ def test_fixed_findings_get_their_comments_resolved(gh, pr, config):
     )
 
     assert result.resolved == 1
+    gh.resolve_fixed_comments.assert_called_once_with(pr, delta)

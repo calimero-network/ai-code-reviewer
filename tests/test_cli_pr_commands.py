@@ -59,7 +59,12 @@ def test_pr_writes_a_target_file_and_the_briefs(tmp_path):
     assert result.exit_code == 0
     assert json.loads((out / "target.json").read_text())["number"] == 42
     assert (out / "security-reviewer.md").read_text() == "brief"
-    assert "security-reviewer\tclaude-sonnet-5" in result.output
+    # The brief lines are parsed by the caller, so stdout carries those and nothing
+    # else; everything describing the preparation belongs on stderr.
+    assert result.stdout.splitlines() == [
+        f"security-reviewer\tclaude-sonnet-5\t{out / 'security-reviewer.md'}"
+    ]
+    assert "Preparing acme/widget#42" in result.stderr
     assert create.call_args.args[3] == "main"
     assert build.call_args.kwargs["root"] == prepared.root
     assert build.call_args.kwargs["base"] == "b" * 40
