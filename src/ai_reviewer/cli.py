@@ -817,9 +817,9 @@ def publish_command(
             emit=console.print,
         )
         if result.posted:
-            # The session is asked to report where the review landed, so it has to
-            # be told rather than left to reconstruct a link.
-            console.print(f"🔗 {pull.html_url}")
+            # The session quotes this link verbatim, so it goes out unwrapped: the
+            # rich console would fold a long owner/repo across lines.
+            print(f"🔗 {pull.html_url}")
         if dry_run and result.body:
             print(result.body)
     except click.ClickException:

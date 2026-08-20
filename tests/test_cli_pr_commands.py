@@ -487,8 +487,15 @@ def test_the_help_text_carries_no_unrendered_markup(command):
     assert "``" not in result.output
 
 
+# Long enough that Rich's 80-column default would break it across lines.
+_LONG_PR_URL = (
+    "https://github.com/some-really-long-organisation-name/"
+    "an-equally-long-repository-name/pull/12345"
+)
+
+
 def test_publish_prints_where_the_review_landed(tmp_path, local_scope):  # noqa: ARG001
-    """The skill is asked to report a link, so one has to actually be printed."""
+    """The skill quotes this link verbatim, so it must survive unwrapped."""
     from ai_reviewer.github.publish import PublishResult
 
     out = _session(tmp_path)
@@ -504,12 +511,10 @@ def test_publish_prints_where_the_review_landed(tmp_path, local_scope):  # noqa:
         patch("ai_reviewer.cli.remove_pr_worktree"),
     ):
         consolidate.return_value = MagicMock(findings=[], summary="ok", agent_count=1)
-        client.return_value.get_pull_request.return_value.html_url = (
-            "https://github.com/acme/widget/pull/42"
-        )
+        client.return_value.get_pull_request.return_value.html_url = _LONG_PR_URL
         result = CliRunner().invoke(cli, ["publish", str(out)], catch_exceptions=False)
 
-    assert "https://github.com/acme/widget/pull/42" in result.output
+    assert _LONG_PR_URL in result.output
 
 
 def test_publish_prints_no_link_when_nothing_was_posted(tmp_path, local_scope):  # noqa: ARG001
@@ -528,9 +533,7 @@ def test_publish_prints_no_link_when_nothing_was_posted(tmp_path, local_scope): 
         patch("ai_reviewer.cli.remove_pr_worktree"),
     ):
         consolidate.return_value = MagicMock(findings=[], summary="ok", agent_count=1)
-        client.return_value.get_pull_request.return_value.html_url = (
-            "https://github.com/acme/widget/pull/42"
-        )
+        client.return_value.get_pull_request.return_value.html_url = _LONG_PR_URL
         result = CliRunner().invoke(cli, ["publish", str(out)], catch_exceptions=False)
 
-    assert "https://github.com/acme/widget/pull/42" not in result.output
+    assert _LONG_PR_URL not in result.output

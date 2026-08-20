@@ -99,18 +99,13 @@ def _cache_clone(slug: str) -> Path:
         return target
     target.parent.mkdir(parents=True, exist_ok=True)
     logger.info("Cloning %s into %s", slug, target)
-    subprocess.run(
-        [
-            "git",
-            "clone",
-            "--filter=blob:none",
-            "--no-checkout",
-            f"{_GITHUB_URL}/{slug}.git",
-            str(target),
-        ],
-        check=True,
-        capture_output=True,
-        text=True,
+    _git(
+        target.parent,
+        "clone",
+        "--filter=blob:none",
+        "--no-checkout",
+        f"{_GITHUB_URL}/{slug}.git",
+        str(target),
     )
     return target
 

@@ -383,5 +383,16 @@ def test_an_unfetchable_pr_ref_says_what_git_said(clone, tmp_path):
     root = tmp_path / "session" / "wt"
     root.parent.mkdir()
 
-    with pytest.raises(RuntimeError, match="refs/pull/999/head"):
+    # "fatal:" comes from git; the ref alone would also match the arguments we
+    # passed it, which is not evidence that anything was surfaced.
+    with pytest.raises(RuntimeError, match=r"fatal: .*refs/pull/999/head"):
         create_pr_worktree(clone, "acme/widget", 999, "main", root)
+
+
+def test_a_clone_that_cannot_be_made_says_what_git_said(tmp_path, monkeypatch):
+    """A private repository with no credentials, or being offline, lands here."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pr_checkout, "_GITHUB_URL", str(tmp_path / "nothing-here"))
+
+    with pytest.raises(RuntimeError, match="fatal:"):
+        resolve_clone("acme/widget")

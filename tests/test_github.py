@@ -901,6 +901,31 @@ class TestResolveFixedComments:
         assert comments[0].id == 100
         assert "SQL Injection" in comments[0].title
 
+    def test_a_resolved_reply_is_excluded_even_when_it_carries_the_marker(self):
+        """The two guards must stand on their own: GitHub's quote-reply copies the
+        original body, marker and all, so the marker gate does not cover this."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        quoting_reply = MagicMock()
+        quoting_reply.body = (
+            "✅ **No longer detected** - This issue was not re-detected after the "
+            "latest changes.\n\n> 🔴 **SQL Injection**\n> \n"
+            "> <!-- ai-reviewer-id: abcdef123456 -->"
+        )
+        quoting_reply.user.login = "github-actions[bot]"
+        quoting_reply.id = 101
+        quoting_reply.path = "test.py"
+        quoting_reply.line = 10
+        quoting_reply.original_line = 10
+        mock_pr.get_review_comments.return_value = [quoting_reply]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            comments = client.get_previous_review_comments(mock_pr)
+
+        assert comments == []
+
     def test_get_previous_review_comments_excludes_human_comments(self):
         """Test that human comments (even with AI-like format) are never processed."""
         from ai_reviewer.github.client import GitHubClient
