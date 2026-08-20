@@ -133,7 +133,25 @@ def test_a_remembered_path_is_reused_without_repo_path(clone, tmp_path, monkeypa
     monkeypatch.chdir(tmp_path)
     resolve_clone("acme/widget", repo_path=str(clone))
 
+    # If the remembered path were ever ignored, this would fall through to a
+    # real clone attempt and fail loudly rather than passing by accident.
+    monkeypatch.setattr(pr_checkout, "_GITHUB_URL", str(tmp_path / "unreachable"))
     assert resolve_clone("acme/widget") == clone.resolve()
+
+
+def test_a_stale_remembered_path_falls_through_to_the_cache(
+    tmp_path,
+    origin,  # noqa: ARG001 - present so the clone source exists on disk
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pr_checkout, "_GITHUB_URL", str(tmp_path / "origin"))
+    pr_checkout._remember("acme/widget", tmp_path / "gone")
+
+    resolved = resolve_clone("acme/widget")
+
+    assert resolved == tmp_path / "cache" / "acme" / "widget"
+    assert (resolved / ".git").exists()
 
 
 def test_repo_path_pointing_at_the_wrong_repo_is_rejected(tmp_path, monkeypatch):
@@ -145,6 +163,13 @@ def test_repo_path_pointing_at_the_wrong_repo_is_rejected(tmp_path, monkeypatch)
 
     with pytest.raises(ValueError, match="not a clone of acme/widget"):
         resolve_clone("acme/widget", repo_path=str(wrong))
+
+
+def test_repo_path_that_does_not_exist_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError, match="not a clone of acme/widget"):
+        resolve_clone("acme/widget", repo_path=str(tmp_path / "no" / "such" / "path"))
 
 
 def test_falls_back_to_a_cache_clone(
@@ -176,6 +201,14 @@ def test_a_second_call_reuses_the_cache_clone(
     assert marker.read_text() == "kept"
 
 
+def test_remote_slug_returns_none_without_an_origin_remote(tmp_path):
+    repo = tmp_path / "no-origin"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+
+    assert pr_checkout._remote_slug(repo) is None
+
+
 @pytest.mark.parametrize(
     "url,expected",
     [
@@ -192,3 +225,10 @@ def test_remote_slug_reads_every_url_form(tmp_path, url, expected):
     _git(repo, "remote", "add", "origin", url)
 
     assert pr_checkout._remote_slug(repo) == expected
+
+
+def test_load_index_ignores_non_dict_json():
+    pr_checkout.CLONE_INDEX.parent.mkdir(parents=True, exist_ok=True)
+    pr_checkout.CLONE_INDEX.write_text("[1, 2, 3]")
+
+    assert pr_checkout._load_index() == {}

@@ -64,7 +64,13 @@ def resolve_clone(slug: str, repo_path: str | None = None) -> Path:
 
 
 def _remote_slug(path: Path) -> str | None:
-    """``owner/repo`` for a checkout's origin, or None when it has no usable one."""
+    """``owner/repo`` for a checkout's origin, or None when it has no usable one.
+
+    A missing directory counts as unusable: repo_path typos and stale index
+    entries must fall through cleanly instead of crashing on a bad cwd.
+    """
+    if not path.is_dir():
+        return None
     proc = subprocess.run(
         ["git", "remote", "get-url", "origin"],
         cwd=path,
