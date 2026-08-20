@@ -388,6 +388,8 @@ async def review_pr_async(
         )
         if dry_run and result.body:
             print(result.body)
+        if result.skipped:
+            return
 
         # Doc review (runs for github output after the main review)
         _run_doc_review(
