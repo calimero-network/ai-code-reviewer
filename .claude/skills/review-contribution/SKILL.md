@@ -83,8 +83,9 @@ a summary body plus inline comments, with validated fixes as suggestion blocks.
 Findings unchanged since a previous review are not posted again, and comments for
 findings that are now fixed are resolved.
 
-**5. Report what was posted**, including the review URL, how many agents
-contributed, and whether any failed.
+**5. Report what was posted**: the link `publish` printed, the review action and
+inline comment count from its summary line, how many agents contributed, and
+whether any failed. Quote the link it printed; never construct one.
 
 ## What this never does
 

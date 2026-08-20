@@ -1,8 +1,9 @@
 """Posting a consolidated review to a pull request.
 
-Lifted out of the CLI so both entry points - the API-billed ``review-pr`` and the
-subagent-driven ``publish`` - apply the same delta tracking, convergence gate and
-inline-comment limits rather than two approximations of them.
+Lifted out of the CLI so the API-billed ``review-pr`` and the subagent-driven
+``publish`` apply the same delta tracking, convergence gate and inline-comment
+limits rather than two approximations of them. The webhook handler still carries
+its own copy of this pipeline and does not go through here.
 """
 
 from __future__ import annotations
@@ -75,7 +76,7 @@ def publish_review(
     if delta.previous_comments and not force_review:
         if should_skip_review(review_count, delta):
             say(
-                "[dim]⏭️  Findings unchanged since last review — skipping post "
+                "[dim]⏭️  Findings unchanged since last review - skipping post "
                 "(use --force-review to override)[/dim]"
             )
             return PublishResult(

@@ -136,6 +136,7 @@ def test_unchanged_findings_are_not_posted_again(gh, pr, config):
         new_findings=[], open_findings=[_finding()], fixed_findings=[], previous_comments=[previous]
     )
     meta = ReviewMeta.build(commit_sha="h" * 40, review_count=2, finding_hashes=[])
+    said: list[str] = []
 
     result = publish_review(
         gh=gh,
@@ -147,10 +148,12 @@ def test_unchanged_findings_are_not_posted_again(gh, pr, config):
         force_review=False,
         dry_run=False,
         allow_approve=False,
+        emit=said.append,
     )
 
     assert result.skipped is True
     assert result.posted is False
+    assert any("Findings unchanged since last review - skipping post" in line for line in said)
     gh.post_review.assert_not_called()
 
 

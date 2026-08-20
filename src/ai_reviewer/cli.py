@@ -605,7 +605,7 @@ def prompts_command(
 
     For orchestrating reviewer subagents from a coding session: this makes no LLM
     calls, it only assembles the same prompts the API path would send. With --pr it
-    also prepares a worktree, which ``publish`` removes.
+    also prepares a worktree, which `publish` removes.
     """
     if pr_target and (staged or base):
         raise click.ClickException("--pr cannot be combined with --staged or --base")
@@ -763,7 +763,7 @@ def publish_command(
 ) -> None:
     """Consolidate a prepared pull request review and post it to GitHub.
 
-    Takes the directory ``prompts --pr`` wrote: what was reviewed is read from
+    Takes the directory `prompts --pr` wrote: what was reviewed is read from
     target.json rather than re-described, so the two phases cannot disagree.
     """
     from ai_reviewer.context.local_source import (
@@ -816,6 +816,10 @@ def publish_command(
             allow_approve=False,
             emit=console.print,
         )
+        if result.posted:
+            # The session is asked to report where the review landed, so it has to
+            # be told rather than left to reconstruct a link.
+            console.print(f"🔗 {pull.html_url}")
         if dry_run and result.body:
             print(result.body)
     except click.ClickException:

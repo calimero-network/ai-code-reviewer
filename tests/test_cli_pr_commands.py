@@ -477,3 +477,60 @@ def test_a_worktree_that_cannot_be_prepared_reports_the_reason(tmp_path):
     assert "couldn't find remote ref" in result.stderr
     # There is no worktree to release when the command that creates one failed.
     remove.assert_not_called()
+
+
+@pytest.mark.parametrize("command", ["prompts", "publish"])
+def test_the_help_text_carries_no_unrendered_markup(command):
+    """Click prints docstrings as they are written, so RST literals show up raw."""
+    result = CliRunner().invoke(cli, [command, "--help"])
+
+    assert "``" not in result.output
+
+
+def test_publish_prints_where_the_review_landed(tmp_path, local_scope):  # noqa: ARG001
+    """The skill is asked to report a link, so one has to actually be printed."""
+    from ai_reviewer.github.publish import PublishResult
+
+    out = _session(tmp_path)
+    posted = PublishResult(
+        posted=True, action="COMMENT", inline_comments=2, resolved=0, skipped=False, body=""
+    )
+
+    with (
+        patch("ai_reviewer.cli.GitHubClient") as client,
+        patch("ai_reviewer.cli.github_token", return_value="t"),
+        patch("ai_reviewer.cli.consolidate_agent_findings") as consolidate,
+        patch("ai_reviewer.cli.publish_review", return_value=posted),
+        patch("ai_reviewer.cli.remove_pr_worktree"),
+    ):
+        consolidate.return_value = MagicMock(findings=[], summary="ok", agent_count=1)
+        client.return_value.get_pull_request.return_value.html_url = (
+            "https://github.com/acme/widget/pull/42"
+        )
+        result = CliRunner().invoke(cli, ["publish", str(out)], catch_exceptions=False)
+
+    assert "https://github.com/acme/widget/pull/42" in result.output
+
+
+def test_publish_prints_no_link_when_nothing_was_posted(tmp_path, local_scope):  # noqa: ARG001
+    from ai_reviewer.github.publish import PublishResult
+
+    out = _session(tmp_path)
+    skipped = PublishResult(
+        posted=False, action="", inline_comments=0, resolved=0, skipped=True, body=""
+    )
+
+    with (
+        patch("ai_reviewer.cli.GitHubClient") as client,
+        patch("ai_reviewer.cli.github_token", return_value="t"),
+        patch("ai_reviewer.cli.consolidate_agent_findings") as consolidate,
+        patch("ai_reviewer.cli.publish_review", return_value=skipped),
+        patch("ai_reviewer.cli.remove_pr_worktree"),
+    ):
+        consolidate.return_value = MagicMock(findings=[], summary="ok", agent_count=1)
+        client.return_value.get_pull_request.return_value.html_url = (
+            "https://github.com/acme/widget/pull/42"
+        )
+        result = CliRunner().invoke(cli, ["publish", str(out)], catch_exceptions=False)
+
+    assert "https://github.com/acme/widget/pull/42" not in result.output
