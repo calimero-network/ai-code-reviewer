@@ -226,22 +226,20 @@ def local_scope():
     """publish measures the reviewed diff to size the finding cap; the worktree
     in these tests is a stub directory, so the measurement is stubbed with it."""
     with (
-        patch("ai_reviewer.context.local_source.local_diff", return_value="diff"),
+        patch("ai_reviewer.context.local_source.local_diff", return_value="diff") as diff,
         patch("ai_reviewer.context.local_source.changed_files", return_value={}),
         patch(
             "ai_reviewer.context.local_source.build_local_context",
             return_value=MagicMock(additions=10, deletions=2),
-        ),
+        ) as build,
     ):
-        yield
+        yield diff, build
 
 
-def test_publish_consolidates_posts_and_removes_the_worktree(
-    tmp_path,
-    local_scope,  # noqa: ARG001 - present so the diff measurement is stubbed
-):
+def test_publish_consolidates_posts_and_removes_the_worktree(tmp_path, local_scope):
     from ai_reviewer.github.publish import PublishResult
 
+    local_diff, build_local_context = local_scope
     out = _session(tmp_path)
     result_obj = PublishResult(
         posted=True, action="COMMENT", inline_comments=2, resolved=0, skipped=False, body="b"
@@ -262,6 +260,13 @@ def test_publish_consolidates_posts_and_removes_the_worktree(
     assert publish.call_args.kwargs["allow_approve"] is False
     remove.assert_called_once()
 
+    # Regression guard: a swap to os.getcwd() would still pass every other
+    # assertion here but would silently review the wrong tree.
+    root = str(out / "wt")
+    assert local_diff.call_args.args[0] == root
+    assert local_diff.call_args.kwargs["base"] == "b" * 40
+    assert build_local_context.call_args.args[0] == root
+
 
 def test_publish_removes_the_worktree_even_when_posting_fails(
     tmp_path,
@@ -280,6 +285,29 @@ def test_publish_removes_the_worktree_even_when_posting_fails(
         result = CliRunner().invoke(cli, ["publish", str(out)])
 
     assert result.exit_code == 1
+    remove.assert_called_once()
+
+
+def test_publish_removes_the_worktree_when_a_click_exception_interrupts_the_try(
+    tmp_path,
+    local_scope,  # noqa: ARG001 - present so the diff measurement is stubbed
+):
+    """An expired gh session raises inside the try (github_token), not before it -
+    cleanup must not depend on which exception type interrupted the post."""
+    import click
+
+    out = _session(tmp_path)
+
+    with (
+        patch("ai_reviewer.cli.GitHubClient"),
+        patch("ai_reviewer.cli.github_token", side_effect=click.ClickException("no token")),
+        patch("ai_reviewer.cli.consolidate_agent_findings") as consolidate,
+        patch("ai_reviewer.cli.remove_pr_worktree") as remove,
+    ):
+        consolidate.return_value = MagicMock(findings=[], summary="ok", agent_count=1)
+        result = CliRunner().invoke(cli, ["publish", str(out)])
+
+    assert result.exit_code != 0
     remove.assert_called_once()
 
 
@@ -323,7 +351,11 @@ def test_publish_needs_at_least_one_agent_result(tmp_path):
     out = _session(tmp_path)
     (out / "out" / "security-reviewer.json").unlink()
 
-    result = CliRunner().invoke(cli, ["publish", str(out)])
+    with patch("ai_reviewer.cli.remove_pr_worktree") as remove:
+        result = CliRunner().invoke(cli, ["publish", str(out)])
 
     assert result.exit_code != 0
     assert "no agent findings" in result.output
+    # The worktree exists once target.json is read, so the one cleanup rule
+    # applies here too, not only once findings have been loaded.
+    remove.assert_called_once()

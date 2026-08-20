@@ -767,13 +767,13 @@ def publish_command(
         raise click.ClickException(f"{target_file} not found - run `prompts --pr` first")
     target = PreparedPR.read(target_file)
 
-    findings_files = sorted(str(p) for p in (session / "out").glob("*.json"))
-    if not findings_files:
-        raise click.ClickException(f"no agent findings in {session / 'out'}")
-
-    config = load_config(Path(config_path) if config_path else None)
-
     try:
+        findings_files = sorted(str(p) for p in (session / "out").glob("*.json"))
+        if not findings_files:
+            raise click.ClickException(f"no agent findings in {session / 'out'}")
+
+        config = load_config(Path(config_path) if config_path else None)
+
         diff = local_diff(target.root, base=target.base_sha)
         reviewed = build_local_context(
             target.root, diff, changed_files(target.root, base=target.base_sha)
@@ -809,14 +809,13 @@ def publish_command(
     except click.ClickException:
         raise
     except Exception as e:  # noqa: BLE001
-        if not dry_run:
-            remove_pr_worktree(target)
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
-
-    # A dry run is a rehearsal: keep the worktree so the real post needs no refetch.
-    if not dry_run:
-        remove_pr_worktree(target)
+    finally:
+        # A dry run is a rehearsal: keep the worktree so the real post needs no refetch.
+        # Every other exit from here on - success, ClickException, or any other error - removes it.
+        if not dry_run:
+            remove_pr_worktree(target)
 
 
 @cli.command("update-docs")
