@@ -27,17 +27,15 @@ from ai_reviewer.docs.updater import run_doc_update
 from ai_reviewer.github.client import (
     GitHubClient,
     ReviewMeta,
-    estimate_review_count,
-    is_convergence_all_clear,
     lgtm_placeholder_review,
     should_skip_before_agents,
-    should_skip_review,
 )
 from ai_reviewer.github.formatter import (
     GitHubFormatter,
     format_local_report,
     format_review_as_json,
 )
+from ai_reviewer.github.publish import publish_review
 from ai_reviewer.github.webhook import create_webhook_app, set_review_handler
 from ai_reviewer.models.review import ConsolidatedReview
 from ai_reviewer.review import build_agent_prompts, consolidate_agent_findings, review_local
@@ -376,131 +374,20 @@ async def review_pr_async(
             raise click.ClickException(
                 "--output github requires a valid GitHub token and accessible PR"
             )
-        formatter = GitHubFormatter(reviewer_name)
-        current_sha = pr.head.sha
-
-        # Compute delta from previous reviews
-        console.print("🔄 Checking for previous review comments...")
-        meta_review_count = (meta.review_count + 1) if meta is not None else None
-        delta = gh.compute_review_delta(pr, review.findings, review_count=meta_review_count)
-
-        # Show delta summary
-        if delta.previous_comments:
-            console.print(
-                f"   Found {len(delta.previous_comments)} previous comments: "
-                f"[green]{len(delta.fixed_findings)} fixed[/green], "
-                f"[yellow]{len(delta.open_findings)} open[/yellow], "
-                f"[cyan]{len(delta.new_findings)} new[/cyan]"
-            )
-        else:
-            console.print("   No previous review comments found (first run)")
-
-        # Accurate review count: prefer metadata, fall back to heuristic
-        review_count: int
-        if meta_review_count is not None:
-            review_count = meta_review_count
-        else:
-            review_count = estimate_review_count(delta)
-
-        # Convergence gate: skip posting when findings are unchanged
-        if delta.previous_comments and not force_review:
-            if should_skip_review(review_count, delta):
-                console.print(
-                    "[dim]⏭️  Findings unchanged since last review — skipping post "
-                    "(use --force-review to override)[/dim]"
-                )
-                return
-        elif force_review and delta.previous_comments:
-            console.print("[dim]⚡ --force-review: bypassing convergence check[/dim]")
-
-        # Build metadata to embed in the review comment
-        finding_hashes = [f.finding_hash for f in review.findings]
-        new_meta = ReviewMeta.build(
-            commit_sha=current_sha,
-            review_count=review_count,
-            finding_hashes=finding_hashes,
+        result = publish_review(
+            gh=gh,
+            pr=pr,
+            review=review,
+            config=config,
+            meta=meta,
+            reviewer_name=reviewer_name,
+            force_review=force_review,
+            dry_run=dry_run,
+            allow_approve=allow_approve,
+            emit=console.print,
         )
-
-        all_clear = is_convergence_all_clear(review, delta)
-
-        if dry_run:
-            console.print("\n[yellow]Dry run - not posting to GitHub[/yellow]")
-            if all_clear:
-                print(formatter.format_all_clear(review, delta, meta=new_meta))
-            elif delta.previous_comments:
-                print(formatter.format_review_with_delta(review, delta, meta=new_meta))
-            else:
-                print(formatter.format_review(review, meta=new_meta))
-        else:
-            max_total = config.output.max_total_findings
-            max_per_file = config.output.max_findings_per_file
-
-            if all_clear:
-                # Explicit convergence verdict; never APPROVE unless policy opts in.
-                body = formatter.format_all_clear(review, delta, meta=new_meta)
-                auto_approve = config.review_policy.auto_approve_if_no_findings
-                action = (
-                    "APPROVE"
-                    if (allow_approve and auto_approve and not review.failed_agents)
-                    else "COMMENT"
-                )
-                postable_inline_findings = []
-            else:
-                # Pre-filter inline findings so the compact body matches what GitHub will accept.
-                candidate_inline_findings = (
-                    delta.new_findings if delta.previous_comments else review.findings
-                )
-                postable_inline_findings = gh.get_postable_inline_findings(
-                    pr,
-                    inline_findings=candidate_inline_findings,
-                    max_total=max_total,
-                    max_per_file=max_per_file,
-                )
-                use_compact_body = len(postable_inline_findings) > 0
-
-                if delta.previous_comments:
-                    body = (
-                        formatter.format_review_with_delta_compact(
-                            review,
-                            delta,
-                            meta=new_meta,
-                            inline_new_findings=postable_inline_findings,
-                        )
-                        if use_compact_body
-                        else formatter.format_review_with_delta(review, delta, meta=new_meta)
-                    )
-                    action = formatter.get_review_action_with_delta(review, delta, allow_approve)
-                else:
-                    body = (
-                        formatter.format_review_compact(
-                            review,
-                            meta=new_meta,
-                            inline_findings=postable_inline_findings,
-                        )
-                        if use_compact_body
-                        else formatter.format_review(review, meta=new_meta)
-                    )
-                    action = formatter.get_review_action(review, allow_approve=allow_approve)
-
-            posted = gh.post_review(
-                pr,
-                body,
-                action,
-                inline_findings=postable_inline_findings or None,
-            )
-            console.print(f"📝 Posted review to GitHub ({action}, {posted} inline comments)")
-
-            if delta.fixed_findings:
-                console.print(f"✅ Marking {len(delta.fixed_findings)} fixed issues as resolved...")
-                resolved = gh.resolve_fixed_comments(pr, delta)
-                console.print(f"   Resolved {resolved} comments")
-
-            # Final status
-            if delta.all_issues_resolved:
-                console.print("\n[green]🎉 All issues resolved! Ready to merge.[/green]")
-            elif delta.previous_comments:
-                open_count = len(delta.open_findings) + len(delta.new_findings)
-                console.print(f"\n[yellow]⚠️  {open_count} issues remaining[/yellow]")
+        if dry_run and result.body:
+            print(result.body)
 
         # Doc review (runs for github output after the main review)
         _run_doc_review(
