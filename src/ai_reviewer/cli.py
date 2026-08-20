@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -21,6 +22,14 @@ from ai_reviewer.config import (
     DocReviewSettings,
     load_config,
     validate_config,
+)
+from ai_reviewer.context.local_source import PRMeta
+from ai_reviewer.context.pr_checkout import (
+    PreparedPR,
+    create_pr_worktree,
+    parse_pr_target,
+    remove_pr_worktree,
+    resolve_clone,
 )
 from ai_reviewer.docs.analyzer import DocAnalyzer, format_doc_comment
 from ai_reviewer.docs.updater import run_doc_update
@@ -42,6 +51,8 @@ from ai_reviewer.review import build_agent_prompts, consolidate_agent_findings, 
 from ai_reviewer.review import review_pr as run_review
 
 console = Console()
+# The reviewer subagents parse stdout brief lines; preparation progress must not land there.
+err_console = Console(stderr=True)
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -52,6 +63,20 @@ def setup_logging(verbose: bool = False) -> None:
         format="%(message)s",
         handlers=[RichHandler(console=console, rich_tracebacks=True)],
     )
+
+
+def github_token(config: Config) -> str:
+    """The token to post with, falling back to the gh CLI's own credential.
+
+    A developer machine usually has `gh auth login` and no GITHUB_TOKEN.
+    """
+    if config.github.token:
+        return config.github.token
+    proc = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=False)
+    token = proc.stdout.strip()
+    if not token:
+        raise click.ClickException("no GitHub token: set GITHUB_TOKEN, or run `gh auth login`")
+    return token
 
 
 @click.group()
@@ -544,18 +569,44 @@ def review_local_command(
 @click.option("--staged", is_flag=True, help="Prompt for the index instead of the working tree")
 @click.option("--base", default=None, help="Prompt for base...HEAD")
 @click.option(
+    "--pr", "pr_target", default=None, help="Prompt for a pull request (URL or owner/repo#N)"
+)
+@click.option(
+    "--repo-path",
+    default=None,
+    type=click.Path(exists=True, file_okay=False),
+    help="Clone of the pull request's repository to take the worktree from",
+)
+@click.option(
     "--agents", type=click.IntRange(1, 5), default=3, help="How many reviewer profiles to emit"
 )
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
 def prompts_command(
-    out_dir: str, staged: bool, base: str | None, agents: int, config_path: str | None
+    out_dir: str,
+    staged: bool,
+    base: str | None,
+    pr_target: str | None,
+    repo_path: str | None,
+    agents: int,
+    config_path: str | None,
 ) -> None:
     """Write one self-contained review prompt per reviewer profile.
 
     For orchestrating reviewer subagents from a coding session: this makes no LLM
-    calls, it only assembles the same prompts the API path would send.
+    calls, it only assembles the same prompts the API path would send. With --pr it
+    also prepares a worktree, which ``publish`` removes.
     """
+    if pr_target and (staged or base):
+        raise click.ClickException("--pr cannot be combined with --staged or --base")
+
     config = load_config(Path(config_path) if config_path else None)
+    target = Path(out_dir)
+    target.mkdir(parents=True, exist_ok=True)
+
+    if pr_target:
+        _prompts_for_pr(pr_target, repo_path, target, agents, config)
+        return
+
     try:
         built = asyncio.run(
             build_agent_prompts(
@@ -570,11 +621,57 @@ def prompts_command(
     except Exception as e:  # noqa: BLE001
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
-    target = Path(out_dir)
-    target.mkdir(parents=True, exist_ok=True)
+    _write_briefs(built, target)
+
+
+def _write_briefs(built: dict, target: Path) -> None:
+    """Brief paths go to stdout; anything else must not, callers parse these lines."""
     for name, spec in built.items():
         (target / f"{name}.md").write_text(spec["prompt"])
         print(f"{name}\t{spec['model']}\t{target / f'{name}.md'}")
+
+
+def _prompts_for_pr(
+    pr_target: str, repo_path: str | None, target: Path, agents: int, config: Config
+) -> None:
+    """Prepare a pull request's worktree and write its briefs.
+
+    The worktree outlives this process: the reviewer subagents read it, and
+    ``publish`` removes it.
+    """
+    slug, number = parse_pr_target(pr_target)
+    gh = GitHubClient(github_token(config))
+    pull = gh.get_pull_request(slug, number)
+
+    err_console.print(f"[bold]Preparing {slug}#{number}[/bold]")
+    err_console.print(f"  {pull.title}")
+
+    clone = resolve_clone(slug, repo_path)
+    prepared: PreparedPR = create_pr_worktree(
+        clone, slug, number, pull.base.ref, target / "wt", title=pull.title or ""
+    )
+    try:
+        err_console.print(f"  worktree from {clone}  (detached at {prepared.head_sha[:7]})")
+        err_console.print(f"  base {pull.base.ref} @ {prepared.base_sha[:7]}")
+        built = asyncio.run(
+            build_agent_prompts(
+                root=prepared.root,
+                base=prepared.base_sha,
+                num_agents=agents,
+                anthropic_cfg=config.anthropic,
+                config=config,
+                pr_meta=PRMeta(
+                    repo=slug, number=number, title=pull.title or "", body=pull.body or ""
+                ),
+            )
+        )
+    except Exception as e:  # noqa: BLE001
+        remove_pr_worktree(prepared)
+        err_console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+
+    prepared.write(target / "target.json")
+    _write_briefs(built, target)
 
 
 @cli.command("consolidate")
