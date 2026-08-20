@@ -72,8 +72,11 @@ def github_token(config: Config) -> str:
     """
     if config.github.token:
         return config.github.token
-    proc = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=False)
-    token = proc.stdout.strip()
+    try:
+        proc = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=False)
+        token = proc.stdout.strip()
+    except FileNotFoundError:
+        token = ""
     if not token:
         raise click.ClickException("no GitHub token: set GITHUB_TOKEN, or run `gh auth login`")
     return token
@@ -601,9 +604,9 @@ def prompts_command(
 
     config = load_config(Path(config_path) if config_path else None)
     target = Path(out_dir)
-    target.mkdir(parents=True, exist_ok=True)
 
     if pr_target:
+        target.mkdir(parents=True, exist_ok=True)
         _prompts_for_pr(pr_target, repo_path, target, agents, config)
         return
 
@@ -621,6 +624,7 @@ def prompts_command(
     except Exception as e:  # noqa: BLE001
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
+    target.mkdir(parents=True, exist_ok=True)
     _write_briefs(built, target)
 
 
@@ -665,13 +669,12 @@ def _prompts_for_pr(
                 ),
             )
         )
+        prepared.write(target / "target.json")
+        _write_briefs(built, target)
     except Exception as e:  # noqa: BLE001
         remove_pr_worktree(prepared)
         err_console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
-
-    prepared.write(target / "target.json")
-    _write_briefs(built, target)
 
 
 @cli.command("consolidate")
