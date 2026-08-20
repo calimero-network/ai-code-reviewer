@@ -32,9 +32,11 @@ Create a todo per step and work through them in order.
 
 ```bash
 D=$(mktemp -d) && mkdir -p "$D/out"
-ai-reviewer prompts --out "$D" --pr <pr-url>
+REPO_PATH=()                  # or (--repo-path <dir>) if the user gave one
+ai-reviewer prompts --out "$D" --pr <pr-url> "${REPO_PATH[@]}"
 ```
 
+Set `REPO_PATH` once, from any `--repo-path <dir>` the user gave.
 If `ai-reviewer` is not on PATH, stop and give the user the one install line:
 `uv tool install git+https://github.com/calimero-network/ai-code-reviewer`.
 This resolves the PR, checks it out as a detached worktree, and writes the briefs.
