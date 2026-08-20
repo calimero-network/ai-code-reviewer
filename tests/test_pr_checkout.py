@@ -322,7 +322,8 @@ def test_remove_is_safe_to_call_twice(clone, origin, tmp_path):
 
 
 def test_a_leaked_worktree_does_not_block_the_next_run(clone, origin, tmp_path):
-    """A session that never reached publish leaves a stale administrative entry."""
+    """A session that never reached publish leaves a stale administrative entry;
+    the next run must clear it rather than pile up a fresh one alongside it."""
     import shutil
 
     _open_pr(origin, tmp_path)
@@ -336,6 +337,9 @@ def test_a_leaked_worktree_does_not_block_the_next_run(clone, origin, tmp_path):
     prepared = create_pr_worktree(clone, "acme/widget", 42, "main", second)
 
     assert (second / "a.py").exists()
+    # git's admin dir for linked worktrees: one leaked entry plus one fresh one
+    # would leave two, if the leading `worktree prune` were ever dropped.
+    assert len(list((clone / ".git" / "worktrees").iterdir())) == 1
     remove_pr_worktree(prepared)
 
 
