@@ -93,6 +93,23 @@ def test_parse_pr_target_rejects_anything_else(target):
         parse_pr_target(target)
 
 
+@pytest.mark.parametrize(
+    "target",
+    [
+        "../b#1",
+        "a/..#1",
+        "./b#1",
+        "https://github.com/../evil/pull/1",
+        "https://github.com/acme/../../evil/pull/1",
+    ],
+)
+def test_parse_pr_target_rejects_relative_segments(target):
+    """The slug is used as a path under the clone cache, so a traversing one would
+    aim the clone and the index entry outside it."""
+    with pytest.raises(ValueError, match="not a pull request"):
+        parse_pr_target(target)
+
+
 def test_resolve_clone_finds_the_clone_you_are_standing_in(clone, monkeypatch):
     monkeypatch.chdir(clone)
 
@@ -358,3 +375,13 @@ def test_prepared_pr_round_trips_through_json(tmp_path):
     prepared.write(path)
 
     assert PreparedPR.read(path) == prepared
+
+
+def test_an_unfetchable_pr_ref_says_what_git_said(clone, tmp_path):
+    """An absent ref, being offline, or a clone whose origin needs credentials all
+    land here, and "exit status 128" on its own names none of them."""
+    root = tmp_path / "session" / "wt"
+    root.parent.mkdir()
+
+    with pytest.raises(RuntimeError, match="refs/pull/999/head"):
+        create_pr_worktree(clone, "acme/widget", 999, "main", root)

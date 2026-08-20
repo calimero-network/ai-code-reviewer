@@ -651,18 +651,21 @@ def _prompts_for_pr(
     The worktree outlives this process: the reviewer subagents read it, and
     ``publish`` removes it.
     """
-    slug, number = parse_pr_target(pr_target)
-    gh = _github_client(config)
-    pull = gh.get_pull_request(slug, number)
-
-    err_console.print(f"[bold]Preparing {slug}#{number}[/bold]")
-    err_console.print(f"  {pull.title}")
-
-    clone = resolve_clone(slug, repo_path)
-    prepared: PreparedPR = create_pr_worktree(
-        clone, slug, number, pull.base.ref, target / "wt", title=pull.title or ""
-    )
+    # Resolving the pull request and taking the worktree from it fail as readily as
+    # anything after, so the whole preparation reports rather than tracebacks.
+    prepared: PreparedPR | None = None
     try:
+        slug, number = parse_pr_target(pr_target)
+        gh = _github_client(config)
+        pull = gh.get_pull_request(slug, number)
+
+        err_console.print(f"[bold]Preparing {slug}#{number}[/bold]")
+        err_console.print(f"  {pull.title}")
+
+        clone = resolve_clone(slug, repo_path)
+        prepared = create_pr_worktree(
+            clone, slug, number, pull.base.ref, target / "wt", title=pull.title or ""
+        )
         err_console.print(f"  worktree from {clone}  (detached at {prepared.head_sha[:7]})")
         err_console.print(f"  base {pull.base.ref} @ {prepared.base_sha[:7]}")
         built = asyncio.run(
@@ -680,7 +683,8 @@ def _prompts_for_pr(
         prepared.write(target / "target.json")
         _write_briefs(built, target)
     except Exception as e:  # noqa: BLE001
-        remove_pr_worktree(prepared)
+        if prepared is not None:
+            remove_pr_worktree(prepared)
         err_console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
 

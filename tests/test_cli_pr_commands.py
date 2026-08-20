@@ -448,3 +448,32 @@ class TestExtraReviewerUsersWiring:
 
         assert result.exit_code == 0
         assert client.call_args.kwargs["extra_reviewer_users"] == ["meroreviewer[bot]"]
+
+
+def test_a_worktree_that_cannot_be_prepared_reports_the_reason(tmp_path):
+    """The likeliest real failure of this command, and it sat outside the try."""
+    out = tmp_path / "session"
+    pull = MagicMock()
+    pull.title = "t"
+    pull.body = ""
+    pull.base.ref = "main"
+
+    with (
+        patch("ai_reviewer.cli.GitHubClient") as client,
+        patch("ai_reviewer.cli.resolve_clone", return_value=tmp_path / "clone"),
+        patch(
+            "ai_reviewer.cli.create_pr_worktree",
+            side_effect=RuntimeError(
+                "git fetch --no-tags origin: fatal: couldn't find remote ref refs/pull/42/head"
+            ),
+        ),
+        patch("ai_reviewer.cli.github_token", return_value="t"),
+        patch("ai_reviewer.cli.remove_pr_worktree") as remove,
+    ):
+        client.return_value.get_pull_request.return_value = pull
+        result = CliRunner().invoke(cli, ["prompts", "--out", str(out), "--pr", "acme/widget#42"])
+
+    assert result.exit_code == 1
+    assert "couldn't find remote ref" in result.stderr
+    # There is no worktree to release when the command that creates one failed.
+    remove.assert_not_called()

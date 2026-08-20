@@ -32,7 +32,9 @@ def parse_pr_target(target: str) -> tuple[str, int]:
     """``("owner/repo", number)`` from a PR URL or ``owner/repo#N``."""
     for pattern in (_PR_URL, _PR_SHORT):
         match = pattern.match(target.strip())
-        if match:
+        # The slug is used as a path under the clone cache, so a relative segment
+        # would aim the clone and the index entry outside it.
+        if match and not any(part in (".", "..") for part in match.group(1).split("/")):
             return match.group(1), int(match.group(2))
     raise ValueError(
         f"not a pull request: {target!r} "
@@ -215,9 +217,12 @@ def remove_pr_worktree(prepared: PreparedPR) -> None:
 
 
 def _git(repo: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", *args], cwd=repo, capture_output=True, text=True, check=True
-    ).stdout
+    """Output is captured, so an exit status on its own would be all the caller sees."""
+    proc = subprocess.run(["git", *args], cwd=repo, capture_output=True, text=True, check=False)
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or f"exit status {proc.returncode}"
+        raise RuntimeError(f"git {' '.join(args)}: {detail}")
+    return proc.stdout
 
 
 def _git_quiet(repo: Path, *args: str) -> None:
