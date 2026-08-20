@@ -1,0 +1,194 @@
+"""Preparing a pull request for local review.
+
+Real git repositories rather than mocks: this module exists to agree with git,
+so a mocked git would test nothing.  The clone source is a local path, so no
+test touches the network.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+
+import pytest
+
+from ai_reviewer.context import pr_checkout
+from ai_reviewer.context.pr_checkout import parse_pr_target, resolve_clone
+
+
+def _git(repo, *args: str) -> str:
+    return subprocess.run(
+        ["git", *args], cwd=repo, capture_output=True, text=True, check=True
+    ).stdout
+
+
+@pytest.fixture
+def origin(tmp_path):
+    """A repository standing in for github.com/acme/widget."""
+    path = tmp_path / "origin" / "acme" / "widget.git"
+    path.parent.mkdir(parents=True)
+    work = tmp_path / "origin-work"
+    work.mkdir()
+    _git(work, "init", "-q", "-b", "main")
+    _git(work, "config", "user.email", "t@e.st")
+    _git(work, "config", "user.name", "t")
+    (work / "a.py").write_text("x = 1\n")
+    _git(work, "add", "-A")
+    _git(work, "commit", "-qm", "init")
+    _git(work, "clone", "-q", "--bare", str(work), str(path))
+    return path
+
+
+@pytest.fixture
+def clone(tmp_path, origin):
+    """A developer's clone of that repository."""
+    path = tmp_path / "dev" / "widget"
+    path.parent.mkdir(parents=True)
+    subprocess.run(["git", "clone", "-q", str(origin), str(path)], check=True, capture_output=True)
+    # origin stays the local bare repo: laid out as <root>/<owner>/<repo>.git it
+    # reads as acme/widget, so no test needs the network.
+    return path
+
+
+@pytest.fixture(autouse=True)
+def isolated_cache(tmp_path, monkeypatch):
+    """Never read or write the real ~/.cache/ai-reviewer during tests."""
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(pr_checkout, "CLONE_CACHE", cache)
+    monkeypatch.setattr(pr_checkout, "CLONE_INDEX", cache / "clones.json")
+    return cache
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "https://github.com/acme/widget/pull/42",
+        "https://github.com/acme/widget/pull/42/",
+        "http://github.com/acme/widget/pull/42",
+        "acme/widget#42",
+    ],
+)
+def test_parse_pr_target_accepts_url_and_short_forms(target):
+    assert parse_pr_target(target) == ("acme/widget", 42)
+
+
+@pytest.mark.parametrize(
+    "target",
+    [
+        "https://github.com/acme/widget",
+        "https://github.com/acme/widget/issues/42",
+        "acme/widget",
+        "42",
+        "",
+    ],
+)
+def test_parse_pr_target_rejects_anything_else(target):
+    with pytest.raises(ValueError, match="not a pull request"):
+        parse_pr_target(target)
+
+
+def test_resolve_clone_finds_the_clone_you_are_standing_in(clone, monkeypatch):
+    monkeypatch.chdir(clone)
+
+    assert resolve_clone("acme/widget") == clone.resolve()
+
+
+def test_resolve_clone_walks_up_from_a_subdirectory(clone, monkeypatch):
+    nested = clone / "src" / "deep"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+
+    assert resolve_clone("acme/widget") == clone.resolve()
+
+
+def test_resolve_clone_ignores_a_clone_of_a_different_repo(
+    clone,  # noqa: ARG001 - present so its origin bare repo exists on disk
+    tmp_path,
+    monkeypatch,
+):
+    """Standing in some other project must not review its files."""
+    other = tmp_path / "other"
+    other.mkdir()
+    _git(other, "init", "-q")
+    _git(other, "remote", "add", "origin", "https://github.com/acme/other.git")
+    monkeypatch.chdir(other)
+    monkeypatch.setattr(pr_checkout, "_GITHUB_URL", str(tmp_path / "origin"))
+
+    resolved = resolve_clone("acme/widget")
+
+    assert resolved != other.resolve()
+    assert resolved.is_relative_to(tmp_path / "cache")
+
+
+def test_repo_path_is_used_and_remembered(clone, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+
+    assert resolve_clone("acme/widget", repo_path=str(clone)) == clone.resolve()
+
+    index = json.loads((tmp_path / "cache" / "clones.json").read_text())
+    assert index["acme/widget"] == str(clone.resolve())
+
+
+def test_a_remembered_path_is_reused_without_repo_path(clone, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    resolve_clone("acme/widget", repo_path=str(clone))
+
+    assert resolve_clone("acme/widget") == clone.resolve()
+
+
+def test_repo_path_pointing_at_the_wrong_repo_is_rejected(tmp_path, monkeypatch):
+    wrong = tmp_path / "wrong"
+    wrong.mkdir()
+    _git(wrong, "init", "-q")
+    _git(wrong, "remote", "add", "origin", "https://github.com/acme/other.git")
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError, match="not a clone of acme/widget"):
+        resolve_clone("acme/widget", repo_path=str(wrong))
+
+
+def test_falls_back_to_a_cache_clone(
+    tmp_path,
+    origin,  # noqa: ARG001 - present so the clone source exists on disk
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pr_checkout, "_GITHUB_URL", str(tmp_path / "origin"))
+
+    resolved = resolve_clone("acme/widget")
+
+    assert resolved == tmp_path / "cache" / "acme" / "widget"
+    assert (resolved / ".git").exists()
+
+
+def test_a_second_call_reuses_the_cache_clone(
+    tmp_path,
+    origin,  # noqa: ARG001 - present so the clone source exists on disk
+    monkeypatch,
+):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(pr_checkout, "_GITHUB_URL", str(tmp_path / "origin"))
+    first = resolve_clone("acme/widget")
+    marker = first / ".git" / "ai-reviewer-marker"
+    marker.write_text("kept")
+
+    assert resolve_clone("acme/widget") == first
+    assert marker.read_text() == "kept"
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("https://github.com/acme/widget.git", "acme/widget"),
+        ("https://github.com/acme/widget", "acme/widget"),
+        ("git@github.com:acme/widget.git", "acme/widget"),
+        ("ssh://git@github.com/acme/widget.git", "acme/widget"),
+    ],
+)
+def test_remote_slug_reads_every_url_form(tmp_path, url, expected):
+    repo = tmp_path / f"r{abs(hash(url))}"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "remote", "add", "origin", url)
+
+    assert pr_checkout._remote_slug(repo) == expected
