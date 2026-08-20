@@ -89,6 +89,37 @@ brand-new files - the ones most likely to contain something worth catching.
 Agent count scales down with diff size, the same way the PR path does, so a
 two-line change does not spend three reviewers.
 
+## Reviewing a pull request
+
+`/ai-review` reviews changes that have no pull request yet.
+`/review-contribution` reviews one that does, and posts the result.
+
+```
+/review-contribution https://github.com/calimero-network/core/pull/3573
+```
+
+It resolves the pull request, checks it out as a detached worktree - your own
+clone's HEAD, index and working tree are never touched - runs the same reviewer
+subagents, and posts one GitHub review: a summary body plus inline comments, with
+validated fixes as clickable suggestion blocks.
+
+The worktree comes from a clone of that repository if you are standing in one, or
+from a blobless cache clone under `~/.cache/ai-reviewer` if you are not.
+`--repo-path <dir>` names the clone explicitly, and is remembered for next time.
+
+Posting needs a GitHub token: `GITHUB_TOKEN`, `github.token` in the config, or
+whatever `gh auth token` returns.
+The review posts under **your** GitHub identity and never approves.
+`--dry-run` prints exactly what would be posted and posts nothing.
+
+Re-running on the same pull request is safe: findings unchanged since the last
+review are not posted again, and comments for findings that are now fixed are
+resolved.
+
+Because the local path runs no cross-review round, published findings use the
+conservative confidence floors - fewer comments, at a higher bar, than the API
+path would post.
+
 ## Configuration
 
 Per-repository settings live in `.ai-reviewer.yaml` and are shared with the PR
