@@ -868,9 +868,11 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
 
-        # Original finding comment
+        # Original finding comment, marked the way every posted finding is
         original_comment = MagicMock()
-        original_comment.body = "🔴 **SQL Injection**\n\nUser input in query"
+        original_comment.body = (
+            "🔴 **SQL Injection**\n\nUser input in query\n\n<!-- ai-reviewer-id: abcdef123456 -->"
+        )
         original_comment.user.login = "github-actions[bot]"
         original_comment.id = 100
         original_comment.path = "test.py"
@@ -2993,3 +2995,55 @@ class TestReviewConcurrencyCap:
         release_first.set()
         await asyncio.gather(t1, t2)
         assert order == ["first:start", "first:end", "second:start", "second:end"]
+
+
+class TestPreviousCommentsRequireTheMarker:
+    """Only comments carrying the ai-reviewer-id marker count as previous findings.
+
+    ``publish`` posts under a real person's identity, so that person is in the
+    allowed set: an unmarked comment of theirs would otherwise be replied to,
+    reacted to and thread-resolved as if the reviewer had written it.
+    """
+
+    @staticmethod
+    def _comment(body: str, login: str = "alice", comment_id: int = 300):
+        comment = MagicMock()
+        comment.body = body
+        comment.user.login = login
+        comment.id = comment_id
+        comment.path = "src/foo.py"
+        comment.line = 5
+        comment.original_line = 5
+        return comment
+
+    def _previous(self, comment):
+        from ai_reviewer.github.client import GitHubClient
+
+        pr = MagicMock()
+        pr.number = 7
+        pr.get_review_comments.return_value = [comment]
+        with patch("ai_reviewer.github.client.Github") as github_cls:
+            github_cls.return_value.get_user.return_value.login = "alice"
+            client = GitHubClient(token="test-token")
+            return client.get_previous_review_comments(pr)
+
+    def test_a_humans_own_review_comment_is_not_a_previous_finding(self):
+        comment = self._comment("This loop reallocates on every pass, can we hoist it?")
+
+        assert self._previous(comment) == []
+
+    def test_a_humans_comment_shaped_like_a_finding_is_not_a_previous_finding(self):
+        comment = self._comment("🔴 **Unchecked index**\n\nThis will panic on an empty vec.")
+
+        assert self._previous(comment) == []
+
+    def test_a_marked_comment_is_still_a_previous_finding(self):
+        comment = self._comment(
+            "🔴 **Unchecked index**\n\nThis will panic.\n\n<!-- ai-reviewer-id: 0123456789ab -->"
+        )
+
+        previous = self._previous(comment)
+
+        assert len(previous) == 1
+        assert previous[0].finding_hash == "0123456789ab"
+        assert previous[0].title == "Unchecked index"

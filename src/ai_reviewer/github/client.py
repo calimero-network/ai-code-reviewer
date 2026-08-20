@@ -108,6 +108,7 @@ def compute_findings_hash(finding_hashes: list[str]) -> str:
 
 
 _REVIEW_META_RE = re.compile(r"<!-- ai-reviewer-meta: ({.*?}) -->")
+_FINDING_ID_RE = re.compile(r"<!-- ai-reviewer-id: ([a-f0-9]{12}) -->")
 
 
 @dataclass
@@ -992,9 +993,16 @@ class GitHubClient:
             comment: GitHub review comment
 
         Returns:
-            Parsed comment or None if not parseable
+            Parsed comment, or None when it is not one of ours
         """
         body = comment.body
+
+        # The marker is what makes a comment ours; the author is not, because the
+        # token can belong to a person whose own review comments must never match.
+        hash_match = _FINDING_ID_RE.search(body)
+        if not hash_match:
+            return None
+        finding_hash = hash_match.group(1)
 
         # Extract severity from emoji
         severity_map = {
@@ -1013,10 +1021,6 @@ class GitHubClient:
         # Extract title from **Title** pattern
         title_match = re.search(r"\*\*([^*]+)\*\*", body)
         title = title_match.group(1) if title_match else "Unknown Issue"
-
-        # Extract embedded hash for stable cross-run matching
-        hash_match = re.search(r"<!-- ai-reviewer-id: ([a-f0-9]{12}) -->", body)
-        finding_hash = hash_match.group(1) if hash_match else None
 
         return PreviousComment(
             id=comment.id,
