@@ -36,7 +36,7 @@ dependencies = [
     "rich>=13.7.0",
     "tenacity>=8.2.0",
     "PyJWT>=2.8.0",
-    "cryptography>=42.0.0",
+    "cryptography>=50.0.0",
 ]
 
 [project.optional-dependencies]
