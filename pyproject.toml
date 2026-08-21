@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "ai-code-reviewer"
-version = "0.1.0"
+version = "0.1.1"
 description = "Multi-agent code review system that orchestrates multiple LLMs"
 readme = "README.md"
 license = "MIT"

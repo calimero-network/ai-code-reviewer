@@ -1,6 +1,6 @@
 {
   "name": "ai-review",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Multi-agent code review of local changes, before a pull request exists. Read-only reviewer subagents; clustering, consensus scoring and fix validation in Python.",
   "author": {
     "name": "Calimero Network",
