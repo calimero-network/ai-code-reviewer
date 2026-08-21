@@ -32,9 +32,9 @@ on:
       GH_PAT:
         required: false
 
-  # Also runs directly on this repo (dogfooding)
-  push:
-    branches: [main, master]
+  # Dogfooding on push is off while the Anthropic balance is empty: the job spends
+  # credit on every merge to master and fails when there is none. Calling repos are
+  # unaffected - they trigger through workflow_call above.
 
   # Manual trigger with dry-run option for testing
   workflow_dispatch:
