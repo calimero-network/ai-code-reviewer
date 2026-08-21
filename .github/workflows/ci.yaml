@@ -44,6 +44,16 @@ jobs:
           files: ./coverage.xml
           fail_ci_if_error: false
 
+  plugin-version:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - run: scripts/check-plugin-version.sh origin/${{ github.base_ref }}
+
   lint:
     runs-on: ubuntu-latest
     steps:
