@@ -64,6 +64,22 @@ checked in under `.claude/`, so a clone needs no plugin install.
 The plugin points at that same `.claude` directory rather than a copy, so the
 project-local skill and the published plugin cannot drift apart.
 
+### Updating an existing setup
+
+The command and the plugin are separate installs, so both move:
+
+```bash
+uv tool install --force git+https://github.com/calimero-network/ai-code-reviewer
+```
+
+```
+/plugin update ai-review@calimero
+```
+
+Start a new session afterwards. `plugin update` compares version strings, so a
+change under `.claude/` only reaches an existing install once the version in
+`pyproject.toml` moves - CI requires that in the same pull request.
+
 ### Without installing anything
 
 `uvx` runs the command straight from the repository, which is enough for the
