@@ -499,6 +499,11 @@ class GitHubClient:
                 self._allowed_users = self.AI_REVIEWER_USERS | self._extra_reviewer_users
         return self._allowed_users
 
+    def _bot_authors(self) -> set[str]:
+        """Logins that are always a bot, unlike ``_get_allowed_users`` which also
+        unions in the authenticated user - a person on the subagent-driven path."""
+        return self.AI_REVIEWER_USERS | self._extra_reviewer_users
+
     def get_repo(self, repo_name: str) -> Repository:
         """Get a repository by name.
 
@@ -867,6 +872,7 @@ class GitHubClient:
         returning stale metadata from a much earlier review run.
         """
         allowed_users = self._get_allowed_users()
+        bot_authors = self._bot_authors()
         try:
             reviews = list(pr.get_reviews())
         except Exception as e:
@@ -886,6 +892,11 @@ class GitHubClient:
                     meta.review_count,
                 )
                 return meta
+            if review.user.login not in bot_authors:
+                # A person's own ordinary review, on the path where the reviewer
+                # posts under their identity. Theirs is not the legacy-format case
+                # the stop below guards, so keep looking.
+                continue
             logger.debug(
                 "Most recent bot review (id=%s) has no metadata; not searching older reviews",
                 review.id,
@@ -905,6 +916,8 @@ class GitHubClient:
                         meta.review_count,
                     )
                     return meta
+                if comment.user.login not in bot_authors:
+                    continue
                 logger.debug(
                     "Most recent bot issue comment (id=%s) has no metadata; not searching older comments",
                     comment.id,

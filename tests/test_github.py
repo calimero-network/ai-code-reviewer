@@ -2381,6 +2381,58 @@ class TestGetReviewMetadata:
         assert result.commit_sha == "abc123"
         assert result.review_count == 2
 
+    def test_a_persons_own_review_does_not_hide_the_ai_metadata_behind_it(self):
+        """On the subagent path the reviewer posts under a person's identity, so that
+        login is an allowed user. Their ordinary review carries no metadata, and
+        stopping there would drop the real count and coarsen the convergence gate."""
+        from ai_reviewer.github.client import GitHubClient
+
+        meta_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"abc123","review_count":4,'
+            '"timestamp":"2026-03-27T12:00:00Z","findings_hash":"deadbeef"} -->'
+        )
+        ai_review = MagicMock(body=f"AI review\n\n{meta_tag}")
+        ai_review.user.login = "alice"
+        human_review = MagicMock(body="looks good, one nit about naming")
+        human_review.user.login = "alice"
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = [ai_review, human_review]
+        mock_pr.get_issue_comments.return_value = MagicMock(reversed=[])
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._allowed_users = {"alice"}
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is not None
+        assert result.review_count == 4
+
+    def test_a_persons_own_issue_comment_does_not_hide_the_ai_metadata_behind_it(self):
+        """Same exposure on the issue-comment fallback."""
+        from ai_reviewer.github.client import GitHubClient
+
+        meta_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"abc123","review_count":5,'
+            '"timestamp":"2026-03-27T12:00:00Z","findings_hash":"deadbeef"} -->'
+        )
+        ai_comment = MagicMock(body=f"AI review\n\n{meta_tag}")
+        ai_comment.user.login = "alice"
+        human_comment = MagicMock(body="bumping this")
+        human_comment.user.login = "alice"
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = []
+        mock_pr.get_issue_comments.return_value = MagicMock(reversed=[human_comment, ai_comment])
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._allowed_users = {"alice"}
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is not None
+        assert result.review_count == 5
+
     def test_returns_none_for_legacy_reviews_without_metadata(self):
         """Returns None when bot reviews have no metadata tag."""
         from ai_reviewer.github.client import GitHubClient
