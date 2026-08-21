@@ -19,9 +19,8 @@ logger = logging.getLogger(__name__)
 # Where clones are fetched from. A module constant so tests can point it at a
 # local path instead of the network.
 _GITHUB_URL = "https://github.com"
-# Fallback clones, and the record of clones found elsewhere on this machine.
+# Fallback clones, when the developer is not standing in one.
 CLONE_CACHE = Path.home() / ".cache" / "ai-reviewer"
-CLONE_INDEX = CLONE_CACHE / "clones.json"
 
 _PR_URL = re.compile(r"^https?://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)/?$")
 _PR_SHORT = re.compile(r"^([\w.-]+/[\w.-]+)#(\d+)$")
@@ -45,24 +44,19 @@ def parse_pr_target(target: str) -> tuple[str, int]:
 def resolve_clone(slug: str, repo_path: str | None = None) -> Path:
     """A local clone of *slug*, never mutated - worktrees are taken from it.
 
-    Ordered by how likely it is to be what the developer meant: the checkout they
-    ran from, one they named before, then a cache clone.
+    Ordered by how likely it is to be what the developer meant: one they named,
+    the checkout they ran from, then a cache clone.
     """
     if repo_path:
         named = Path(repo_path).expanduser().resolve()
         if _remote_slug(named) != slug:
             raise ValueError(f"{named} is not a clone of {slug}")
-        _remember(slug, named)
         return named
 
     cwd = Path.cwd().resolve()
     for candidate in (cwd, *cwd.parents):
         if (candidate / ".git").exists() and _remote_slug(candidate) == slug:
             return candidate
-
-    remembered = _recall(slug)
-    if remembered is not None and _remote_slug(remembered) == slug:
-        return remembered
 
     return _cache_clone(slug)
 
@@ -110,26 +104,6 @@ def _cache_clone(slug: str) -> Path:
     return target
 
 
-def _load_index() -> dict[str, str]:
-    try:
-        loaded = json.loads(CLONE_INDEX.read_text())
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
-
-
-def _remember(slug: str, path: Path) -> None:
-    CLONE_INDEX.parent.mkdir(parents=True, exist_ok=True)
-    index = _load_index()
-    index[slug] = str(path)
-    CLONE_INDEX.write_text(json.dumps(index, indent=2))
-
-
-def _recall(slug: str) -> Path | None:
-    recorded = _load_index().get(slug)
-    return Path(recorded) if recorded else None
-
-
 @dataclass
 class PreparedPR:
     """What is under review, recorded so the second phase cannot disagree with the first.
@@ -140,7 +114,6 @@ class PreparedPR:
 
     repo: str
     number: int
-    title: str
     clone: str
     root: str
     base_sha: str
@@ -160,7 +133,6 @@ def create_pr_worktree(
     number: int,
     base_ref: str,
     root: Path,
-    title: str = "",
 ) -> PreparedPR:
     """Check the pull request out at *root* as a detached worktree of *clone*.
 
@@ -190,7 +162,6 @@ def create_pr_worktree(
     return PreparedPR(
         repo=slug,
         number=number,
-        title=title,
         clone=str(clone),
         root=str(root),
         base_sha=base_sha,

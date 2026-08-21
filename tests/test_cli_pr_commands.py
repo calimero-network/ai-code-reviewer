@@ -29,7 +29,6 @@ def test_pr_writes_a_target_file_and_the_briefs(tmp_path):
     prepared = PreparedPR(
         repo="acme/widget",
         number=42,
-        title="fix: the thing",
         clone=str(tmp_path / "clone"),
         root=str(out / "wt"),
         base_sha="b" * 40,
@@ -88,7 +87,6 @@ def test_a_failure_after_the_worktree_exists_removes_it(tmp_path):
     prepared = PreparedPR(
         repo="acme/widget",
         number=42,
-        title="",
         clone=str(tmp_path / "clone"),
         root=str(out / "wt"),
         base_sha="b" * 40,
@@ -121,7 +119,6 @@ def test_a_failure_writing_target_json_after_the_worktree_exists_removes_it(tmp_
     prepared = PreparedPR(
         repo="acme/widget",
         number=42,
-        title="",
         clone=str(tmp_path / "clone"),
         root=str(out / "wt"),
         base_sha="b" * 40,
@@ -216,7 +213,6 @@ def _session(tmp_path) -> Path:
     PreparedPR(
         repo="acme/widget",
         number=42,
-        title="fix: the thing",
         clone=str(tmp_path / "clone"),
         root=str(out / "wt"),
         base_sha="b" * 40,
@@ -386,7 +382,6 @@ class TestExtraReviewerUsersWiring:
         prepared = PreparedPR(
             repo="acme/widget",
             number=42,
-            title="t",
             clone=str(tmp_path / "clone"),
             root=str(out / "wt"),
             base_sha="b" * 40,

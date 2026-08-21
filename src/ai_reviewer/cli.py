@@ -663,9 +663,7 @@ def _prompts_for_pr(
         err_console.print(f"  {pull.title}")
 
         clone = resolve_clone(slug, repo_path)
-        prepared = create_pr_worktree(
-            clone, slug, number, pull.base.ref, target / "wt", title=pull.title or ""
-        )
+        prepared = create_pr_worktree(clone, slug, number, pull.base.ref, target / "wt")
         err_console.print(f"  worktree from {clone}  (detached at {prepared.head_sha[:7]})")
         err_console.print(f"  base {pull.base.ref} @ {prepared.base_sha[:7]}")
         built = asyncio.run(

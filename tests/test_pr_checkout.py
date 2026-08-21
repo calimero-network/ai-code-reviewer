@@ -7,7 +7,6 @@ test touches the network.
 
 from __future__ import annotations
 
-import json
 import subprocess
 
 import pytest
@@ -61,7 +60,6 @@ def isolated_cache(tmp_path, monkeypatch):
     """Never read or write the real ~/.cache/ai-reviewer during tests."""
     cache = tmp_path / "cache"
     monkeypatch.setattr(pr_checkout, "CLONE_CACHE", cache)
-    monkeypatch.setattr(pr_checkout, "CLONE_INDEX", cache / "clones.json")
     return cache
 
 
@@ -143,40 +141,6 @@ def test_resolve_clone_ignores_a_clone_of_a_different_repo(
     assert resolved.is_relative_to(tmp_path / "cache")
 
 
-def test_repo_path_is_used_and_remembered(clone, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-
-    assert resolve_clone("acme/widget", repo_path=str(clone)) == clone.resolve()
-
-    index = json.loads((tmp_path / "cache" / "clones.json").read_text())
-    assert index["acme/widget"] == str(clone.resolve())
-
-
-def test_a_remembered_path_is_reused_without_repo_path(clone, tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    resolve_clone("acme/widget", repo_path=str(clone))
-
-    # If the remembered path were ever ignored, this would fall through to a
-    # real clone attempt and fail loudly rather than passing by accident.
-    monkeypatch.setattr(pr_checkout, "_GITHUB_URL", str(tmp_path / "unreachable"))
-    assert resolve_clone("acme/widget") == clone.resolve()
-
-
-def test_a_stale_remembered_path_falls_through_to_the_cache(
-    tmp_path,
-    origin,  # noqa: ARG001 - present so the clone source exists on disk
-    monkeypatch,
-):
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(pr_checkout, "_GITHUB_URL", str(tmp_path / "origin"))
-    pr_checkout._remember("acme/widget", tmp_path / "gone")
-
-    resolved = resolve_clone("acme/widget")
-
-    assert resolved == tmp_path / "cache" / "acme" / "widget"
-    assert (resolved / ".git").exists()
-
-
 def test_repo_path_pointing_at_the_wrong_repo_is_rejected(tmp_path, monkeypatch):
     wrong = tmp_path / "wrong"
     wrong.mkdir()
@@ -248,13 +212,6 @@ def test_remote_slug_reads_every_url_form(tmp_path, url, expected):
     _git(repo, "remote", "add", "origin", url)
 
     assert pr_checkout._remote_slug(repo) == expected
-
-
-def test_load_index_ignores_non_dict_json():
-    pr_checkout.CLONE_INDEX.parent.mkdir(parents=True, exist_ok=True)
-    pr_checkout.CLONE_INDEX.write_text("[1, 2, 3]")
-
-    assert pr_checkout._load_index() == {}
 
 
 def _open_pr(origin_bare, tmp_path, number: int = 42) -> None:
@@ -364,7 +321,6 @@ def test_prepared_pr_round_trips_through_json(tmp_path):
     prepared = PreparedPR(
         repo="acme/widget",
         number=42,
-        title="fix: things",
         clone="/clones/widget",
         root="/tmp/s/wt",
         base_sha="b" * 40,

@@ -222,13 +222,17 @@ def build_local_context(
     languages = sorted(
         {lang for p in files if (lang := _LANGUAGE_BY_SUFFIX.get(Path(p).suffix.lower()))}
     )
+    meta = pr or PRMeta(
+        repo=Path(root).name,
+        number=0,
+        title="Local changes",
+        body="Uncommitted work reviewed before a pull request exists.",
+    )
     return ReviewContext(
-        repo_name=pr.repo.split("/")[-1] if pr else Path(root).name,
-        pr_number=pr.number if pr else 0,
-        pr_title=pr.title if pr else "Local changes",
-        pr_description=(
-            pr.body if pr else "Uncommitted work reviewed before a pull request exists."
-        ),
+        repo_name=meta.repo.split("/")[-1],
+        pr_number=meta.number,
+        pr_title=meta.title,
+        pr_description=meta.body,
         base_branch=_current_branch(Path(root)),
         head_branch=_current_branch(Path(root)),
         author="local",
