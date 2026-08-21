@@ -383,3 +383,17 @@ def test_the_plugin_version_tracks_the_package_version():
     plugin = json.loads((root / ".claude/.claude-plugin/plugin.json").read_text())
 
     assert plugin["version"] == declared
+
+
+def test_the_reported_version_is_the_packaged_one():
+    """--version answers "am I current?", so a hardcoded copy that drifts is worse
+    than no answer. It had already fallen a release behind once."""
+    import re
+
+    from ai_reviewer import __version__
+
+    declared = re.search(
+        r'^version = "([^"]+)"', (_repo_root() / "pyproject.toml").read_text(), re.M
+    ).group(1)
+
+    assert __version__ == declared
