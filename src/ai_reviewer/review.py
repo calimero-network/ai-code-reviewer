@@ -1662,6 +1662,7 @@ async def build_agent_prompts(
     num_agents: int = 3,
     anthropic_cfg: AnthropicApiConfig | None = None,
     config: Any | None = None,
+    pr_meta: Any | None = None,
 ) -> dict[str, dict[str, str]]:
     """Build one self-contained review prompt per agent profile, no LLM calls.
 
@@ -1690,8 +1691,8 @@ async def build_agent_prompts(
         files = filter_by_ignore_patterns(files, ignore)
         diff = filter_diff_by_ignore_patterns(diff, ignore)
 
-    context = build_local_context(root, diff, files)
-    pr = build_local_pr(root, staged=staged, base=base)
+    context = build_local_context(root, diff, files, pr=pr_meta)
+    pr = build_local_pr(root, staged=staged, base=base, pr=pr_meta)
 
     pr_type, pr_size = classify_pr(list(files.keys()), context.additions, context.deletions)
     session = ReviewSession(

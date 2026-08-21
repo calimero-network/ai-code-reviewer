@@ -322,6 +322,65 @@ class TestCLIConvergenceGate:
             mock_gh.post_review.assert_not_called()
             mock_gh.resolve_fixed_comments.assert_not_called()
 
+    def test_cli_skips_doc_review_too_when_converged(self):
+        """The skip must short-circuit before doc review - it is a post too."""
+        from datetime import datetime
+
+        from ai_reviewer.cli import review_pr_async
+        from ai_reviewer.models.review import ConsolidatedReview
+
+        review = ConsolidatedReview(
+            id="r1",
+            created_at=datetime.now(),
+            repo="test/repo",
+            pr_number=42,
+            findings=[_finding()],
+            summary="One issue",
+            agent_count=1,
+            review_quality_score=0.9,
+            total_review_time_ms=1000,
+        )
+
+        converged_delta = ReviewDelta(
+            new_findings=[],
+            fixed_findings=[],
+            open_findings=[_finding()],
+            previous_comments=[_prev_comment(id=i) for i in range(5)],
+        )
+
+        mock_pr = MagicMock()
+        mock_pr.head.sha = "abc123"
+
+        with (
+            patch("ai_reviewer.cli.load_config") as mock_load,
+            patch("ai_reviewer.cli.validate_config", return_value=[]),
+            patch("ai_reviewer.cli.run_review", return_value=review),
+            patch("ai_reviewer.cli.GitHubClient") as mock_gh_cls,
+            patch("ai_reviewer.cli._run_doc_review") as mock_doc_review,
+        ):
+            mock_config = MagicMock()
+            mock_load.return_value = mock_config
+
+            mock_gh = MagicMock()
+            mock_gh_cls.return_value = mock_gh
+            mock_gh.get_pull_request.return_value = mock_pr
+            mock_gh.get_review_metadata.return_value = None
+            mock_gh.compute_review_delta.return_value = converged_delta
+
+            import asyncio
+
+            asyncio.run(
+                review_pr_async(
+                    repo="test/repo",
+                    pr_number=42,
+                    output="github",
+                    force_review=False,
+                )
+            )
+
+            mock_gh.post_review.assert_not_called()
+            mock_doc_review.assert_not_called()
+
     def test_cli_posts_when_force_review_overrides_convergence(self):
         """When --force-review is set, posting proceeds even if converged."""
         from datetime import datetime

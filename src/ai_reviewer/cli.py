@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -22,28 +23,36 @@ from ai_reviewer.config import (
     load_config,
     validate_config,
 )
+from ai_reviewer.context.local_source import PRMeta
+from ai_reviewer.context.pr_checkout import (
+    PreparedPR,
+    create_pr_worktree,
+    parse_pr_target,
+    remove_pr_worktree,
+    resolve_clone,
+)
 from ai_reviewer.docs.analyzer import DocAnalyzer, format_doc_comment
 from ai_reviewer.docs.updater import run_doc_update
 from ai_reviewer.github.client import (
     GitHubClient,
     ReviewMeta,
-    estimate_review_count,
-    is_convergence_all_clear,
     lgtm_placeholder_review,
     should_skip_before_agents,
-    should_skip_review,
 )
 from ai_reviewer.github.formatter import (
     GitHubFormatter,
     format_local_report,
     format_review_as_json,
 )
+from ai_reviewer.github.publish import publish_review
 from ai_reviewer.github.webhook import create_webhook_app, set_review_handler
 from ai_reviewer.models.review import ConsolidatedReview
 from ai_reviewer.review import build_agent_prompts, consolidate_agent_findings, review_local
 from ai_reviewer.review import review_pr as run_review
 
 console = Console()
+# The reviewer subagents parse stdout brief lines; preparation progress must not land there.
+err_console = Console(stderr=True)
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -53,6 +62,31 @@ def setup_logging(verbose: bool = False) -> None:
         level=level,
         format="%(message)s",
         handlers=[RichHandler(console=console, rich_tracebacks=True)],
+    )
+
+
+def github_token(config: Config) -> str:
+    """The token to post with, falling back to the gh CLI's own credential.
+
+    A developer machine usually has `gh auth login` and no GITHUB_TOKEN.
+    """
+    if config.github.token:
+        return config.github.token
+    try:
+        proc = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, check=False)
+        token = proc.stdout.strip()
+    except FileNotFoundError:
+        token = ""
+    if not token:
+        raise click.ClickException("no GitHub token: set GITHUB_TOKEN, or run `gh auth login`")
+    return token
+
+
+def _github_client(config: Config) -> GitHubClient:
+    """Without extra_reviewer_users the repo's bot identity is not an AI reviewer
+    here, so everything it already posted is invisible and gets posted again."""
+    return GitHubClient(
+        github_token(config), extra_reviewer_users=config.github.extra_reviewer_users
     )
 
 
@@ -376,131 +410,22 @@ async def review_pr_async(
             raise click.ClickException(
                 "--output github requires a valid GitHub token and accessible PR"
             )
-        formatter = GitHubFormatter(reviewer_name)
-        current_sha = pr.head.sha
-
-        # Compute delta from previous reviews
-        console.print("🔄 Checking for previous review comments...")
-        meta_review_count = (meta.review_count + 1) if meta is not None else None
-        delta = gh.compute_review_delta(pr, review.findings, review_count=meta_review_count)
-
-        # Show delta summary
-        if delta.previous_comments:
-            console.print(
-                f"   Found {len(delta.previous_comments)} previous comments: "
-                f"[green]{len(delta.fixed_findings)} fixed[/green], "
-                f"[yellow]{len(delta.open_findings)} open[/yellow], "
-                f"[cyan]{len(delta.new_findings)} new[/cyan]"
-            )
-        else:
-            console.print("   No previous review comments found (first run)")
-
-        # Accurate review count: prefer metadata, fall back to heuristic
-        review_count: int
-        if meta_review_count is not None:
-            review_count = meta_review_count
-        else:
-            review_count = estimate_review_count(delta)
-
-        # Convergence gate: skip posting when findings are unchanged
-        if delta.previous_comments and not force_review:
-            if should_skip_review(review_count, delta):
-                console.print(
-                    "[dim]⏭️  Findings unchanged since last review — skipping post "
-                    "(use --force-review to override)[/dim]"
-                )
-                return
-        elif force_review and delta.previous_comments:
-            console.print("[dim]⚡ --force-review: bypassing convergence check[/dim]")
-
-        # Build metadata to embed in the review comment
-        finding_hashes = [f.finding_hash for f in review.findings]
-        new_meta = ReviewMeta.build(
-            commit_sha=current_sha,
-            review_count=review_count,
-            finding_hashes=finding_hashes,
+        result = publish_review(
+            gh=gh,
+            pr=pr,
+            review=review,
+            config=config,
+            meta=meta,
+            reviewer_name=reviewer_name,
+            force_review=force_review,
+            dry_run=dry_run,
+            allow_approve=allow_approve,
+            emit=console.print,
         )
-
-        all_clear = is_convergence_all_clear(review, delta)
-
-        if dry_run:
-            console.print("\n[yellow]Dry run - not posting to GitHub[/yellow]")
-            if all_clear:
-                print(formatter.format_all_clear(review, delta, meta=new_meta))
-            elif delta.previous_comments:
-                print(formatter.format_review_with_delta(review, delta, meta=new_meta))
-            else:
-                print(formatter.format_review(review, meta=new_meta))
-        else:
-            max_total = config.output.max_total_findings
-            max_per_file = config.output.max_findings_per_file
-
-            if all_clear:
-                # Explicit convergence verdict; never APPROVE unless policy opts in.
-                body = formatter.format_all_clear(review, delta, meta=new_meta)
-                auto_approve = config.review_policy.auto_approve_if_no_findings
-                action = (
-                    "APPROVE"
-                    if (allow_approve and auto_approve and not review.failed_agents)
-                    else "COMMENT"
-                )
-                postable_inline_findings = []
-            else:
-                # Pre-filter inline findings so the compact body matches what GitHub will accept.
-                candidate_inline_findings = (
-                    delta.new_findings if delta.previous_comments else review.findings
-                )
-                postable_inline_findings = gh.get_postable_inline_findings(
-                    pr,
-                    inline_findings=candidate_inline_findings,
-                    max_total=max_total,
-                    max_per_file=max_per_file,
-                )
-                use_compact_body = len(postable_inline_findings) > 0
-
-                if delta.previous_comments:
-                    body = (
-                        formatter.format_review_with_delta_compact(
-                            review,
-                            delta,
-                            meta=new_meta,
-                            inline_new_findings=postable_inline_findings,
-                        )
-                        if use_compact_body
-                        else formatter.format_review_with_delta(review, delta, meta=new_meta)
-                    )
-                    action = formatter.get_review_action_with_delta(review, delta, allow_approve)
-                else:
-                    body = (
-                        formatter.format_review_compact(
-                            review,
-                            meta=new_meta,
-                            inline_findings=postable_inline_findings,
-                        )
-                        if use_compact_body
-                        else formatter.format_review(review, meta=new_meta)
-                    )
-                    action = formatter.get_review_action(review, allow_approve=allow_approve)
-
-            posted = gh.post_review(
-                pr,
-                body,
-                action,
-                inline_findings=postable_inline_findings or None,
-            )
-            console.print(f"📝 Posted review to GitHub ({action}, {posted} inline comments)")
-
-            if delta.fixed_findings:
-                console.print(f"✅ Marking {len(delta.fixed_findings)} fixed issues as resolved...")
-                resolved = gh.resolve_fixed_comments(pr, delta)
-                console.print(f"   Resolved {resolved} comments")
-
-            # Final status
-            if delta.all_issues_resolved:
-                console.print("\n[green]🎉 All issues resolved! Ready to merge.[/green]")
-            elif delta.previous_comments:
-                open_count = len(delta.open_findings) + len(delta.new_findings)
-                console.print(f"\n[yellow]⚠️  {open_count} issues remaining[/yellow]")
+        if dry_run and result.body:
+            print(result.body)
+        if result.skipped:
+            return
 
         # Doc review (runs for github output after the main review)
         _run_doc_review(
@@ -655,18 +580,44 @@ def review_local_command(
 @click.option("--staged", is_flag=True, help="Prompt for the index instead of the working tree")
 @click.option("--base", default=None, help="Prompt for base...HEAD")
 @click.option(
+    "--pr", "pr_target", default=None, help="Prompt for a pull request (URL or owner/repo#N)"
+)
+@click.option(
+    "--repo-path",
+    default=None,
+    type=click.Path(exists=True, file_okay=False),
+    help="Clone of the pull request's repository to take the worktree from",
+)
+@click.option(
     "--agents", type=click.IntRange(1, 5), default=3, help="How many reviewer profiles to emit"
 )
 @click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
 def prompts_command(
-    out_dir: str, staged: bool, base: str | None, agents: int, config_path: str | None
+    out_dir: str,
+    staged: bool,
+    base: str | None,
+    pr_target: str | None,
+    repo_path: str | None,
+    agents: int,
+    config_path: str | None,
 ) -> None:
     """Write one self-contained review prompt per reviewer profile.
 
     For orchestrating reviewer subagents from a coding session: this makes no LLM
-    calls, it only assembles the same prompts the API path would send.
+    calls, it only assembles the same prompts the API path would send. With --pr it
+    also prepares a worktree, which `publish` removes.
     """
+    if pr_target and (staged or base):
+        raise click.ClickException("--pr cannot be combined with --staged or --base")
+
     config = load_config(Path(config_path) if config_path else None)
+    target = Path(out_dir)
+
+    if pr_target:
+        target.mkdir(parents=True, exist_ok=True)
+        _prompts_for_pr(pr_target, repo_path, target, agents, config)
+        return
+
     try:
         built = asyncio.run(
             build_agent_prompts(
@@ -681,11 +632,59 @@ def prompts_command(
     except Exception as e:  # noqa: BLE001
         console.print(f"[red]Error:[/red] {e}")
         sys.exit(1)
-    target = Path(out_dir)
     target.mkdir(parents=True, exist_ok=True)
+    _write_briefs(built, target)
+
+
+def _write_briefs(built: dict, target: Path) -> None:
+    """Brief paths go to stdout; anything else must not, callers parse these lines."""
     for name, spec in built.items():
         (target / f"{name}.md").write_text(spec["prompt"])
         print(f"{name}\t{spec['model']}\t{target / f'{name}.md'}")
+
+
+def _prompts_for_pr(
+    pr_target: str, repo_path: str | None, target: Path, agents: int, config: Config
+) -> None:
+    """Prepare a pull request's worktree and write its briefs.
+
+    The worktree outlives this process: the reviewer subagents read it, and
+    ``publish`` removes it.
+    """
+    # Resolving the pull request and taking the worktree from it fail as readily as
+    # anything after, so the whole preparation reports rather than tracebacks.
+    prepared: PreparedPR | None = None
+    try:
+        slug, number = parse_pr_target(pr_target)
+        gh = _github_client(config)
+        pull = gh.get_pull_request(slug, number)
+
+        err_console.print(f"[bold]Preparing {slug}#{number}[/bold]")
+        err_console.print(f"  {pull.title}")
+
+        clone = resolve_clone(slug, repo_path)
+        prepared = create_pr_worktree(clone, slug, number, pull.base.ref, target / "wt")
+        err_console.print(f"  worktree from {clone}  (detached at {prepared.head_sha[:7]})")
+        err_console.print(f"  base {pull.base.ref} @ {prepared.base_sha[:7]}")
+        built = asyncio.run(
+            build_agent_prompts(
+                root=prepared.root,
+                base=prepared.base_sha,
+                num_agents=agents,
+                anthropic_cfg=config.anthropic,
+                config=config,
+                pr_meta=PRMeta(
+                    repo=slug, number=number, title=pull.title or "", body=pull.body or ""
+                ),
+            )
+        )
+        prepared.write(target / "target.json")
+        _write_briefs(built, target)
+    except Exception as e:  # noqa: BLE001
+        if prepared is not None:
+            remove_pr_worktree(prepared)
+        err_console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
 
 
 @cli.command("consolidate")
@@ -743,6 +742,94 @@ def consolidate_command(
         print(json.dumps(format_review_as_json(review), indent=2))
     else:
         print(format_local_report(review, scope=scope_label(staged, base), show_all=show_all))
+
+
+@cli.command("publish")
+@click.argument("session_dir", type=click.Path(exists=True, file_okay=False))
+@click.option("--dry-run", is_flag=True, help="Print the review instead of posting it")
+@click.option("--all", "show_all", is_flag=True, help="Include suggestions and nitpicks locally")
+@click.option("--force-review", is_flag=True, help="Post even when findings are unchanged")
+@click.option("--reviewer-name", default="AI Code Reviewer", help="Name shown in the review header")
+@click.option("--config", "config_path", type=click.Path(exists=True), help="Config file path")
+def publish_command(
+    session_dir: str,
+    dry_run: bool,
+    show_all: bool,
+    force_review: bool,
+    reviewer_name: str,
+    config_path: str | None,
+) -> None:
+    """Consolidate a prepared pull request review and post it to GitHub.
+
+    Takes the directory `prompts --pr` wrote: what was reviewed is read from
+    target.json rather than re-described, so the two phases cannot disagree.
+    """
+    from ai_reviewer.context.local_source import (
+        build_local_context,
+        changed_files,
+        local_diff,
+        read_repo_file,
+    )
+
+    session = Path(session_dir)
+    target_file = session / "target.json"
+    if not target_file.is_file():
+        raise click.ClickException(f"{target_file} not found - run `prompts --pr` first")
+    target = PreparedPR.read(target_file)
+
+    try:
+        findings_files = sorted(str(p) for p in (session / "out").glob("*.json"))
+        if not findings_files:
+            raise click.ClickException(f"no agent findings in {session / 'out'}")
+
+        config = load_config(Path(config_path) if config_path else None)
+
+        diff = local_diff(target.root, base=target.base_sha)
+        reviewed = build_local_context(
+            target.root, diff, changed_files(target.root, base=target.base_sha)
+        )
+        review = consolidate_agent_findings(
+            findings_files,
+            repo=target.repo,
+            config=config,
+            read_file=lambda path: read_repo_file(target.root, path),
+            total_lines=reviewed.additions + reviewed.deletions,
+        )
+        print(
+            format_local_report(review, scope=f"{target.repo}#{target.number}", show_all=show_all)
+        )
+
+        gh = _github_client(config)
+        pull = gh.get_pull_request(target.repo, target.number)
+        result = publish_review(
+            gh=gh,
+            pr=pull,
+            review=review,
+            config=config,
+            meta=gh.get_review_metadata(pull),
+            reviewer_name=reviewer_name,
+            force_review=force_review,
+            dry_run=dry_run,
+            # This posts under a person's GitHub identity, so it never approves for them.
+            allow_approve=False,
+            emit=console.print,
+        )
+        if result.posted:
+            # The session quotes this link verbatim, so it goes out unwrapped: the
+            # rich console would fold a long owner/repo across lines.
+            print(f"🔗 {pull.html_url}")
+        if dry_run and result.body:
+            print(result.body)
+    except click.ClickException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        console.print(f"[red]Error:[/red] {e}")
+        sys.exit(1)
+    finally:
+        # A dry run is a rehearsal: keep the worktree so the real post needs no refetch.
+        # Every other exit from here on - success, ClickException, or any other error - removes it.
+        if not dry_run:
+            remove_pr_worktree(target)
 
 
 @cli.command("update-docs")

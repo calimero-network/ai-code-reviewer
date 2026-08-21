@@ -200,3 +200,48 @@ def test_read_repo_file_is_the_single_guarded_reader(repo):
     assert read_repo_file(str(repo), str(outside)) is None
     assert read_repo_file(str(repo), "../outside_secret.txt") is None
     assert read_repo_file(str(repo), "does_not_exist.py") is None
+
+
+def test_build_local_context_defaults_to_the_working_tree_wording(repo):
+    from ai_reviewer.context.local_source import build_local_context
+
+    context = build_local_context(str(repo), "", {})
+
+    assert context.pr_title == "Local changes"
+    assert context.pr_number == 0
+    assert context.repo_name == repo.name
+
+
+def test_build_local_context_uses_the_pull_request_when_given_one(repo):
+    """A worktree is named for the session directory, not the repository, so the
+    repo name has to come from the pull request too."""
+    from ai_reviewer.context.local_source import PRMeta, build_local_context
+
+    meta = PRMeta(repo="acme/widget", number=42, title="fix: the thing", body="Because.")
+
+    context = build_local_context(str(repo), "", {}, pr=meta)
+
+    assert context.repo_name == "widget"
+    assert context.pr_number == 42
+    assert context.pr_title == "fix: the thing"
+    assert context.pr_description == "Because."
+
+
+def test_build_local_pr_carries_the_title_and_body(repo):
+    from ai_reviewer.context.local_source import PRMeta, build_local_pr
+
+    meta = PRMeta(repo="acme/widget", number=42, title="fix: the thing", body="Because.")
+
+    pr = build_local_pr(str(repo), pr=meta)
+
+    assert pr.title == "fix: the thing"
+    assert pr.body == "Because."
+
+
+def test_build_local_pr_without_a_pull_request_is_unchanged(repo):
+    from ai_reviewer.context.local_source import build_local_pr
+
+    pr = build_local_pr(str(repo))
+
+    assert pr.title == "Local review of the working tree"
+    assert pr.body == ""

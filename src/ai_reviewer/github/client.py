@@ -108,6 +108,7 @@ def compute_findings_hash(finding_hashes: list[str]) -> str:
 
 
 _REVIEW_META_RE = re.compile(r"<!-- ai-reviewer-meta: ({.*?}) -->")
+_FINDING_ID_RE = re.compile(r"<!-- ai-reviewer-id: ([a-f0-9]{12}) -->")
 
 
 @dataclass
@@ -498,6 +499,11 @@ class GitHubClient:
                 self._allowed_users = self.AI_REVIEWER_USERS | self._extra_reviewer_users
         return self._allowed_users
 
+    def _bot_authors(self) -> set[str]:
+        """Logins that are always a bot, unlike ``_get_allowed_users`` which also
+        unions in the authenticated user - a person on the subagent-driven path."""
+        return self.AI_REVIEWER_USERS | self._extra_reviewer_users
+
     def get_repo(self, repo_name: str) -> Repository:
         """Get a repository by name.
 
@@ -866,6 +872,7 @@ class GitHubClient:
         returning stale metadata from a much earlier review run.
         """
         allowed_users = self._get_allowed_users()
+        bot_authors = self._bot_authors()
         try:
             reviews = list(pr.get_reviews())
         except Exception as e:
@@ -885,6 +892,11 @@ class GitHubClient:
                     meta.review_count,
                 )
                 return meta
+            if review.user.login not in bot_authors:
+                # A person's own ordinary review, on the path where the reviewer
+                # posts under their identity. Theirs is not the legacy-format case
+                # the stop below guards, so keep looking.
+                continue
             logger.debug(
                 "Most recent bot review (id=%s) has no metadata; not searching older reviews",
                 review.id,
@@ -904,6 +916,8 @@ class GitHubClient:
                         meta.review_count,
                     )
                     return meta
+                if comment.user.login not in bot_authors:
+                    continue
                 logger.debug(
                     "Most recent bot issue comment (id=%s) has no metadata; not searching older comments",
                     comment.id,
@@ -992,9 +1006,16 @@ class GitHubClient:
             comment: GitHub review comment
 
         Returns:
-            Parsed comment or None if not parseable
+            Parsed comment, or None when it is not one of ours
         """
         body = comment.body
+
+        # The marker is what makes a comment ours; the author is not, because the
+        # token can belong to a person whose own review comments must never match.
+        hash_match = _FINDING_ID_RE.search(body)
+        if not hash_match:
+            return None
+        finding_hash = hash_match.group(1)
 
         # Extract severity from emoji
         severity_map = {
@@ -1013,10 +1034,6 @@ class GitHubClient:
         # Extract title from **Title** pattern
         title_match = re.search(r"\*\*([^*]+)\*\*", body)
         title = title_match.group(1) if title_match else "Unknown Issue"
-
-        # Extract embedded hash for stable cross-run matching
-        hash_match = re.search(r"<!-- ai-reviewer-id: ([a-f0-9]{12}) -->", body)
-        finding_hash = hash_match.group(1) if hash_match else None
 
         return PreviousComment(
             id=comment.id,

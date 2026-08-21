@@ -47,6 +47,16 @@ class LocalPR:
     head: _Head
 
 
+@dataclass(frozen=True)
+class PRMeta:
+    """The pull request a local review stands in for, when there is one."""
+
+    repo: str
+    number: int
+    title: str
+    body: str
+
+
 @dataclass
 class _Contents:
     content: str
@@ -195,8 +205,14 @@ def _new_file_diff(root: Path, path: str) -> str:
     return proc.stdout
 
 
-def build_local_context(root: str, diff: str, files: dict[str, str]) -> ReviewContext:
-    """A ReviewContext for a diff that has no pull request behind it."""
+def build_local_context(
+    root: str, diff: str, files: dict[str, str], *, pr: PRMeta | None = None
+) -> ReviewContext:
+    """A ReviewContext for a diff, with or without a pull request behind it.
+
+    ``repo_name`` comes from *pr* when there is one: a pull request is reviewed in
+    a worktree named for the session directory, not for the repository.
+    """
     additions = sum(
         1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++")
     )
@@ -206,11 +222,17 @@ def build_local_context(root: str, diff: str, files: dict[str, str]) -> ReviewCo
     languages = sorted(
         {lang for p in files if (lang := _LANGUAGE_BY_SUFFIX.get(Path(p).suffix.lower()))}
     )
+    meta = pr or PRMeta(
+        repo=Path(root).name,
+        number=0,
+        title="Local changes",
+        body="Uncommitted work reviewed before a pull request exists.",
+    )
     return ReviewContext(
-        repo_name=Path(root).name,
-        pr_number=0,
-        pr_title="Local changes",
-        pr_description="Uncommitted work reviewed before a pull request exists.",
+        repo_name=meta.repo.split("/")[-1],
+        pr_number=meta.number,
+        pr_title=meta.title,
+        pr_description=meta.body,
         base_branch=_current_branch(Path(root)),
         head_branch=_current_branch(Path(root)),
         author="local",
@@ -239,11 +261,13 @@ def load_local_repo_config(root: str) -> dict | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def build_local_pr(root: str, staged: bool = False, base: str | None = None) -> LocalPR:
+def build_local_pr(
+    root: str, staged: bool = False, base: str | None = None, *, pr: PRMeta | None = None
+) -> LocalPR:
     """A PullRequest stand-in describing what is being reviewed."""
     return LocalPR(
-        title=f"Local review of {scope_label(staged, base)}",
-        body="",
+        title=pr.title if pr else f"Local review of {scope_label(staged, base)}",
+        body=pr.body if pr else "",
         head=_Head(sha=_head_sha(Path(root))),
     )
 

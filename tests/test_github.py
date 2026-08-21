@@ -868,9 +868,11 @@ class TestResolveFixedComments:
 
         mock_pr = MagicMock()
 
-        # Original finding comment
+        # Original finding comment, marked the way every posted finding is
         original_comment = MagicMock()
-        original_comment.body = "🔴 **SQL Injection**\n\nUser input in query"
+        original_comment.body = (
+            "🔴 **SQL Injection**\n\nUser input in query\n\n<!-- ai-reviewer-id: abcdef123456 -->"
+        )
         original_comment.user.login = "github-actions[bot]"
         original_comment.id = 100
         original_comment.path = "test.py"
@@ -898,6 +900,31 @@ class TestResolveFixedComments:
         assert len(comments) == 1
         assert comments[0].id == 100
         assert "SQL Injection" in comments[0].title
+
+    def test_a_resolved_reply_is_excluded_even_when_it_carries_the_marker(self):
+        """The two guards must stand on their own: GitHub's quote-reply copies the
+        original body, marker and all, so the marker gate does not cover this."""
+        from ai_reviewer.github.client import GitHubClient
+
+        mock_pr = MagicMock()
+        quoting_reply = MagicMock()
+        quoting_reply.body = (
+            "✅ **No longer detected** - This issue was not re-detected after the "
+            "latest changes.\n\n> 🔴 **SQL Injection**\n> \n"
+            "> <!-- ai-reviewer-id: abcdef123456 -->"
+        )
+        quoting_reply.user.login = "github-actions[bot]"
+        quoting_reply.id = 101
+        quoting_reply.path = "test.py"
+        quoting_reply.line = 10
+        quoting_reply.original_line = 10
+        mock_pr.get_review_comments.return_value = [quoting_reply]
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            comments = client.get_previous_review_comments(mock_pr)
+
+        assert comments == []
 
     def test_get_previous_review_comments_excludes_human_comments(self):
         """Test that human comments (even with AI-like format) are never processed."""
@@ -2354,6 +2381,58 @@ class TestGetReviewMetadata:
         assert result.commit_sha == "abc123"
         assert result.review_count == 2
 
+    def test_a_persons_own_review_does_not_hide_the_ai_metadata_behind_it(self):
+        """On the subagent path the reviewer posts under a person's identity, so that
+        login is an allowed user. Their ordinary review carries no metadata, and
+        stopping there would drop the real count and coarsen the convergence gate."""
+        from ai_reviewer.github.client import GitHubClient
+
+        meta_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"abc123","review_count":4,'
+            '"timestamp":"2026-03-27T12:00:00Z","findings_hash":"deadbeef"} -->'
+        )
+        ai_review = MagicMock(body=f"AI review\n\n{meta_tag}")
+        ai_review.user.login = "alice"
+        human_review = MagicMock(body="looks good, one nit about naming")
+        human_review.user.login = "alice"
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = [ai_review, human_review]
+        mock_pr.get_issue_comments.return_value = MagicMock(reversed=[])
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._allowed_users = {"alice"}
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is not None
+        assert result.review_count == 4
+
+    def test_a_persons_own_issue_comment_does_not_hide_the_ai_metadata_behind_it(self):
+        """Same exposure on the issue-comment fallback."""
+        from ai_reviewer.github.client import GitHubClient
+
+        meta_tag = (
+            '<!-- ai-reviewer-meta: {"commit_sha":"abc123","review_count":5,'
+            '"timestamp":"2026-03-27T12:00:00Z","findings_hash":"deadbeef"} -->'
+        )
+        ai_comment = MagicMock(body=f"AI review\n\n{meta_tag}")
+        ai_comment.user.login = "alice"
+        human_comment = MagicMock(body="bumping this")
+        human_comment.user.login = "alice"
+
+        mock_pr = MagicMock()
+        mock_pr.get_reviews.return_value = []
+        mock_pr.get_issue_comments.return_value = MagicMock(reversed=[human_comment, ai_comment])
+
+        with patch("ai_reviewer.github.client.Github"):
+            client = GitHubClient(token="test-token")
+            client._allowed_users = {"alice"}
+            result = client.get_review_metadata(mock_pr)
+
+        assert result is not None
+        assert result.review_count == 5
+
     def test_returns_none_for_legacy_reviews_without_metadata(self):
         """Returns None when bot reviews have no metadata tag."""
         from ai_reviewer.github.client import GitHubClient
@@ -2993,3 +3072,55 @@ class TestReviewConcurrencyCap:
         release_first.set()
         await asyncio.gather(t1, t2)
         assert order == ["first:start", "first:end", "second:start", "second:end"]
+
+
+class TestPreviousCommentsRequireTheMarker:
+    """Only comments carrying the ai-reviewer-id marker count as previous findings.
+
+    ``publish`` posts under a real person's identity, so that person is in the
+    allowed set: an unmarked comment of theirs would otherwise be replied to,
+    reacted to and thread-resolved as if the reviewer had written it.
+    """
+
+    @staticmethod
+    def _comment(body: str, login: str = "alice", comment_id: int = 300):
+        comment = MagicMock()
+        comment.body = body
+        comment.user.login = login
+        comment.id = comment_id
+        comment.path = "src/foo.py"
+        comment.line = 5
+        comment.original_line = 5
+        return comment
+
+    def _previous(self, comment):
+        from ai_reviewer.github.client import GitHubClient
+
+        pr = MagicMock()
+        pr.number = 7
+        pr.get_review_comments.return_value = [comment]
+        with patch("ai_reviewer.github.client.Github") as github_cls:
+            github_cls.return_value.get_user.return_value.login = "alice"
+            client = GitHubClient(token="test-token")
+            return client.get_previous_review_comments(pr)
+
+    def test_a_humans_own_review_comment_is_not_a_previous_finding(self):
+        comment = self._comment("This loop reallocates on every pass, can we hoist it?")
+
+        assert self._previous(comment) == []
+
+    def test_a_humans_comment_shaped_like_a_finding_is_not_a_previous_finding(self):
+        comment = self._comment("🔴 **Unchecked index**\n\nThis will panic on an empty vec.")
+
+        assert self._previous(comment) == []
+
+    def test_a_marked_comment_is_still_a_previous_finding(self):
+        comment = self._comment(
+            "🔴 **Unchecked index**\n\nThis will panic.\n\n<!-- ai-reviewer-id: 0123456789ab -->"
+        )
+
+        previous = self._previous(comment)
+
+        assert len(previous) == 1
+        assert previous[0].finding_hash == "0123456789ab"
+        assert previous[0].title == "Unchecked index"
