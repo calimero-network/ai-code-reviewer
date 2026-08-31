@@ -30,7 +30,11 @@ from difflib import SequenceMatcher
 from typing import Any
 from uuid import uuid4
 
-from ai_reviewer.agents.anthropic_client import INCOMPLETE_SUMMARY_MARKERS, AnthropicClient
+from ai_reviewer.agents.anthropic_client import (
+    INCOMPLETE_SUMMARY_MARKERS,
+    AnthropicClient,
+    is_transient_infra_error,
+)
 from ai_reviewer.agents.base import ReviewAgent
 from ai_reviewer.agents.patterns import PatternsAgent, StyleAgent
 from ai_reviewer.agents.performance import LogicAgent, PerformanceAgent
@@ -868,6 +872,7 @@ def aggregate_findings(
     consolidated: list[ConsolidatedFinding] = []
     summaries = []
     failed_agents = []
+    failed_summaries = []
 
     # Flatten to (agent_name, raw) and collect summaries
     tagged: list[tuple[str, dict]] = []
@@ -880,6 +885,7 @@ def aggregate_findings(
             or any(marker in summary for marker in INCOMPLETE_SUMMARY_MARKERS)
         ):
             failed_agents.append(agent_name)
+            failed_summaries.append(summary)
 
         for raw in findings:
             tagged.append((agent_name, raw))
@@ -965,6 +971,12 @@ def aggregate_findings(
     total_agents = len(all_findings)
     quality_score, score_breakdown = compute_quality_score(consolidated, total_agents, total_lines)
 
+    # Conservative: a single non-infra failure (parse bug, auth) makes the whole
+    # run non-transient, since retrying it would fail the same way.
+    transient_failure = bool(failed_summaries) and all(
+        is_transient_infra_error(s) for s in failed_summaries
+    )
+
     return ConsolidatedReview(
         id=f"review-{uuid4().hex[:8]}",
         created_at=datetime.now(),
@@ -976,6 +988,7 @@ def aggregate_findings(
         review_quality_score=quality_score,
         total_review_time_ms=0,
         failed_agents=failed_agents,
+        transient_failure=transient_failure,
         score_breakdown=score_breakdown,
     )
 
@@ -1462,6 +1475,7 @@ async def _run_agent_sharded(
     merged: list[ReviewFinding] = []
     summaries: list[str] = []
     failed_labels: list[str] = []
+    failure_causes: list[str] = []
 
     pr_map_block = {"type": "text", "text": pr_map}
     for k, shard in enumerate(shards):
@@ -1508,12 +1522,14 @@ async def _run_agent_sharded(
         except Exception as e:  # noqa: BLE001
             logger.warning("Agent %s shard %d (%s) failed: %s", agent_name, k, shard.label, e)
             failed_labels.append(shard.label)
+            failure_causes.append(str(e))
             continue
         if any(marker in result.summary for marker in INCOMPLETE_SUMMARY_MARKERS):
             logger.warning(
                 "Agent %s shard %d (%s) returned incomplete review", agent_name, k, shard.label
             )
             failed_labels.append(shard.label)
+            failure_causes.append(result.summary)
             continue
         merged.extend(result.findings)
         summaries.append(result.summary)
@@ -1521,7 +1537,14 @@ async def _run_agent_sharded(
     if shards and len(failed_labels) == len(shards):
         if on_status:
             on_status(f"{agent_name}: FAILED")
-        return RuntimeError(f"all {len(shards)} shard(s) failed: {', '.join(failed_labels)}")
+        # Causes are surfaced in the message only when EVERY one is transient infra,
+        # so the whole-review retry decision cannot read a mixed failure as retriable.
+        detail = ""
+        if all(is_transient_infra_error(c) for c in failure_causes):
+            detail = f": {'; '.join(failure_causes)}"
+        return RuntimeError(
+            f"all {len(shards)} shard(s) failed: {', '.join(failed_labels)}{detail}"
+        )
 
     try:
         merged.extend(await _run_cross_shard_pass(client, pr_map, merged))

@@ -18,6 +18,18 @@ logger = logging.getLogger(__name__)
 
 _handler_lock = threading.Lock()
 
+# Comment author_association values that imply write access to the repo.
+_WRITE_ACCESS_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+
+
+class TransientInfraFailure(Exception):
+    """Raised instead of posting a partial caused purely by transient infra.
+
+    Only the queue path opts in (retry_transient=True): it has a Cloud Tasks retry
+    policy to fall back on, so retrying the whole review beats posting "Review
+    Incomplete". Paths without that backstop keep posting the honest partial.
+    """
+
 
 def _log_task_error(task: asyncio.Task) -> None:
     """Done-callback that logs exceptions from fire-and-forget async tasks."""
@@ -247,12 +259,18 @@ def _post_review_failed_notice(repo: str, pr_number: int) -> None:
         logger.exception("Failed to post review-could-not-complete notice: %s", e)
 
 
-async def run_review(repo: str, pr_number: int) -> None:
+async def run_review(repo: str, pr_number: int, retry_transient: bool = False) -> None:
     """Run the full review flow for a PR, reading config from the environment.
 
     Raises on infrastructure failure so callers (the Cloud Tasks worker) can
     decide whether to retry. The inline webhook path wraps this and swallows
     exceptions for best-effort fire-and-forget behavior.
+
+    retry_transient: when True, a review whose agents failed purely on transient
+        infra raises TransientInfraFailure *before* anything is posted, so the
+        caller can retry the whole review rather than post a partial. Only callers
+        that actually retry (the Cloud Tasks worker, on a non-final attempt) may
+        set it - otherwise the failure would be silent.
     """
     from ai_reviewer.cli import _run_doc_review
     from ai_reviewer.config import AnthropicApiConfig, Config, GitHubConfig, load_config
@@ -413,6 +431,16 @@ async def run_review(repo: str, pr_number: int) -> None:
             min_validation_agreement=min_agreement,
             config=webhook_config,
             dismissed=dismissed,
+        )
+
+    # Hoisted above every post below: a partial caused purely by transient infra is
+    # worth another whole run, and posting first would spam the PR with one
+    # "Review Incomplete" per attempt. transient_failure implies failed_agents, which
+    # is exactly what makes the formatter mark the review incomplete/partial.
+    if retry_transient and review.transient_failure:
+        raise TransientInfraFailure(
+            f"{len(review.failed_agents)} of {review.agent_count} agent(s) failed on "
+            f"transient infra: {', '.join(review.failed_agents)}"
         )
 
     # all_agents_failed is a terminal, non-retryable outcome: we ran, every agent
@@ -625,12 +653,26 @@ async def handle_pr_event(event: PREvent) -> None:
         logger.warning("No review handler configured")
 
 
+def _ack_comment(repo: str, pr_number: int, comment_id: int) -> None:
+    """Best-effort 👀 on an accepted /ai-review comment; never fails the trigger."""
+    from ai_reviewer.github.client import GitHubClient
+
+    try:
+        token = _resolve_github_token(repo)
+        if not token:
+            return
+        GitHubClient(token).add_issue_comment_reaction(repo, pr_number, comment_id, "eyes")
+    except Exception as e:  # noqa: BLE001
+        logger.warning("Could not react to /ai-review comment %s: %s", comment_id, e)
+
+
 async def _handle_issue_comment_event(payload: dict) -> None:
     """Handle issue_comment webhook events — trigger review on /ai-review command."""
     if payload.get("action") != "created":
         return
 
-    comment_body = payload.get("comment", {}).get("body", "").strip()
+    comment = payload.get("comment", {})
+    comment_body = comment.get("body", "").strip()
     if not comment_body.startswith("/ai-review"):
         return
 
@@ -639,10 +681,22 @@ async def _handle_issue_comment_event(payload: dict) -> None:
         logger.debug("Ignoring /ai-review on non-PR issue")
         return
 
+    # A review costs real money, so only users with write access may trigger one.
+    association = comment.get("author_association", "")
+    if association not in _WRITE_ACCESS_ASSOCIATIONS:
+        logger.debug(
+            "Ignoring /ai-review from %s (author_association=%s, no write access)",
+            comment.get("user", {}).get("login", "?"),
+            association or "?",
+        )
+        return
+
     repo = payload.get("repository", {}).get("full_name", "")
     pr_number = payload["issue"]["number"]
 
     logger.info(f"Triggering review via /ai-review comment on {repo} PR #{pr_number}")
+    if comment.get("id") is not None:
+        _ack_comment(repo, pr_number, comment["id"])
 
     if is_queue_enabled():
         # Comment payloads carry no head sha; /process-review resolves and
@@ -781,10 +835,26 @@ def create_webhook_app(webhook_secret: str | None = None) -> FastAPI:
 
         retry_count = _task_retry_count(request)
         max_attempts = _get_env_int("TASK_MAX_ATTEMPTS", 4)
+        is_final_attempt = retry_count >= max_attempts - 1
         try:
-            await run_review(repo, pr_number)
+            # Only a non-final attempt may defer a transient partial; the final one
+            # posts the honest notice so a failure is never silent.
+            await run_review(repo, pr_number, retry_transient=not is_final_attempt)
+        except TransientInfraFailure as e:
+            logger.warning(
+                "transient infra failure (529/connection) for %s PR #%d - returning 500 so "
+                "Cloud Tasks retries the whole review; attempt %d/%d: %s",
+                repo,
+                pr_number,
+                retry_count + 1,
+                max_attempts,
+                e,
+            )
+            raise HTTPException(
+                status_code=500, detail="transient infra failure, will retry"
+            ) from e
         except Exception as e:
-            if retry_count < max_attempts - 1:
+            if not is_final_attempt:
                 logger.error(
                     "Review job failed for %s PR #%d (attempt %d/%d): %s",
                     repo,

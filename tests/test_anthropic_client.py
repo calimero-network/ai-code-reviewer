@@ -1,3 +1,4 @@
+import time
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -1286,9 +1287,28 @@ async def test_create_message_connection_error_recovers_on_retry(monkeypatch):
     assert calls["n"] == 2
 
 
-def _overloaded_error() -> "ac.anthropic.APIStatusError":
-    resp = httpx.Response(529, request=httpx.Request("POST", "http://x"))
+def _overloaded_error(retry_after: str | None = None) -> "ac.anthropic.APIStatusError":
+    headers = {"retry-after": retry_after} if retry_after is not None else {}
+    resp = httpx.Response(529, headers=headers, request=httpx.Request("POST", "http://x"))
     return ac.anthropic.APIStatusError("Error code: 529 - Overloaded", response=resp, body=None)
+
+
+def _mid_stream_overloaded_error() -> "ac.anthropic.APIStatusError":
+    """An overload that lands after the stream opens.
+
+    The SSE `error` event rides in on an already-200 response, so the SDK builds a
+    plain APIStatusError with status_code 200 - the 529 never reaches the client.
+    """
+    resp = httpx.Response(200, request=httpx.Request("POST", "http://x"))
+    body = {"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}
+    return ac.anthropic.APIStatusError(f"{body}", response=resp, body=body)
+
+
+def _rate_limit_error() -> "ac.anthropic.APIStatusError":
+    resp = httpx.Response(429, request=httpx.Request("POST", "http://x"))
+    return ac.anthropic.RateLimitError(
+        "Error code: 429 - rate_limit_error", response=resp, body=None
+    )
 
 
 @pytest.mark.asyncio
@@ -1321,6 +1341,192 @@ async def test_create_message_bounds_overloaded_retries(monkeypatch):
         await client._create_message(model="claude-sonnet-5", max_tokens=8192)
 
     assert calls["n"] == total
+
+
+@pytest.mark.asyncio
+async def test_create_message_retries_mid_stream_overload(monkeypatch):
+    """An overload delivered as an SSE error event on a 200 is still retried.
+
+    This is how a real overload window arrives once streaming has started; keying
+    the retry off status_code alone let it re-raise on the first failure.
+    """
+    monkeypatch.setattr(ac.asyncio, "sleep", AsyncMock())
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    final = _fake_response('{"findings": [], "summary": "ok"}')
+    _, calls = _mock_stream_boundary(client, [_mid_stream_overloaded_error(), final])
+
+    result = await client._create_message(model="claude-sonnet-5", max_tokens=8192)
+
+    assert result is final
+    assert calls["n"] == 2
+
+
+def test_mid_stream_overload_classifies_as_transient_infra():
+    """The queue path must see a 200-wrapped overload as retriable infra, not a code bug."""
+    assert ac.is_transient_infra_error(_mid_stream_overloaded_error())
+
+
+def test_non_overload_status_error_is_not_transient():
+    """A 401 is a real failure - retrying the whole review would fail identically."""
+    resp = httpx.Response(401, request=httpx.Request("POST", "http://x"))
+    err = ac.anthropic.AuthenticationError("401 Unauthorized", response=resp, body=None)
+    assert not ac.is_transient_infra_error(err)
+
+
+def test_overloaded_backoff_covers_every_retry():
+    """The backoff tuple is indexed by retry number - too short would IndexError
+    on the last retry, turning a survivable overload into a crash."""
+    assert len(ac._OVERLOADED_BACKOFF_SECONDS) >= ac._OVERLOADED_MAX_RETRIES
+
+
+@pytest.mark.asyncio
+async def test_create_message_honors_retry_after_when_longer_than_backoff(monkeypatch):
+    """A retry-after longer than our backoff wins: retrying sooner than the server
+    says just burns an attempt."""
+    sleep = AsyncMock()
+    monkeypatch.setattr(ac.asyncio, "sleep", sleep)
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    final = _fake_response('{"findings": [], "summary": "ok"}')
+    _mock_stream_boundary(client, [_overloaded_error(retry_after="90"), final])
+
+    result = await client._create_message(model="claude-sonnet-5", max_tokens=8192)
+
+    assert result is final
+    sleep.assert_awaited_once_with(90.0)
+
+
+@pytest.mark.asyncio
+async def test_create_message_ignores_retry_after_shorter_than_backoff(monkeypatch):
+    """Our backoff floor holds when the server advises a shorter wait."""
+    sleep = AsyncMock()
+    monkeypatch.setattr(ac.asyncio, "sleep", sleep)
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    final = _fake_response('{"findings": [], "summary": "ok"}')
+    _mock_stream_boundary(client, [_overloaded_error(retry_after="1"), final])
+
+    await client._create_message(model="claude-sonnet-5", max_tokens=8192)
+
+    sleep.assert_awaited_once_with(ac._OVERLOADED_BACKOFF_SECONDS[0])
+
+
+@pytest.mark.asyncio
+async def test_create_message_ignores_unparseable_retry_after(monkeypatch):
+    """An HTTP-date (or junk) retry-after falls back to our backoff, not a crash."""
+    sleep = AsyncMock()
+    monkeypatch.setattr(ac.asyncio, "sleep", sleep)
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    final = _fake_response('{"findings": [], "summary": "ok"}')
+    _mock_stream_boundary(
+        client, [_overloaded_error(retry_after="Wed, 21 Oct 2026 07:28:00 GMT"), final]
+    )
+
+    await client._create_message(model="claude-sonnet-5", max_tokens=8192)
+
+    sleep.assert_awaited_once_with(ac._OVERLOADED_BACKOFF_SECONDS[0])
+
+
+@pytest.mark.asyncio
+async def test_create_message_retries_rate_limit_like_overloaded(monkeypatch):
+    """429 is transient server pressure too - retried on the same branch as 529."""
+    monkeypatch.setattr(ac.asyncio, "sleep", AsyncMock())
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    final = _fake_response('{"findings": [], "summary": "ok"}')
+    _, calls = _mock_stream_boundary(client, [_rate_limit_error(), final])
+
+    result = await client._create_message(model="claude-sonnet-5", max_tokens=8192)
+
+    assert result is final
+    assert calls["n"] == 2
+
+
+@pytest.mark.asyncio
+async def test_create_message_does_not_retry_non_retriable_status(monkeypatch):
+    """A 403 is not server pressure - it must propagate on attempt 1, not sleep."""
+    sleep = AsyncMock()
+    monkeypatch.setattr(ac.asyncio, "sleep", sleep)
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    resp = httpx.Response(403, request=httpx.Request("POST", "http://x"))
+    err = ac.anthropic.PermissionDeniedError("Error code: 403", response=resp, body=None)
+    _, calls = _mock_stream_boundary(client, [err])
+
+    with pytest.raises(ac.anthropic.APIStatusError):
+        await client._create_message(model="claude-sonnet-5", max_tokens=8192)
+
+    assert calls["n"] == 1
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_message_overloaded_retry_past_deadline_raises_timeout(monkeypatch):
+    """The deadline still bounds the longer backoffs: a retry that would cross it
+    raises TimeoutError, which run_review turns into DEADLINE_MARKER."""
+    sleep = AsyncMock()
+    monkeypatch.setattr(ac.asyncio, "sleep", sleep)
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    _mock_stream_boundary(client, [_overloaded_error()])
+
+    # 5s left, first backoff is 15s -> the retry cannot fit.
+    with pytest.raises(TimeoutError):
+        await client._create_message(
+            deadline=time.monotonic() + 5, model="claude-sonnet-5", max_tokens=8192
+        )
+
+    sleep.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_message_retry_after_past_deadline_raises_timeout(monkeypatch):
+    """A long retry-after is deadline-bounded like our own backoff."""
+    monkeypatch.setattr(ac.asyncio, "sleep", AsyncMock())
+    cfg = AnthropicApiConfig(api_key="sk-test", enable_prompt_caching=False)
+    client = AnthropicClient(cfg)
+    _mock_stream_boundary(client, [_overloaded_error(retry_after="600")])
+
+    with pytest.raises(TimeoutError):
+        await client._create_message(
+            deadline=time.monotonic() + 60, model="claude-sonnet-5", max_tokens=8192
+        )
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Error code: 529 - {'error': {'type': 'overloaded_error'}}",
+        "Error code: 429 - rate_limit_error",
+        "Connection error.",
+        f"Agent failed: {ac.DEADLINE_MARKER}",
+    ],
+)
+def test_is_transient_infra_error_recognizes_infra(value):
+    assert ac.is_transient_infra_error(value) is True
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "Agent failed: KeyError('file_path')",
+        ac.PARSE_ERROR_MARKER,
+        "401 Unauthorized",
+        "Review completed",
+    ],
+)
+def test_is_transient_infra_error_rejects_real_bugs(value):
+    assert ac.is_transient_infra_error(value) is False
+
+
+def test_is_transient_infra_error_accepts_exceptions():
+    """Exceptions classify identically to their stringified summaries."""
+    assert ac.is_transient_infra_error(_overloaded_error()) is True
+    assert ac.is_transient_infra_error(_rate_limit_error()) is True
+    assert ac.is_transient_infra_error(_api_connection_error()) is True
+    assert ac.is_transient_infra_error(_bad_request("Error code: 400 - bad")) is False
 
 
 @pytest.mark.asyncio

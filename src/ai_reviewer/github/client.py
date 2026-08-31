@@ -515,6 +515,13 @@ class GitHubClient:
         """
         return self._gh.get_repo(repo_name)
 
+    def add_issue_comment_reaction(
+        self, repo_name: str, issue_number: int, comment_id: int, content: str
+    ) -> None:
+        """React to an issue/PR comment. Raises on failure; callers decide if it matters."""
+        issue = self._gh.get_repo(repo_name).get_issue(issue_number)
+        issue.get_comment(comment_id).create_reaction(content)
+
     def get_pull_request(self, repo_name: str, pr_number: int) -> PullRequest:
         """Get a pull request.
 

@@ -82,6 +82,11 @@ class ConsolidatedReview:
     # Track failed agents
     failed_agents: list[str] = field(default_factory=list)
 
+    # True when there ARE agent failures and every one of them is transient infra
+    # (529/429/connection/deadline). Lets the queue path retry the whole review
+    # instead of posting a partial; a clean review is never transient_failure.
+    transient_failure: bool = False
+
     # Transparent score breakdown (populated by compute_quality_score)
     score_breakdown: ScoreBreakdown | None = None
 
