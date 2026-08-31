@@ -17,9 +17,9 @@ anthropic:
   max_combined_context_tokens: 80000
   per_file_max_bytes: 524288
   per_review_github_request_budget: 200
-  full_file_max_lines: 300      # changed files longer than this are sent as hunk excerpts; agents pull the rest via read_file
-  hunk_context_lines: 60        # lines of context kept around each diff hunk in excerpt mode
-  conventions_max_chars: 16000  # aggregate cap on the project-conventions block
+  full_file_max_lines: 300      # changed files longer than this are sent as hunk excerpts; agents pull the rest via read_file. Set to None to preserve old full-content behavior.
+  hunk_context_lines: 60        # lines of context kept around each diff hunk in excerpt mode; overlapping windows are merged. Neighbor files are capped to their first 40 lines.
+  conventions_max_chars: 16000  # aggregate cap on the project-conventions block; truncated on line boundary with [conventions truncated at N chars] note if exceeded
 
 # ============================================================================
 # GITHUB INTEGRATION

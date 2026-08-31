@@ -152,3 +152,8 @@ orchestrator:
 - `complete_simple(model, system, user, max_tokens, temperature)` → Lightweight completion with caching but no tools or schema; used for cross-review and other internal calls
 
 Both methods log token usage and support prompt caching when `enable_prompt_caching` is true.
+
+**Tool-use loop behavior:**
+- Before appending a new assistant turn, `thinking`/`redacted_thinking` blocks are stripped from the previous assistant turn, preserving only the most recent turn's thinking block across rounds
+- At 75% of the context circuit breaker (`_SOFT_FINALIZE_RATIO`), the loop soft-finalizes: tools are no longer offered and the model is forced to emit its final findings JSON immediately, logging `Context soft-finalize at X% of circuit limit`
+- At 100% of the circuit breaker or tool budget exhaustion, the loop hard-finalizes using the salvage mechanism
